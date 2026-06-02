@@ -1,0 +1,11 @@
+# build artifacts
+build/
+*.o
+# compiled binaries
+mirage
+mirage-posedump
+rayneo-bridge
+# logs / runtime
+*.log
+*.pid
+*.tar.gz
