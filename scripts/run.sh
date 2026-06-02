@@ -44,8 +44,10 @@ fi
 # Ensure the virtual displays exist (idempotent: skips any already present).
 # stop.sh tears them down on quit, so we recreate them on every launch -
 # otherwise the first start after a quit would have nothing to capture.
-# VR=120 gives the glasses a 120 Hz source; override with VR=… if needed.
-VR="${VR:-120}" bash "$HERE/scripts/setup-displays.sh" 2>&1 | sed 's/^/  [displays] /' || true
+# VR=60 caps each virtual screen's content refresh at 60 Hz: the glasses still
+# render the head-tracked view at native rate, only the captured source is 60.
+# With damage-driven capture, idle screens cost ~0 regardless. Override VR=… .
+VR="${VR:-60}" bash "$HERE/scripts/setup-displays.sh" 2>&1 | sed 's/^/  [displays] /' || true
 
 # Sweep every real window onto the arc (snapshotted; stop.sh --restore puts them
 # back). Non-fatal: if the sweep fails we still launch the renderer.

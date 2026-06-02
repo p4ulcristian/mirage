@@ -194,7 +194,8 @@ void render_frame(struct mirage *m, quat head) {
      * roll - see q_to_euler_ypr). Identity when yaw_gain=1 and roll_damp=1. */
     float yaw, pitch, roll;
     q_to_euler_ypr(head, &yaw, &pitch, &roll);
-    head = q_from_euler_ypr(yaw * m->cfg.yaw_gain, pitch, roll * m->cfg.roll_damp);
+    head = q_from_euler_ypr(yaw * m->cfg.yaw_gain, pitch * m->cfg.pitch_gain,
+                            roll * m->cfg.roll_damp);
 
     mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);

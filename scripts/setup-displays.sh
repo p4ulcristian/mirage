@@ -14,7 +14,7 @@
 set -euo pipefail
 
 VW=${VW:-1920}; VH=${VH:-1080}; VR=${VR:-60}; VSCALE=${VSCALE:-1}
-VCOUNT=${VCOUNT:-3}; VORIGIN=${VORIGIN:-8000}; VGAP=${VGAP:-200}
+VCOUNT=${VCOUNT:-6}; VORIGIN=${VORIGIN:-8000}; VGAP=${VGAP:-200}
 
 command -v hyprctl >/dev/null || { echo "hyprctl not found (need Hyprland)"; exit 1; }
 

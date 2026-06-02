@@ -73,6 +73,7 @@ typedef struct {
     float pose_mincutoff;       /* One-Euro cutoff at rest (Hz)          */
     float pose_beta;            /* One-Euro speed coupling               */
     float yaw_gain;             /* head-yaw amplification (1 = 1:1)      */
+    float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
 
     /* identification */
