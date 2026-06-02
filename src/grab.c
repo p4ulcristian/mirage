@@ -13,6 +13,12 @@
  *      the arc screens, and
  *   4. inject onto the right VIRT output via a per-output virtual pointer.
  *
+ * Scroll is the exception: Hyprland does NOT reliably deliver zwlr_virtual_
+ * pointer *axis* events to clients (Qt/Electron/Firefox ignore them, though
+ * clicks/motion from the same virtual pointer work - see Hyprland #8931). So
+ * scroll is injected as a REAL wheel via a kernel uinput device, which every
+ * app honours like a physical mouse, at the cursor the virtual pointer placed.
+ *
  * Keyboard needs no capture: once the injected cursor lands on a window,
  * Hyprland focus-follows-mouse gives it keyboard focus, so typing just works.
  * We never grab the keyboard, so Super+G / Super+SHIFT+Q keep firing.
@@ -29,6 +35,7 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/input.h>
+#include <linux/uinput.h>
 #include <libinput.h>
 
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
@@ -48,11 +55,13 @@ typedef struct {
     double gx, gy;              /* cursor position in strip space         */
     int    cur;                 /* screen the cursor is currently on      */
     float  sens;               /* motion scale                          */
+    double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
     char   dev[64];             /* trackpad device path (grabbed)         */
     char   kbd[64];             /* keyboard device path (observed, not grabbed) */
+    int    uifd;                /* uinput wheel device fd (-1 if unavailable) */
 } grab_state;
 
 static uint32_t now_ms(void) {
@@ -81,6 +90,54 @@ static void li_close(int fd, void *u) {
 static const struct libinput_interface LI_IFACE = {
     .open_restricted = li_open, .close_restricted = li_close,
 };
+
+/* ---- uinput wheel device ----
+ * A minimal virtual mouse that emits only wheel events. We route scroll here
+ * instead of through the Wayland virtual pointer because Hyprland drops virtual-
+ * pointer axis events for many clients (see the file header). A real wheel event
+ * lands on whatever surface the seat cursor is over - which our virtual pointer
+ * has already positioned on the target window. */
+static int uinput_open(void) {
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        fprintf(stderr, "grab: scroll disabled - open /dev/uinput: %s "
+                "(add yourself to the device ACL / 'input' group)\n", strerror(errno));
+        return -1;
+    }
+    ioctl(fd, UI_SET_EVBIT, EV_KEY);   /* a button bit so it registers as a mouse */
+    ioctl(fd, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(fd, UI_SET_EVBIT, EV_REL);
+    ioctl(fd, UI_SET_RELBIT, REL_WHEEL);
+    ioctl(fd, UI_SET_RELBIT, REL_WHEEL_HI_RES);
+    struct uinput_setup us = {0};
+    us.id.bustype = BUS_USB;
+    us.id.vendor  = 0x1d6b;            /* arbitrary; "Linux Foundation" */
+    us.id.product = 0x5c01;
+    snprintf(us.name, sizeof us.name, "mirage virtual scroll");
+    if (ioctl(fd, UI_DEV_SETUP, &us) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
+        fprintf(stderr, "grab: scroll disabled - uinput setup: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void uinput_close(int fd) {
+    if (fd < 0) return;
+    ioctl(fd, UI_DEV_DESTROY);
+    close(fd);
+}
+
+/* Emit `notches` wheel detents (sign = direction). Sends both classic REL_WHEEL
+ * and the hi-res form so old and new (wl_pointer v8+) clients both scroll. */
+static void uinput_wheel(int fd, int notches) {
+    if (fd < 0 || notches == 0) return;
+    struct input_event ev[4] = {0};
+    ev[0].type = EV_REL; ev[0].code = REL_WHEEL;        ev[0].value = notches;
+    ev[1].type = EV_REL; ev[1].code = REL_WHEEL_HI_RES; ev[1].value = notches * 120;
+    ev[2].type = EV_SYN; ev[2].code = SYN_REPORT;       ev[2].value = 0;
+    if (write(fd, ev, 3 * sizeof ev[0]) < 0) { /* device may have vanished */ }
+}
 
 /* Map the strip cursor to a screen + output-local pixel and inject it. */
 static void push_cursor(grab_state *g) {
@@ -151,11 +208,20 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         double v = libinput_event_pointer_get_scroll_value(p, ax);
         if (g->super) {                  /* Super+scroll -> zoom (not forwarded) */
             do_zoom(g, v);
-        } else if (g->vp[g->cur]) {      /* plain scroll -> forward to the window */
-            zwlr_virtual_pointer_v1_axis(g->vp[g->cur], now_ms(),
-                WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(v));
-            zwlr_virtual_pointer_v1_frame(g->vp[g->cur]);
+            break;
         }
+        /* Inject as real wheel detents via uinput (Hyprland drops virtual-
+         * pointer axis for many apps). Accumulate the smooth trackpad delta and
+         * emit one notch per NOTCH units; the wheel lands on the window the
+         * virtual pointer already moved the cursor over. */
+        const double NOTCH = 8.0;        /* trackpad units per wheel detent */
+        g->scroll_acc += v;
+        while (g->scroll_acc >= NOTCH || g->scroll_acc <= -NOTCH) {
+            int step = g->scroll_acc > 0 ? 1 : -1;
+            g->scroll_acc -= step * NOTCH;
+            uinput_wheel(g->uifd, -step);   /* -step: match natural scroll dir */
+        }
+        if (v == 0.0) g->scroll_acc = 0.0;   /* reset on finger lift */
         break;
     }
     default: break;
@@ -185,6 +251,7 @@ bool grab_init(struct mirage *m) {
     m->grab = g;
     g->m = m;
     g->sens = 1.0f;
+    g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
     const char *td = getenv("MIRAGE_TRACKPAD");
     const char *kb = getenv("MIRAGE_KEYBOARD");
     snprintf(g->dev, sizeof g->dev, "%s", td ? td : "/dev/input/event0");
@@ -222,12 +289,16 @@ void grab_toggle(struct mirage *m) {
         if (!libinput_path_add_device(g->li, g->kbd))
             fprintf(stderr, "grab: note - keyboard %s not observed; Super+scroll "
                     "zoom disabled\n", g->kbd);
+        if (g->uifd < 0) g->uifd = uinput_open();   /* real wheel for scroll */
+        g->scroll_acc = 0.0;
         g->super = false;
         g->active = true;
         push_cursor(g);
-        fprintf(stderr, "grab: capture ON (trackpad grabbed)\n");
+        fprintf(stderr, "grab: capture ON (trackpad grabbed%s)\n",
+                g->uifd >= 0 ? ", scroll via uinput" : ", scroll unavailable");
     } else {
         if (g->li) { libinput_unref(g->li); g->li = NULL; }   /* ungrabs device */
+        if (g->uifd >= 0) { uinput_close(g->uifd); g->uifd = -1; }
         g->active = false;
         fprintf(stderr, "grab: capture OFF\n");
     }
@@ -240,6 +311,7 @@ void grab_destroy(struct mirage *m) {
     grab_state *g = GS(m);
     if (!g) return;
     if (g->li) { libinput_unref(g->li); g->li = NULL; }
+    if (g->uifd >= 0) { uinput_close(g->uifd); g->uifd = -1; }
     for (int i = 0; i < g->n; i++)
         if (g->vp[i]) zwlr_virtual_pointer_v1_destroy(g->vp[i]);
     free(g);
