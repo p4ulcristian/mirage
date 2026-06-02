@@ -110,6 +110,7 @@ int main(int argc, char **argv) {
     uint32_t prev_tick = 0;
     long n = 0;
     int idle = 0;
+    float gyro_bias[3] = {0.0f, 0.0f, 0.0f};   /* auto-zeroed gyro bias (rad/s) */
 
     while (g_run) {
         int r = rayneo_read_imu(d, &s, 200);
@@ -133,6 +134,26 @@ int main(int argc, char **argv) {
         prev_tick = s.tick;
         float dt = (float)dtick * 1e-4f;
         if (dtick == 0 || dt < 0.0005f || dt > 0.01f) dt = 0.002f;
+
+        /* Gyro bias auto-zero: at rest the gyro still reads a small constant
+         * bias (~1 deg/s here) that integrates straight into heading drift.
+         * When the angular rate is low enough to be "still", slowly track that
+         * bias with an EMA (gated so real head motion never poisons it), then
+         * subtract the WHOLE bias. A fixed deadband can't do this: a bias above
+         * the deadband still leaks through. Also follows slow temp drift. */
+        {
+            float gmag = sqrtf(s.gyro_rad[0]*s.gyro_rad[0]
+                             + s.gyro_rad[1]*s.gyro_rad[1]
+                             + s.gyro_rad[2]*s.gyro_rad[2]);
+            const float still_rad = 2.5f * (float)(M_PI/180.0);   /* <2.5 deg/s = still */
+            if (gmag < still_rad) {
+                float lr = dt / 1.5f;            /* ~1.5 s to settle while still */
+                if (lr > 0.05f) lr = 0.05f;
+                for (int k = 0; k < 3; k++)
+                    gyro_bias[k] += lr * (s.gyro_rad[k] - gyro_bias[k]);
+            }
+            for (int k = 0; k < 3; k++) s.gyro_rad[k] -= gyro_bias[k];
+        }
 
         /* Soft gyro deadband: kill the stationary noise floor that would
          * otherwise integrate into creep, without a velocity step at onset. */
