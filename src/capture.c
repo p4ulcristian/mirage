@@ -136,7 +136,15 @@ static void on_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *f) {
         return;
     }
     if (!ensure_buffer(g_capture_mirage, s)) { s->frame_state = 3; return; }
-    zwlr_screencopy_frame_v1_copy(f, s->buffer);
+    /* First grab is a plain copy so the screen shows its current content right
+     * away; after that use copy_with_damage, which only completes (ready) when
+     * the output actually changes. Static screens then cost zero compositor
+     * render + zero blit, so the GPU load scales with on-screen activity, not
+     * with screen count or our render rate. */
+    if (s->have_tex)
+        zwlr_screencopy_frame_v1_copy_with_damage(f, s->buffer);
+    else
+        zwlr_screencopy_frame_v1_copy(f, s->buffer);
 }
 
 static void on_flags(void *data, struct zwlr_screencopy_frame_v1 *f, uint32_t flags) {
