@@ -68,7 +68,10 @@ typedef struct {
 
     /* pose */
     int   pose_port;            /* OpenTrack UDP port                    */
-    float pose_smoothing;       /* nlerp factor, 0..1                    */
+    float pose_smoothing;       /* legacy fixed nlerp factor, 0..1       */
+    bool  pose_oneeuro;         /* use the One-Euro adaptive filter      */
+    float pose_mincutoff;       /* One-Euro cutoff at rest (Hz)          */
+    float pose_beta;            /* One-Euro speed coupling               */
 
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */

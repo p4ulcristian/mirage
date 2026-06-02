@@ -243,7 +243,9 @@ static void usage(const char *p) {
            "  --distance M      screen distance in metres (default 2.0)\n"
            "  --spacing DEG     extra gap between screens (default 0)\n"
            "  --arc DEG         angular width of each curved screen (default 40)\n"
-           "  --smooth F        pose smoothing 0..1 (default 0.35)\n"
+           "  --mincutoff HZ    One-Euro steadiness at rest (default 0.5; lower = steadier)\n"
+           "  --beta F          One-Euro responsiveness in motion (default 1.0; higher = less lag)\n"
+           "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
            "  --invert-yaw      flip yaw if turning your head feels reversed\n"
            "  --invert-pitch    flip pitch\n"
@@ -263,7 +265,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--distance") && i+1<argc) M.cfg.screen_distance_m = atof(argv[++i]);
         else if (!strcmp(argv[i], "--spacing")  && i+1<argc) M.cfg.arc_spacing_deg = atof(argv[++i]);
         else if (!strcmp(argv[i], "--arc")      && i+1<argc) M.cfg.screen_arc_deg = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--smooth")   && i+1<argc) M.cfg.pose_smoothing = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--mincutoff") && i+1<argc) M.cfg.pose_mincutoff = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--beta")      && i+1<argc) M.cfg.pose_beta = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--smooth")   && i+1<argc) {
+            M.cfg.pose_smoothing = atof(argv[++i]);
+            M.cfg.pose_oneeuro = false;   /* --smooth opts into the legacy filter */
+        }
         else if (!strcmp(argv[i], "--screens")  && i+1<argc) M.cfg.screen_count = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--invert-yaw"))   opt_sign_yaw   = -1.0f;
         else if (!strcmp(argv[i], "--invert-pitch")) opt_sign_pitch = -1.0f;
@@ -364,6 +371,9 @@ int main(int argc, char **argv) {
     if (opt_3d) {
         pose_config pc = { .backend = POSE_OPENTRACK_UDP, .udp_port = M.cfg.pose_port,
                            .smoothing = M.cfg.pose_smoothing,
+                           .use_oneeuro = M.cfg.pose_oneeuro,
+                           .oe_mincutoff = M.cfg.pose_mincutoff,
+                           .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
                            .sign_yaw = opt_sign_yaw, .sign_pitch = opt_sign_pitch,
                            .sign_roll = opt_sign_roll };
         if (pose_start(&pc) != 0)

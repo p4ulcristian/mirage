@@ -32,6 +32,14 @@ typedef struct {
     int   udp_port;        /* for POSE_OPENTRACK_UDP (default 4242)        */
     const char *socket_path; /* for POSE_JSON_SOCKET                       */
     float smoothing;       /* 0..1 nlerp factor per update; 1 = no smoothing */
+    /* One-Euro adaptive filter (the default). Steady when still, low-lag when
+     * moving: the nlerp cutoff rises with angular speed. Set use_oneeuro=false
+     * to fall back to the fixed `smoothing` nlerp above (e.g. for comparison).
+     *   oe_mincutoff [Hz]  cutoff at rest; lower = steadier/more lag (try ~0.5)
+     *   oe_beta            speed coupling; higher = less lag in motion (try ~1)
+     * oe_dcutoff is the derivative low-pass cutoff (1 Hz is fine, not exposed). */
+    bool  use_oneeuro;
+    float oe_mincutoff, oe_beta, oe_dcutoff;
     /* per-axis sign for OpenTrack euler input (+1 or -1); 0 treated as +1.
      * Lets you flip a device whose yaw/pitch/roll runs opposite to head motion. */
     float sign_yaw, sign_pitch, sign_roll;

@@ -11,7 +11,10 @@ void mirage_config_defaults(mirage_config *c) {
     c->screen_cols       = 3;      /* 3 per row; extra screens stack above   */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
     c->pose_port         = 4242;
-    c->pose_smoothing    = 0.08f;  /* nlerp @500Hz; lower = smoother/laggier */
+    c->pose_smoothing    = 0.08f;  /* legacy fixed nlerp @500Hz (only if --smooth) */
+    c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
+    c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
+    c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
 }
