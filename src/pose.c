@@ -14,17 +14,18 @@
 
 #define DEG2RAD(d) ((d) * (float)(M_PI / 180.0))
 
-/* Heading-only quaternion: the swing-twist component about +Y (the yaw axis
- * used by q_from_euler_ypr). Recentering with this instead of the full
- * orientation keeps pitch/roll gravity-absolute, so turning the head (yaw)
- * stays pure yaw and doesn't tilt the screens. */
-static quat yaw_only(quat q) {
-    quat t = { q.w, 0.0f, q.y, 0.0f };
-    float n2 = t.w*t.w + t.y*t.y;
-    if (n2 < 1e-12f) return (quat){1, 0, 0, 0};  /* straight up/down: no heading */
-    float inv = 1.0f / sqrtf(n2);
-    t.w *= inv; t.y *= inv;
-    return t;
+/* Recenter reference: neutralise heading (yaw) AND vertical look (pitch) while
+ * leaving roll gravity-absolute. Recentering with this brings the screens to
+ * your CURRENT eye level (not just heading), yet never tilts them: it's derived
+ * from the forward direction, which a roll about forward leaves unchanged, so
+ * conj(ref) * orientation collapses to a pure roll at the moment of recenter.
+ * (Was yaw-only before, which is why vertical centering didn't work.) */
+static quat yaw_pitch_ref(quat q) {
+    vec3 f = q_rotate(q, v3(0.0f, 0.0f, -1.0f));   /* where the head is looking */
+    float fy = f.y < -1.0f ? -1.0f : (f.y > 1.0f ? 1.0f : f.y);
+    float yaw   = atan2f(-f.x, -f.z);
+    float pitch = asinf(fy);
+    return q_from_euler_ypr(yaw, pitch, 0.0f);
 }
 
 static struct {
@@ -56,7 +57,7 @@ static uint64_t now_ms(void) {
 static void submit_raw(quat raw) {
     pthread_mutex_lock(&P.lock);
     if (P.want_recenter) {
-        P.reference = yaw_only(raw);
+        P.reference = yaw_pitch_ref(raw);
         P.want_recenter = false;
     }
     if (!P.have_signal) P.smoothed = raw;  /* avoid lerp from identity */
@@ -205,7 +206,7 @@ void pose_recenter(void) {
     pthread_mutex_lock(&P.lock);
     P.want_recenter = true;
     /* apply immediately against the most recent raw too */
-    P.reference = yaw_only(P.raw);
+    P.reference = yaw_pitch_ref(P.raw);
     pthread_mutex_unlock(&P.lock);
 }
 

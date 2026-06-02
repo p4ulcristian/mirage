@@ -183,8 +183,10 @@ void render_frame(struct mirage *m, quat head) {
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    float z = m->zoom > 0.0f ? m->zoom : 1.0f;
     float aspect = (float)m->glasses_w / (float)m->glasses_h;
-    mat4 proj = m4_perspective(m->cfg.fov_deg * (float)M_PI/180.0f, aspect, 0.05f, 100.0f);
+    /* zoom narrows the field of view (zoom in = see less, bigger) */
+    mat4 proj = m4_perspective((m->cfg.fov_deg / z) * (float)M_PI/180.0f, aspect, 0.05f, 100.0f);
     mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);
 
@@ -225,10 +227,11 @@ void render_frame(struct mirage *m, quat head) {
 }
 
 /* Flat capture-only view: lay the N captured screens out in a row, each fit to
- * its cell preserving the source aspect. No pose, no perspective. */
-void render_frame_flat(struct mirage *m) {
-    eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
-    int W = m->glasses_w, H = m->glasses_h;
+ * its cell preserving the source aspect. No pose, no perspective. Rendered into
+ * an arbitrary target surface so both the glasses (flat mode) and the laptop
+ * preview window can share it. */
+static void render_flat_to(struct mirage *m, EGLSurface surf, int W, int H) {
+    eglMakeCurrent(m->edpy, surf, surf, m->ectx);
     glViewport(0, 0, W, H);
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -251,6 +254,8 @@ void render_frame_flat(struct mirage *m) {
         float rw = cellW * 0.96f;
         float rh = rw * srcA;
         if (rh > H * 0.96f) { rh = H * 0.96f; rw = rh / srcA; }
+        float z = m->zoom > 0.0f ? m->zoom : 1.0f;   /* Super+scroll zoom */
+        rw *= z; rh *= z;
         float cx = cellW * (i + 0.5f);
         float cy = H * 0.5f;
 
@@ -272,12 +277,42 @@ void render_frame_flat(struct mirage *m) {
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    eglSwapBuffers(m->edpy, m->esurf);
+    eglSwapBuffers(m->edpy, surf);
+}
+
+void render_frame_flat(struct mirage *m) {
+    render_flat_to(m, m->esurf, m->glasses_w, m->glasses_h);
+}
+
+/* ---- laptop preview window: a second surface showing the same flat view ---- */
+bool render_preview_init(struct mirage *m) {
+    if (!m->pv_surface) return false;
+    m->pv_egl_window = wl_egl_window_create(m->pv_surface, m->pv_w, m->pv_h);
+    if (!m->pv_egl_window) { fprintf(stderr, "preview: egl_window failed\n"); return false; }
+    m->pv_esurf = eglCreateWindowSurface(m->edpy, m->ecfg,
+                                         (EGLNativeWindowType)m->pv_egl_window, NULL);
+    if (m->pv_esurf == EGL_NO_SURFACE) { fprintf(stderr, "preview: surface failed\n"); return false; }
+    /* don't vsync the preview - it must never pace (or stall) the glasses arc */
+    eglMakeCurrent(m->edpy, m->pv_esurf, m->pv_esurf, m->ectx);
+    eglSwapInterval(m->edpy, 0);
+    fprintf(stderr, "preview: window ready (%dx%d)\n", m->pv_w, m->pv_h);
+    return true;
+}
+
+void render_preview(struct mirage *m) {
+    if (m->pv_esurf == EGL_NO_SURFACE) return;
+    if (m->pv_cfg_w > 0 && (m->pv_cfg_w != m->pv_w || m->pv_cfg_h != m->pv_h)) {
+        m->pv_w = m->pv_cfg_w; m->pv_h = m->pv_cfg_h;
+        wl_egl_window_resize(m->pv_egl_window, m->pv_w, m->pv_h, 0, 0);
+    }
+    render_flat_to(m, m->pv_esurf, m->pv_w, m->pv_h);
 }
 
 void render_finish(struct mirage *m) {
     if (m->edpy == EGL_NO_DISPLAY) return;
     eglMakeCurrent(m->edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (m->pv_esurf && m->pv_esurf != EGL_NO_SURFACE) eglDestroySurface(m->edpy, m->pv_esurf);
+    if (m->pv_egl_window) wl_egl_window_destroy(m->pv_egl_window);
     if (m->esurf != EGL_NO_SURFACE) eglDestroySurface(m->edpy, m->esurf);
     if (m->ectx  != EGL_NO_CONTEXT) eglDestroyContext(m->edpy, m->ectx);
     if (m->egl_window) wl_egl_window_destroy(m->egl_window);

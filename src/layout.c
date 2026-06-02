@@ -26,7 +26,11 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
 
     float ang_w = c->screen_arc_deg * (float)M_PI/180.0f;       /* width  */
     float gap   = c->arc_spacing_deg * (float)M_PI/180.0f;
-    float yaw   = ((float)col - (cols - 1) * 0.5f) * (ang_w + gap);
+    /* +yaw rotates a screen to -X (the viewer's left), so the LOW column index
+     * must get the HIGH yaw to land leftmost. Hence ((cols-1)/2 - col): that
+     * puts col 0 (VIRT1) on the left, ascending VIRT1,VIRT2,VIRT3 to the right.
+     * (Was (col - (cols-1)/2), which reversed it to VIRT3,VIRT2,VIRT1.) */
+    float yaw   = ((cols - 1) * 0.5f - (float)col) * (ang_w + gap);
 
     /* panel height in metres (matches render.c build_curved_mesh) */
     const screen_t *s = &m->screen[i];

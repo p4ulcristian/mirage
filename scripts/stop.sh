@@ -30,6 +30,14 @@ stop_mirage() {
 # Move every workspace that lives on a VIRT output back to a real monitor, so
 # windows aren't stranded when the virtual displays go away.
 restore_windows() {
+    # Preferred: per-window restore from the sweep snapshot (puts each window
+    # back on its exact original workspace). Falls back to the workspace-level
+    # sweep below when there is no snapshot (e.g. windows placed manually).
+    if [ -f "${MIRAGE_SWEEP_STATE:-/tmp/mirage-sweep.json}" ]; then
+        bash "$HERE/scripts/sweep.sh" restore || true
+        return
+    fi
+
     local target="$RESTORE_MON"
     if [ -z "$target" ]; then
         # first monitor whose name doesn't start with VIRT (prefer eDP-*)

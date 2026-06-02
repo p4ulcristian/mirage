@@ -86,6 +86,15 @@ struct mirage {
     struct zwp_linux_dmabuf_v1        *dmabuf;
     struct wl_shm        *shm;
 
+    /* input grab (grab.c): seat + the three managers that let us lock the real
+     * pointer, read its raw motion, and inject a cursor onto the arc. */
+    struct wl_seat       *seat;
+    struct wl_pointer    *pointer;
+    struct zwp_pointer_constraints_v1        *pointer_constraints;
+    struct zwp_relative_pointer_manager_v1   *rel_pointer_mgr;
+    struct zwlr_virtual_pointer_manager_v1   *vpointer_mgr;
+    void   *grab;   /* opaque grab_state*, owned by grab.c */
+
     /* glasses output + render surface */
     struct wl_output *glasses_out;
     char     glasses_name[32];
@@ -95,6 +104,17 @@ struct mirage {
     struct zwlr_layer_surface_v1  *layer_surface;
     struct wl_egl_window          *egl_window;
     bool     configured;
+
+    /* optional laptop preview: a second toplevel window mirroring the flat view
+     * of the virtual screens, so they stay visible/usable without the glasses. */
+    struct wl_surface   *pv_surface;
+    struct xdg_surface  *pv_xsurf;
+    struct xdg_toplevel *pv_xtop;
+    struct wl_egl_window *pv_egl_window;
+    EGLSurface           pv_esurf;
+    int32_t  pv_w, pv_h;            /* current backing size                 */
+    int32_t  pv_cfg_w, pv_cfg_h;   /* size requested by the last configure */
+    bool     pv_enabled;
 
     /* egl/gl */
     EGLDisplay edpy;
@@ -116,8 +136,12 @@ struct mirage {
     int n_pending;
 
     mirage_config cfg;
+    float zoom;       /* view zoom (Super+scroll); 1.0 = default, clamped       */
     bool running;
 };
+
+#define MIRAGE_ZOOM_MIN 0.5f
+#define MIRAGE_ZOOM_MAX 4.0f
 
 /* config.c */
 void mirage_config_defaults(mirage_config *c);
@@ -126,6 +150,8 @@ void mirage_config_defaults(mirage_config *c);
 bool render_init(struct mirage *m);
 void render_frame(struct mirage *m, quat head);   /* 3D head-tracked arc      */
 void render_frame_flat(struct mirage *m);         /* flat capture-only, no pose */
+bool render_preview_init(struct mirage *m);       /* laptop preview EGL surface */
+void render_preview(struct mirage *m);            /* draw the preview window    */
 void render_finish(struct mirage *m);
 
 /* capture.c - wlr-screencopy into GL textures */
@@ -137,8 +163,12 @@ void capture_finish(struct mirage *m);
 /* layout.c - where each screen sits in 3D */
 mat4 layout_model_matrix(const struct mirage *m, int screen_index);
 
-/* grab.c - Super+G input confinement */
+/* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
+ * drive a cursor across the virtual screens as one continuous strip. */
 bool grab_init(struct mirage *m);
+void grab_toggle(struct mirage *m);   /* enter/leave capture mode (Super+G)    */
+void grab_pump(struct mirage *m);     /* drain trackpad events (every frame)   */
+bool grab_active(struct mirage *m);
 void grab_destroy(struct mirage *m);
 
 #endif /* MIRAGE_H */

@@ -179,8 +179,10 @@ void capture_begin_frame(struct mirage *m) {
         screen_t *s = &m->screen[i];
         if (s->frame) continue;              /* still in flight */
         s->frame_state = 1;
+        /* overlay_cursor=1 composites the cursor into the copy, so the pointer
+         * mirage injects onto a virtual screen is visible on the glasses. */
         s->frame = zwlr_screencopy_manager_v1_capture_output(
-            m->screencopy, 0, s->wl);
+            m->screencopy, 1, s->wl);
         zwlr_screencopy_frame_v1_add_listener(s->frame, &FRAME_LISTENER, s);
     }
 }

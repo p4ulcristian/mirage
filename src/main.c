@@ -13,13 +13,18 @@
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
+#include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include <wayland-egl.h>
 
 static struct mirage M;
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_recenter = 0;
+static volatile sig_atomic_t g_grab_toggle = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
-static void on_recenter(int s) { (void)s; g_recenter = 1; }  /* SIGUSR1 */
+static void on_recenter(int s) { (void)s; g_recenter = 1; }     /* SIGUSR1 */
+static void on_grab(int s) { (void)s; g_grab_toggle = 1; }      /* SIGUSR2 */
 
 /* override which output is the render target (default: auto by glasses_match) */
 static const char *opt_output = NULL;
@@ -29,10 +34,13 @@ static float opt_sign_yaw = 1.0f, opt_sign_pitch = 1.0f, opt_sign_roll = 1.0f;
 static bool opt_3d = false;
 /* windowed scene-setup mode: render into a normal xdg-shell window */
 static bool opt_windowed = false;
+static bool opt_preview  = false;          /* laptop preview window (--preview) */
+static int  opt_pv_w = 1280, opt_pv_h = 480;
 static int  opt_win_w = 1280, opt_win_h = 720;
 static struct xdg_wm_base  *g_wm_base  = NULL;
 static struct xdg_toplevel *g_toplevel = NULL;
 static int32_t g_win_cfg_w = 0, g_win_cfg_h = 0;
+static bool    g_pv_configured = false;
 
 static void wm_ping(void *d, struct xdg_wm_base *b, uint32_t serial) {
     (void)d; xdg_wm_base_pong(b, serial);
@@ -54,6 +62,24 @@ static void xtop_close(void *d, struct xdg_toplevel *t) {
 }
 static const struct xdg_toplevel_listener XTOP_LISTENER = {
     .configure = xtop_configure, .close = xtop_close,
+};
+
+/* ---- laptop preview window: its own xdg listeners (separate config state) ---- */
+static void pv_xsurf_configure(void *d, struct xdg_surface *xs, uint32_t serial) {
+    (void)d; xdg_surface_ack_configure(xs, serial); g_pv_configured = true;
+}
+static const struct xdg_surface_listener PV_XSURF_LISTENER = { .configure = pv_xsurf_configure };
+
+static void pv_xtop_configure(void *d, struct xdg_toplevel *t, int32_t w, int32_t h,
+                              struct wl_array *states) {
+    (void)d;(void)t;(void)states;
+    if (w > 0 && h > 0) { M.pv_cfg_w = w; M.pv_cfg_h = h; }
+}
+static void pv_xtop_close(void *d, struct xdg_toplevel *t) {
+    (void)d;(void)t; M.pv_enabled = false;   /* closing the preview != quitting */
+}
+static const struct xdg_toplevel_listener PV_XTOP_LISTENER = {
+    .configure = pv_xtop_configure, .close = pv_xtop_close,
 };
 
 /* ---- wl_output discovery ---- */
@@ -105,6 +131,19 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
                                     ver < 3 ? ver : 3);
     } else if (!strcmp(iface, wl_shm_interface.name)) {
         M.shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
+    } else if (!strcmp(iface, wl_seat_interface.name)) {
+        M.seat = wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
+    } else if (!strcmp(iface, zwp_pointer_constraints_v1_interface.name)) {
+        M.pointer_constraints = wl_registry_bind(r, name,
+                                  &zwp_pointer_constraints_v1_interface, 1);
+    } else if (!strcmp(iface, zwp_relative_pointer_manager_v1_interface.name)) {
+        M.rel_pointer_mgr = wl_registry_bind(r, name,
+                                  &zwp_relative_pointer_manager_v1_interface, 1);
+    } else if (!strcmp(iface, zwlr_virtual_pointer_manager_v1_interface.name)) {
+        /* v2 required for create_virtual_pointer_with_output */
+        M.vpointer_mgr = wl_registry_bind(r, name,
+                                  &zwlr_virtual_pointer_manager_v1_interface,
+                                  ver < 2 ? ver : 2);
     } else if (!strcmp(iface, xdg_wm_base_interface.name)) {
         g_wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, ver < 4 ? ver : 4);
         xdg_wm_base_add_listener(g_wm_base, &WM_BASE_LISTENER, NULL);
@@ -210,11 +249,13 @@ static void usage(const char *p) {
            "  --invert-pitch    flip pitch\n"
            "  --invert-roll     flip roll\n"
            "  --windowed [WxH]  render into a normal window (scene setup; default 1280x720)\n"
+           "  --preview [WxH]   also open a laptop window mirroring the screens (default 1280x480)\n"
            "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n", p);
 }
 
 int main(int argc, char **argv) {
     mirage_config_defaults(&M.cfg);
+    M.zoom = 1.0f;
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--output")   && i+1<argc) opt_output = argv[++i];
         else if (!strcmp(argv[i], "--port")     && i+1<argc) M.cfg.pose_port = atoi(argv[++i]);
@@ -233,12 +274,18 @@ int main(int argc, char **argv) {
             if (i+1 < argc && argv[i+1][0] != '-' &&
                 sscanf(argv[i+1], "%dx%d", &opt_win_w, &opt_win_h) == 2) i++;
         }
+        else if (!strcmp(argv[i], "--preview")) {
+            opt_preview = true;
+            if (i+1 < argc && argv[i+1][0] != '-' &&
+                sscanf(argv[i+1], "%dx%d", &opt_pv_w, &opt_pv_h) == 2) i++;
+        }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
     }
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGUSR1, on_recenter);   /* recenter head pose on demand */
+    signal(SIGUSR2, on_grab);       /* Super+G: toggle pointer capture */
 
     M.display = wl_display_connect(NULL);
     if (!M.display) { fprintf(stderr, "mirage: cannot connect to wayland\n"); return 1; }
@@ -291,7 +338,26 @@ int main(int argc, char **argv) {
 
     if (!render_init(&M))  { fprintf(stderr, "mirage: render_init failed\n");  return 1; }
     if (!capture_init(&M)) { fprintf(stderr, "mirage: capture_init failed\n"); return 1; }
+    if (M.seat) M.pointer = wl_seat_get_pointer(M.seat);
     grab_init(&M);
+
+    /* optional laptop preview: a normal toplevel window mirroring the flat view,
+     * so the virtual screens stay visible/usable without the glasses. Separate
+     * surface, drawn each frame from the same captured textures. */
+    if (opt_preview && !opt_windowed && g_wm_base) {
+        M.pv_surface = wl_compositor_create_surface(M.compositor);
+        M.pv_xsurf = xdg_wm_base_get_xdg_surface(g_wm_base, M.pv_surface);
+        xdg_surface_add_listener(M.pv_xsurf, &PV_XSURF_LISTENER, NULL);
+        M.pv_xtop = xdg_surface_get_toplevel(M.pv_xsurf);
+        xdg_toplevel_add_listener(M.pv_xtop, &PV_XTOP_LISTENER, NULL);
+        xdg_toplevel_set_title(M.pv_xtop, "mirage preview");
+        xdg_toplevel_set_app_id(M.pv_xtop, "mirage-preview");
+        wl_surface_commit(M.pv_surface);
+        while (!g_pv_configured && wl_display_dispatch(M.display) >= 0) { /* wait */ }
+        M.pv_w = M.pv_cfg_w > 0 ? M.pv_cfg_w : opt_pv_w;
+        M.pv_h = M.pv_cfg_h > 0 ? M.pv_cfg_h : opt_pv_h;
+        if (render_preview_init(&M)) M.pv_enabled = true;
+    }
 
     /* head-tracking is disabled for now (capture-only flat view).
      * pass --3d to bring back pose input + the 3D arc. */
@@ -348,6 +414,20 @@ int main(int argc, char **argv) {
         wl_display_dispatch_pending(M.display);
         capture_poll(&M);   /* bind any ready frames into textures; never blocks */
 
+        /* A protocol error tears down the connection but leaves eglSwapBuffers
+         * spinning unthrottled into an unmapped surface (invisible, 1000s of
+         * fps). Catch it loudly instead of pretending to render. */
+        int derr = wl_display_get_error(M.display);
+        if (derr) {
+            fprintf(stderr, "mirage: wayland connection error (%d) - surface is "
+                    "no longer presented; exiting.\n", derr);
+            M.running = false;
+            break;
+        }
+
+        if (g_grab_toggle) { grab_toggle(&M); g_grab_toggle = 0; }
+        grab_pump(&M);   /* drain trackpad motion/buttons while captured */
+
         if (opt_3d) {
             /* first time we get tracking, treat the current look direction as
              * "straight ahead" so the centre screen lands in front of you. */
@@ -360,6 +440,7 @@ int main(int argc, char **argv) {
         } else {
             render_frame_flat(&M);   /* capture-only, no pose */
         }
+        if (M.pv_enabled) render_preview(&M);   /* laptop mirror window */
         wl_display_flush(M.display);
 
         /* once-a-second render-rate readout (gated by capture + glasses vsync) */

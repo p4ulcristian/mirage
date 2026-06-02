@@ -18,15 +18,17 @@ PROTO_NAMES := \
 	wlr-layer-shell-unstable-v1 \
 	wlr-screencopy-unstable-v1 \
 	wlr-virtual-pointer-unstable-v1 \
+	pointer-constraints-unstable-v1 \
+	relative-pointer-unstable-v1 \
 	hyprland-global-shortcuts-v1
 
-vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf
+vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer
 
 PROTO_HDR := $(PROTO_NAMES:%=build/proto/%-client-protocol.h)
 PROTO_SRC := $(PROTO_NAMES:%=build/proto/%-protocol.c)
 PROTO_OBJ := $(PROTO_SRC:build/proto/%.c=build/obj/%.o)
 
-RENDER_PKGS := wayland-client wayland-egl wayland-cursor egl glesv2 gbm libdrm
+RENDER_PKGS := wayland-client wayland-egl wayland-cursor egl glesv2 gbm libdrm libinput
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc -Ibuild/proto -pthread \
            $(shell $(PKGCONF) --cflags $(RENDER_PKGS))
@@ -69,8 +71,11 @@ build/proto/%-protocol.c: %.xml | build/proto
 build/obj/%.o: build/proto/%.c | build/obj
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# compile our sources; depend on generated headers so codegen runs first
-build/obj/%.o: src/%.c $(PROTO_HDR) | build/obj
+# compile our sources; depend on generated headers so codegen runs first, and on
+# our own headers so a struct-layout change (e.g. mirage.h) rebuilds everything
+# that includes it - mismatched object layouts cause silent memory corruption.
+SRC_HDR := $(wildcard src/*.h)
+build/obj/%.o: src/%.c $(PROTO_HDR) $(SRC_HDR) | build/obj
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build/proto build/obj:
