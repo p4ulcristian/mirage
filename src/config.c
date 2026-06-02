@@ -15,6 +15,8 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
     c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
+    c->yaw_gain          = 1.0f;   /* 1 = 1:1 head yaw; >1 amplifies (less turning) */
+    c->roll_damp         = 0.25f;  /* keep 25% of head roll: mostly horizon-locked  */
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
 }

@@ -72,6 +72,8 @@ typedef struct {
     bool  pose_oneeuro;         /* use the One-Euro adaptive filter      */
     float pose_mincutoff;       /* One-Euro cutoff at rest (Hz)          */
     float pose_beta;            /* One-Euro speed coupling               */
+    float yaw_gain;             /* head-yaw amplification (1 = 1:1)      */
+    float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
 
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */

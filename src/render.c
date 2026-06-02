@@ -187,6 +187,15 @@ void render_frame(struct mirage *m, quat head) {
     float aspect = (float)m->glasses_w / (float)m->glasses_h;
     /* zoom narrows the field of view (zoom in = see less, bigger) */
     mat4 proj = m4_perspective((m->cfg.fov_deg / z) * (float)M_PI/180.0f, aspect, 0.05f, 100.0f);
+
+    /* Reshape the head orientation for comfort: amplify yaw so the side screens
+     * need less neck turn, and damp roll so the wall stays near-level when you
+     * look around (the glasses sit pitched on your nose, so a plain yaw injects
+     * roll - see q_to_euler_ypr). Identity when yaw_gain=1 and roll_damp=1. */
+    float yaw, pitch, roll;
+    q_to_euler_ypr(head, &yaw, &pitch, &roll);
+    head = q_from_euler_ypr(yaw * m->cfg.yaw_gain, pitch, roll * m->cfg.roll_damp);
+
     mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);
 

@@ -82,6 +82,19 @@ static inline quat q_from_euler_ypr(float yaw, float pitch, float roll) {
     return q_norm(q_mul(q_mul(qy, qx), qz));
 }
 
+/* Inverse of q_from_euler_ypr: decompose a unit quaternion back into the same
+ * intrinsic yaw(Y)->pitch(X)->roll(Z) angles (radians). Derived from the rows
+ * of R = Ry(yaw)*Rx(pitch)*Rz(roll); stable except at pitch = +-90 deg (gimbal
+ * lock), which a head looking at a desktop never reaches. */
+static inline void q_to_euler_ypr(quat q, float *yaw, float *pitch, float *roll) {
+    float w=q.w, x=q.x, y=q.y, z=q.z;
+    float m12 = 2.0f*(y*z - w*x);          /* R[1][2] = -sin(pitch) */
+    float sp  = -m12; if (sp < -1.0f) sp = -1.0f; if (sp > 1.0f) sp = 1.0f;
+    *pitch = asinf(sp);
+    *yaw   = atan2f(2.0f*(x*z + w*y), 1.0f - 2.0f*(x*x + y*y));  /* R02, R22 */
+    *roll  = atan2f(2.0f*(x*y + w*z), 1.0f - 2.0f*(x*x + z*z));  /* R10, R11 */
+}
+
 /* ---- mat4 (column-major) ---- */
 static inline mat4 m4_identity(void) {
     mat4 r = {{0}};

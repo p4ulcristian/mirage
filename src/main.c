@@ -245,6 +245,8 @@ static void usage(const char *p) {
            "  --arc DEG         angular width of each curved screen (default 40)\n"
            "  --mincutoff HZ    One-Euro steadiness at rest (default 0.5; lower = steadier)\n"
            "  --beta F          One-Euro responsiveness in motion (default 1.0; higher = less lag)\n"
+           "  --yaw-gain F      amplify head yaw (default 1.0; >1 = reach side screens with less turn)\n"
+           "  --roll-damp F     fraction of head roll kept (default 0.25; 0 = full horizon lock)\n"
            "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
            "  --invert-yaw      flip yaw if turning your head feels reversed\n"
@@ -267,6 +269,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--arc")      && i+1<argc) M.cfg.screen_arc_deg = atof(argv[++i]);
         else if (!strcmp(argv[i], "--mincutoff") && i+1<argc) M.cfg.pose_mincutoff = atof(argv[++i]);
         else if (!strcmp(argv[i], "--beta")      && i+1<argc) M.cfg.pose_beta = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--yaw-gain")  && i+1<argc) M.cfg.yaw_gain = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--roll-damp") && i+1<argc) M.cfg.roll_damp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--smooth")   && i+1<argc) {
             M.cfg.pose_smoothing = atof(argv[++i]);
             M.cfg.pose_oneeuro = false;   /* --smooth opts into the legacy filter */
