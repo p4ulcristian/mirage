@@ -43,11 +43,76 @@ static const char *FRAG_SRC =
     "  gl_FragColor = vec4(e, 1.0);\n"
     "}\n";
 
+/* Loupe warp: a fullscreen pass that re-samples the rendered frame through a
+ * rounded-RECTANGLE magnifier. A signed-distance field to a rounded box gives
+ * the local magnification: uM everywhere INSIDE the rect (sdf<=0) so the whole
+ * panel-shaped plateau is uniformly magnified with NO bowing, then a smoothstep
+ * eases it back to 1x across a soft border band of thickness (uRout-uRin) - the
+ * only place straight lines bend - and 1x (untouched) outside. Sampling is
+ * suv = centre + offset / Mlocal, so uniform Mlocal = uniform zoom = straight
+ * text. Distances are in half-height units, isotropic (p.y in [-1,1]). uRin is
+ * the rect's half-height; its half-width and corner radius scale off it. A
+ * sharpen scaled by Mlocal-1 crisps the upscaled centre and spares the 1x edge.
+ * uM<=1 collapses to a pure passthrough. */
+static const char *WARP_VERT =
+    "attribute vec3 aPos;\n"
+    "attribute vec2 aUV;\n"
+    "varying highp vec2 vUV;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(aPos.xy * 2.0, 0.0, 1.0);\n"
+    "  vUV = vec2(aUV.x, 1.0 - aUV.y);\n"   /* QUAD uv is Y-down; flip to image-up */
+    "}\n";
+static const char *WARP_FRAG =
+    "precision mediump float;\n"
+    "varying highp vec2 vUV;\n"
+    "uniform sampler2D uTex;\n"
+    "uniform highp vec2 uTexel;\n"
+    "uniform float uAspect;\n"          /* W/H, makes the metric isotropic */
+    "uniform float uM;\n"              /* magnification (eased lens_power) */
+    "uniform float uRin;\n"            /* rect half-height (plateau)       */
+    "uniform float uRout;\n"           /* outer edge of the border band    */
+    "uniform float uSharpen;\n"
+    /* signed distance to a rounded box (half-extents b, corner radius r) */
+    "float sdRoundBox(vec2 p, vec2 b, float r) {\n"
+    "  vec2 q = abs(p) - b + vec2(r);\n"
+    "  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 c = vUV - vec2(0.5);\n"
+    "  vec2 p = vec2(c.x * uAspect, c.y) * 2.0;\n"   /* isotropic, p.y in [-1,1] */
+    "  float by = uRin;\n"                            /* rect half-height        */
+    "  float bx = uRin * 1.7;\n"                      /* landscape half-width    */
+    "  float rc = uRin * 0.45;\n"                     /* corner radius           */
+    "  float band = max(uRout - uRin, 1e-3);\n"
+    "  float sdf = sdRoundBox(p, vec2(bx, by), rc);\n"
+    "  float t = clamp(sdf / band, 0.0, 1.0);\n"
+    "  float ease = t * t * (3.0 - 2.0 * t);\n"       /* C1 at both edges */
+    "  float Ml = mix(uM, 1.0, ease);\n"              /* uM inside -> 1 outside */
+    "  vec2 suv = vec2(0.5) + c / Ml;\n"
+    "  vec3 e = texture2D(uTex, suv).rgb;\n"
+    "  float sh = uSharpen * clamp(Ml - 1.0, 0.0, 1.0);\n"
+    "  if (sh > 0.0) {\n"
+    "    vec3 b = texture2D(uTex, suv + vec2(0.0, -uTexel.y)).rgb;\n"
+    "    vec3 d = texture2D(uTex, suv + vec2(-uTexel.x, 0.0)).rgb;\n"
+    "    vec3 g = texture2D(uTex, suv + vec2( uTexel.x, 0.0)).rgb;\n"
+    "    vec3 hp = texture2D(uTex, suv + vec2(0.0,  uTexel.y)).rgb;\n"
+    "    vec3 s = e + (e - (b + d + g + hp) * 0.25) * sh;\n"
+    "    e = clamp(s, min(min(b,d), min(g,hp)), max(max(b,d), max(g,hp)));\n"
+    "  }\n"
+    "  gl_FragColor = vec4(e, 1.0);\n"
+    "}\n";
+
 static struct {
     GLuint prog;
     GLint  aPos, aUV;
     GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
     GLuint vbo;
+
+    /* loupe warp pass + its offscreen target */
+    GLuint warp;
+    GLint  wTex, wTexel, wAspect, wM, wRin, wRout, wSharpen;
+    GLuint fbo, fbo_tex, fbo_depth;
+    int    fbo_w, fbo_h;
 } R;
 
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
@@ -199,6 +264,30 @@ bool render_init(struct mirage *m) {
     R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
     R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
 
+    /* loupe warp program (shares aPos/aUV attribute slots 0/1) */
+    GLuint wv = compile(GL_VERTEX_SHADER, WARP_VERT);
+    GLuint wf = compile(GL_FRAGMENT_SHADER, WARP_FRAG);
+    if (!wv || !wf) return false;
+    R.warp = glCreateProgram();
+    glAttachShader(R.warp, wv);
+    glAttachShader(R.warp, wf);
+    glBindAttribLocation(R.warp, 0, "aPos");
+    glBindAttribLocation(R.warp, 1, "aUV");
+    glLinkProgram(R.warp);
+    glGetProgramiv(R.warp, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024]; glGetProgramInfoLog(R.warp, sizeof log, NULL, log);
+        fprintf(stderr, "render: warp link failed: %s\n", log); return false;
+    }
+    glDeleteShader(wv); glDeleteShader(wf);
+    R.wTex     = glGetUniformLocation(R.warp, "uTex");
+    R.wTexel   = glGetUniformLocation(R.warp, "uTexel");
+    R.wAspect  = glGetUniformLocation(R.warp, "uAspect");
+    R.wM       = glGetUniformLocation(R.warp, "uM");
+    R.wRin     = glGetUniformLocation(R.warp, "uRin");
+    R.wRout    = glGetUniformLocation(R.warp, "uRout");
+    R.wSharpen = glGetUniformLocation(R.warp, "uSharpen");
+
     glGenBuffers(1, &R.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof QUAD, QUAD, GL_STATIC_DRAW);
@@ -224,8 +313,48 @@ static const float PLACEHOLDER[][3] = {
     {0.10f, 0.18f, 0.30f}, {0.25f, 0.10f, 0.15f},
 };
 
+/* Lazily (re)build the offscreen colour+depth target the scene renders into when
+ * the loupe is active. Sized to the glasses surface. Returns false if the FBO
+ * can't be completed - the caller then falls back to drawing straight to screen. */
+static bool ensure_fbo(int w, int h) {
+    if (R.fbo && R.fbo_w == w && R.fbo_h == h) return true;
+    if (!R.fbo)       glGenFramebuffers(1, &R.fbo);
+    if (!R.fbo_tex)   glGenTextures(1, &R.fbo_tex);
+    if (!R.fbo_depth) glGenRenderbuffers(1, &R.fbo_depth);
+
+    glBindTexture(GL_TEXTURE_2D, R.fbo_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, R.fbo_depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, R.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, R.fbo_tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, R.fbo_depth);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "render: loupe FBO incomplete (0x%x)\n", st);
+        return false;
+    }
+    R.fbo_w = w; R.fbo_h = h;
+    return true;
+}
+
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
+
+    /* Ease the loupe toward its target (lens_max while Cmd held, else 1.0).
+     * Active only above ~1, so the FBO indirection is skipped entirely when the
+     * loupe is off - zero cost in the common case. */
+    m->lens_power += (m->lens_target - m->lens_power) * 0.2f;
+    bool loupe = m->lens_power > 1.001f && ensure_fbo(m->glasses_w, m->glasses_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, loupe ? R.fbo : 0);
     glViewport(0, 0, m->glasses_w, m->glasses_h);
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -323,6 +452,32 @@ void render_frame(struct mirage *m, quat head) {
             glUniform1f(R.uYFlip, 0.0f);
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, s->mesh_verts);
+    }
+
+    /* Loupe: resolve the offscreen scene to the screen through the radial warp.
+     * Fullscreen quad, depth off (it covers every pixel and writes no depth). */
+    if (loupe) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, m->glasses_w, m->glasses_h);
+        glDisable(GL_DEPTH_TEST);
+        glUseProgram(R.warp);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, R.fbo_tex);
+        glUniform1i(R.wTex, 0);
+        glUniform2f(R.wTexel, 1.0f/(float)m->glasses_w, 1.0f/(float)m->glasses_h);
+        glUniform1f(R.wAspect, (float)m->glasses_w / (float)m->glasses_h);
+        glUniform1f(R.wM, m->lens_power);
+        glUniform1f(R.wRin, m->cfg.lens_rin);
+        glUniform1f(R.wRout, m->cfg.lens_rout);
+        glUniform1f(R.wSharpen, m->cfg.sharpen);
+
+        glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+        glEnableVertexAttribArray(R.aPos);
+        glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+        glEnableVertexAttribArray(R.aUV);
+        glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glEnable(GL_DEPTH_TEST);
     }
 
     eglSwapBuffers(m->edpy, m->esurf);

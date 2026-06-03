@@ -21,6 +21,9 @@ void mirage_config_defaults(mirage_config *c) {
     c->read_deadband_deg = 0.22f;  /* freeze <0.22deg tremor so held text stays still */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_FLAT;  /* flat panels in the curved arc's layout */
+    c->lens_max          = 1.8f;   /* Cmd-held loupe peak magnification (1.0..2.5) */
+    c->lens_rin          = 0.45f;  /* magnified rect half-height (frac of half-ht) */
+    c->lens_rout         = 0.72f;  /* outer edge of the soft border; eased to 1x   */
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
 }

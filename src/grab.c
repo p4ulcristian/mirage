@@ -182,9 +182,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     case LIBINPUT_EVENT_KEYBOARD_KEY: {
         struct libinput_event_keyboard *k = libinput_event_get_keyboard_event(ev);
         uint32_t key = libinput_event_keyboard_get_key(k);
-        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA)
-            g->super = libinput_event_keyboard_get_key_state(k)
-                       == LIBINPUT_KEY_STATE_PRESSED;
+        bool down = libinput_event_keyboard_get_key_state(k)
+                    == LIBINPUT_KEY_STATE_PRESSED;
+        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
+            g->super = down;
+            /* Cmd held raises the gaze-centre loupe; release springs it back.
+             * render_frame eases lens_power toward this each frame. */
+            g->m->lens_target = down ? g->m->cfg.lens_max : 1.0f;
+        }
         break;
     }
     case LIBINPUT_EVENT_POINTER_MOTION: {
@@ -230,7 +235,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         enum libinput_pointer_axis ax = LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
         if (!libinput_event_pointer_has_axis(p, ax)) break;
         double v = libinput_event_pointer_get_scroll_value(p, ax);
-        if (g->super) {                  /* Super+scroll -> zoom (not forwarded) */
+        if (g->super) {                  /* Cmd+scroll -> telephoto zoom (not forwarded) */
             do_zoom(g, v);
             break;
         }
