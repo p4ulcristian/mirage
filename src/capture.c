@@ -4,6 +4,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <gbm.h>
 #include <drm_fourcc.h>
@@ -152,6 +153,24 @@ static void on_dmabuf(void *data, struct zwlr_screencopy_frame_v1 *f,
 /* mirage instance, stashed so the frame listener can reach gbm/egl */
 struct mirage *g_capture_mirage = NULL;
 
+/* "Hot" screens: ones that changed in the last CAPTURE_HOT_MS. They get a
+ * full-rate plain copy so the screen you're typing on is always current -
+ * copy_with_damage reveals a change one damage-event late (the "one character
+ * late" lag). Idle screens (no recent damage) fall back to damage copies and
+ * cost ~0. Keyed by screen index, refreshed from the damage callback, so it
+ * works whether or not you're in Super+G grab mode. */
+#define CAPTURE_HOT_MS 800
+static uint64_t g_hot_until_ms[MIRAGE_MAX_SCREENS];
+
+static uint64_t now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static bool screen_hot(const screen_t *s) {
+    return s->index >= 0 && s->index < MIRAGE_MAX_SCREENS
+           && now_ms() < g_hot_until_ms[s->index];
+}
+
 static void on_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *f) {
     screen_t *s = data;
     if (!s->drm_format) {           /* compositor offered no dmabuf format */
@@ -159,17 +178,19 @@ static void on_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *f) {
         return;
     }
     if (!ensure_buffer(g_capture_mirage, s)) { s->frame_state = 3; return; }
-    /* The focused screen (the one the captured cursor is on) is grabbed with a
-     * plain copy EVERY frame so the active window is always perfectly current -
-     * copy_with_damage can only reveal a change one damage-event later, which
-     * shows as input lag on the window you're actually using. Plain copy always
-     * completes, so with the immediate re-arm this screen captures at full rate.
+    /* A screen that changed recently (hot), or the one the captured cursor is
+     * on, gets a plain copy EVERY frame so the active window is always perfectly
+     * current - copy_with_damage can only reveal a change one damage-event
+     * later, which shows as the "one character late" lag on whatever you're
+     * typing into. Plain copy always completes, so with the immediate re-arm a
+     * hot screen captures at full rate. Damage events keep it hot while you type
+     * and stop ~CAPTURE_HOT_MS after, so it auto-promotes with NO dependence on
+     * grab mode.
      *
-     * Every other screen, and the very first grab, uses copy_with_damage: it
-     * only completes (ready) when the output actually changes, so static
-     * background screens cost zero compositor render + zero blit. GPU load thus
-     * scales with on-screen activity, not screen count or our render rate. */
-    bool active = s->index == grab_cursor_screen(g_capture_mirage);
+     * Every other (idle) screen uses copy_with_damage: it only completes (ready)
+     * when the output actually changes, so static background screens cost zero
+     * compositor render + zero blit. GPU load scales with on-screen activity. */
+    bool active = screen_hot(s) || s->index == grab_cursor_screen(g_capture_mirage);
     if (s->have_tex && !active)
         zwlr_screencopy_frame_v1_copy_with_damage(f, s->buffer);
     else
@@ -197,7 +218,12 @@ static void on_failed(void *data, struct zwlr_screencopy_frame_v1 *f) {
 
 static void on_damage(void *d, struct zwlr_screencopy_frame_v1 *f,
                       uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-    (void)d;(void)f;(void)x;(void)y;(void)w;(void)h;
+    (void)f;(void)x;(void)y;(void)w;(void)h;
+    /* this screen just changed -> keep it on full-rate plain copy briefly, so
+     * the next change shows immediately instead of one damage-event late. */
+    screen_t *s = d;
+    if (s->index >= 0 && s->index < MIRAGE_MAX_SCREENS)
+        g_hot_until_ms[s->index] = now_ms() + CAPTURE_HOT_MS;
 }
 
 static const struct zwlr_screencopy_frame_v1_listener FRAME_LISTENER = {
