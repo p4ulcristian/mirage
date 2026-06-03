@@ -248,7 +248,7 @@ static void usage(const char *p) {
            "  --yaw-gain F      amplify head yaw (default 2.5; >1 = reach side screens with less turn)\n"
            "  --pitch-gain F    amplify head pitch (default 3.0; >1 = reach the top row with less look-up)\n"
            "  --roll-damp F     fraction of head roll kept (default 0.25; 0 = full horizon lock)\n"
-           "  --read-deadband D freeze camera tremor below D deg for steady text (default 0.12; 0 = off)\n"
+           "  --read-deadband D freeze camera tremor below D deg for steady text (default 0.22; 0 = off)\n"
            "  --sharpen S       contrast-adaptive text sharpen strength (default 0.35; 0 = off)\n"
            "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
