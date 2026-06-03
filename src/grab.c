@@ -184,10 +184,12 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t key = libinput_event_keyboard_get_key(k);
         bool down = libinput_event_keyboard_get_key_state(k)
                     == LIBINPUT_KEY_STATE_PRESSED;
-        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
-            g->super = down;
-            /* Cmd held raises the gaze-centre loupe; release springs it back.
-             * render_frame eases lens_power toward this each frame. */
+        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA)
+            g->super = down;               /* Cmd gates scroll zoom + H-pan */
+        if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
+            /* Alt held raises the gaze-centre loupe; release springs it back.
+             * render_frame eases lens_power toward this each frame. Kept off
+             * Cmd so zoom/pan can run without the fisheye warp. */
             g->m->lens_target = down ? g->m->cfg.lens_max : 1.0f;
         }
         break;

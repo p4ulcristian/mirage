@@ -83,7 +83,7 @@ typedef struct {
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
-    /* Cmd-held loupe: a flat-top fisheye magnifier at the gaze centre. The
+    /* Alt-held loupe: a flat-top fisheye magnifier at the gaze centre. The
      * central disk (radius lens_rin) is uniformly magnified; lens_rin..lens_rout
      * is a smooth falloff back to 1x; beyond lens_rout the wall is untouched. */
     float lens_max;             /* peak magnification when Cmd is held             */
@@ -161,14 +161,14 @@ struct mirage {
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
     float lens_power;  /* eased current loupe magnification; 1.0 = off (no warp) */
-    float lens_target; /* where lens_power eases: lens_max while Cmd held, else 1 */
+    float lens_target; /* where lens_power eases: lens_max while Alt held, else 1 */
     bool running;
 };
 
 #define MIRAGE_ZOOM_MIN 0.5f
 #define MIRAGE_ZOOM_MAX 4.0f
 #define MIRAGE_LENS_MIN 1.0f   /* loupe off */
-#define MIRAGE_LENS_MAX 2.5f   /* peak Cmd-held magnification */
+#define MIRAGE_LENS_MAX 2.5f   /* peak Alt-held magnification */
 
 /* config.c */
 void mirage_config_defaults(mirage_config *c);

@@ -348,7 +348,7 @@ static bool ensure_fbo(int w, int h) {
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
 
-    /* Ease the loupe toward its target (lens_max while Cmd held, else 1.0).
+    /* Ease the loupe toward its target (lens_max while Alt held, else 1.0).
      * Active only above ~1, so the FBO indirection is skipped entirely when the
      * loupe is off - zero cost in the common case. */
     m->lens_power += (m->lens_target - m->lens_power) * 0.2f;
