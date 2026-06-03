@@ -48,8 +48,9 @@ typedef struct {
     bool super;                 /* Super held? (from the un-grabbed kbd)  */
 
     int   n;                    /* screen count                          */
-    int   x0[GRAB_MAX];         /* cumulative left edge of each screen    */
+    int   x0[GRAB_MAX], y0[GRAB_MAX];  /* top-left of each screen's grid cell */
     int   w[GRAB_MAX], h[GRAB_MAX];
+    int   cols, rows, cellw, cellh;    /* cursor grid (matches the visual wall) */
     int   strip_w, strip_h;
 
     double gx, gy;              /* cursor position in strip space         */
@@ -146,13 +147,17 @@ static void push_cursor(grab_state *g) {
     if (g->gx > g->strip_w - 1) g->gx = g->strip_w - 1;
     if (g->gy > g->strip_h - 1) g->gy = g->strip_h - 1;
 
-    int s = 0;
-    while (s < g->n - 1 && g->gx >= g->x0[s + 1]) s++;
+    /* which grid cell -> which screen. Top canvas band = top visual row. */
+    int col  = (int)(g->gx / g->cellw);  if (col  >= g->cols) col  = g->cols - 1;
+    int band = (int)(g->gy / g->cellh);  if (band >= g->rows) band = g->rows - 1;
+    int lay_row = (g->rows - 1) - band;
+    int s = lay_row * g->cols + col;
+    if (s >= g->n) return;               /* empty cell in a partial last row */
     g->cur = s;
     if (!g->vp[s]) return;
 
     uint32_t lx = (uint32_t)(g->gx - g->x0[s]);
-    uint32_t ly = (uint32_t)g->gy;
+    uint32_t ly = (uint32_t)(g->gy - g->y0[s]);
     if (lx > (uint32_t)g->w[s] - 1) lx = g->w[s] - 1;
     if (ly > (uint32_t)g->h[s] - 1) ly = g->h[s] - 1;
 
@@ -250,27 +255,42 @@ bool grab_init(struct mirage *m) {
     grab_state *g = calloc(1, sizeof *g);
     m->grab = g;
     g->m = m;
-    g->sens = 1.0f;
+    const char *sv = getenv("MIRAGE_SENS");   /* trackpad cursor speed (both axes) */
+    g->sens = sv ? (float)atof(sv) : 2.0f;
     g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
     const char *td = getenv("MIRAGE_TRACKPAD");
     const char *kb = getenv("MIRAGE_KEYBOARD");
     snprintf(g->dev, sizeof g->dev, "%s", td ? td : "/dev/input/event0");
     snprintf(g->kbd, sizeof g->kbd, "%s", kb ? kb : "/dev/input/event1");
 
-    int x = 0;
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
+
+    /* Lay the cursor canvas out as the SAME grid as the visual wall: screen_cols
+     * columns wide, ceil(n/cols) rows tall. So the cursor moves right across the
+     * columns and up/down between the rows, instead of a single 1xN row where it
+     * could only ever travel right. Uniform cell = the largest screen. */
+    g->cols = m->cfg.screen_cols > 0 ? m->cfg.screen_cols : 3;
+    g->rows = (g->n + g->cols - 1) / g->cols;
+    for (int i = 0; i < g->n; i++) {
+        if (m->screen[i].width  > g->cellw) g->cellw = m->screen[i].width;
+        if (m->screen[i].height > g->cellh) g->cellh = m->screen[i].height;
+    }
     for (int i = 0; i < g->n; i++) {
         screen_t *s = &m->screen[i];
-        g->x0[i] = x; g->w[i] = s->width; g->h[i] = s->height;
-        x += s->width;
-        if (s->height > g->strip_h) g->strip_h = s->height;
+        int col       = i % g->cols;
+        int lay_row   = i / g->cols;            /* layout row: 0 = bottom (eye level) */
+        int band      = (g->rows - 1) - lay_row; /* canvas band: 0 = top (small y) */
+        g->w[i]  = s->width;  g->h[i] = s->height;
+        g->x0[i] = col  * g->cellw;
+        g->y0[i] = band * g->cellh;
         g->vp[i] = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
                        m->vpointer_mgr, m->seat, s->wl);
     }
-    g->strip_w = x;
+    g->strip_w = g->cols * g->cellw;
+    g->strip_h = g->rows * g->cellh;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    fprintf(stderr, "grab: ready (%d screens, strip %dx%d, trackpad %s). "
-            "Super+G to capture.\n", g->n, g->strip_w, g->strip_h, g->dev);
+    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s). "
+            "Super+G to capture.\n", g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev);
     return true;
 }
 
@@ -306,6 +326,14 @@ void grab_toggle(struct mirage *m) {
 }
 
 bool grab_active(struct mirage *m) { grab_state *g = GS(m); return g && g->active; }
+
+/* Screen the captured cursor is currently on (== the focused window's screen
+ * under focus-follows-mouse), or -1 when not capturing. Capture uses this to
+ * grab the active screen at full rate so the focused window never lags. */
+int grab_cursor_screen(struct mirage *m) {
+    grab_state *g = GS(m);
+    return (g && g->active) ? g->cur : -1;
+}
 
 void grab_destroy(struct mirage *m) {
     grab_state *g = GS(m);

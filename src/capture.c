@@ -136,12 +136,18 @@ static void on_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *f) {
         return;
     }
     if (!ensure_buffer(g_capture_mirage, s)) { s->frame_state = 3; return; }
-    /* First grab is a plain copy so the screen shows its current content right
-     * away; after that use copy_with_damage, which only completes (ready) when
-     * the output actually changes. Static screens then cost zero compositor
-     * render + zero blit, so the GPU load scales with on-screen activity, not
-     * with screen count or our render rate. */
-    if (s->have_tex)
+    /* The focused screen (the one the captured cursor is on) is grabbed with a
+     * plain copy EVERY frame so the active window is always perfectly current -
+     * copy_with_damage can only reveal a change one damage-event later, which
+     * shows as input lag on the window you're actually using. Plain copy always
+     * completes, so with the immediate re-arm this screen captures at full rate.
+     *
+     * Every other screen, and the very first grab, uses copy_with_damage: it
+     * only completes (ready) when the output actually changes, so static
+     * background screens cost zero compositor render + zero blit. GPU load thus
+     * scales with on-screen activity, not screen count or our render rate. */
+    bool active = s->index == grab_cursor_screen(g_capture_mirage);
+    if (s->have_tex && !active)
         zwlr_screencopy_frame_v1_copy_with_damage(f, s->buffer);
     else
         zwlr_screencopy_frame_v1_copy(f, s->buffer);
@@ -181,17 +187,23 @@ static const struct zwlr_screencopy_frame_v1_listener FRAME_LISTENER = {
     .buffer_done  = on_buffer_done,
 };
 
+/* Arm a fresh screencopy frame for one screen. overlay_cursor=1 composites the
+ * cursor into the copy, so the pointer mirage injects onto a virtual screen is
+ * visible on the glasses. Once a frame is armed it sits in flight (costing
+ * nothing for copy_with_damage) until the output next changes. */
+static void arm_frame(struct mirage *m, screen_t *s) {
+    g_capture_mirage = m;
+    s->frame_state = 1;
+    s->frame = zwlr_screencopy_manager_v1_capture_output(m->screencopy, 1, s->wl);
+    zwlr_screencopy_frame_v1_add_listener(s->frame, &FRAME_LISTENER, s);
+}
+
 void capture_begin_frame(struct mirage *m) {
     g_capture_mirage = m;
     for (int i = 0; i < m->n_screen; i++) {
         screen_t *s = &m->screen[i];
-        if (s->frame) continue;              /* still in flight */
-        s->frame_state = 1;
-        /* overlay_cursor=1 composites the cursor into the copy, so the pointer
-         * mirage injects onto a virtual screen is visible on the glasses. */
-        s->frame = zwlr_screencopy_manager_v1_capture_output(
-            m->screencopy, 1, s->wl);
-        zwlr_screencopy_frame_v1_add_listener(s->frame, &FRAME_LISTENER, s);
+        if (s->frame) continue;              /* still in flight / re-armed */
+        arm_frame(m, s);
     }
 }
 
@@ -201,7 +213,8 @@ bool capture_poll(struct mirage *m) {
         screen_t *s = &m->screen[i];
         if (s->frame_state == 1) { all_settled = false; continue; }
         if (s->frame) {
-            if (s->frame_state == 2) {       /* ready: contents updated */
+            bool ready = s->frame_state == 2;
+            if (ready) {                     /* ready: contents updated */
                 s->have_tex = true;
                 if (s->image != EGL_NO_IMAGE_KHR) {
                     glBindTexture(GL_TEXTURE_2D, s->tex);
@@ -211,6 +224,15 @@ bool capture_poll(struct mirage *m) {
             zwlr_screencopy_frame_v1_destroy(s->frame);
             s->frame = NULL;
             s->frame_state = 0;
+            /* Re-arm immediately after a successful capture so a copy_with_damage
+             * frame is always in flight to catch the NEXT change. Leaving the
+             * screen un-armed until the next ~16ms tick opened a blind spot where
+             * a keystroke's damage was missed and only surfaced on the following
+             * keystroke - the "one letter behind" lag. A re-armed damage frame is
+             * free while idle, so this keeps cc7b371's savings. On failure we
+             * leave it NULL so capture_begin_frame re-arms on the throttled tick,
+             * avoiding a busy loop on a persistently failing output. */
+            if (ready) arm_frame(m, s);
         }
     }
     return all_settled;

@@ -175,6 +175,7 @@ bool grab_init(struct mirage *m);
 void grab_toggle(struct mirage *m);   /* enter/leave capture mode (Super+G)    */
 void grab_pump(struct mirage *m);     /* drain trackpad events (every frame)   */
 bool grab_active(struct mirage *m);
+int  grab_cursor_screen(struct mirage *m);  /* focused screen idx, -1 if none   */
 void grab_destroy(struct mirage *m);
 
 #endif /* MIRAGE_H */

@@ -9,6 +9,25 @@ LOG=/tmp/mirage.log
 
 [ -x "$BIN" ] || { echo "build first: make"; exit 1; }
 
+# Auto-detect the trackpad + keyboard event nodes for Super+G capture. The grab
+# code's compiled-in defaults (event0/event1) are wrong on this machine - event
+# numbers are not stable and depend on probe order. We parse /proc/bus/input/
+# devices, matching by device Name, and resolve to the event* handler. Anything
+# the caller already exported in MIRAGE_TRACKPAD/MIRAGE_KEYBOARD wins.
+detect_input() {  # $1 = Name regex -> prints /dev/input/eventN
+    awk -v re="$1" '
+        /^N: Name=/ { match($0, re); hit = RSTART > 0 }
+        hit && /^H: Handlers=/ {
+            n = split($0, f, /[ \t]/)
+            for (i = 1; i <= n; i++) if (f[i] ~ /^event[0-9]+$/) { print "/dev/input/" f[i]; exit }
+        }
+    ' /proc/bus/input/devices
+}
+: "${MIRAGE_TRACKPAD:=$(detect_input "multi-touch|[Tt]ouchpad|[Tt]rackpad")}"
+: "${MIRAGE_KEYBOARD:=$(detect_input "[Kk]eyboard")}"
+export MIRAGE_TRACKPAD MIRAGE_KEYBOARD
+echo "input: trackpad=${MIRAGE_TRACKPAD:-?} keyboard=${MIRAGE_KEYBOARD:-?}"
+
 # --3d needs head tracking: make sure the RayNeo bridge is running first.
 # (bridge.sh is a no-op if it's already up.)
 if [[ " $* " == *" --3d "* ]] || [[ " $* " == *" --3d" ]]; then
