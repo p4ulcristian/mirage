@@ -250,6 +250,7 @@ static void usage(const char *p) {
            "  --roll-damp F     fraction of head roll kept (default 0.25; 0 = full horizon lock)\n"
            "  --read-deadband D freeze camera tremor below D deg for steady text (default 0.22; 0 = off)\n"
            "  --sharpen S       contrast-adaptive text sharpen strength (default 0.35; 0 = off)\n"
+           "  --flat/--cylinder  screen surface: flat panels (default) or curved strips\n"
            "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
            "  --invert-yaw      flip yaw if turning your head feels reversed\n"
@@ -277,6 +278,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--roll-damp") && i+1<argc) M.cfg.roll_damp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--read-deadband") && i+1<argc) M.cfg.read_deadband_deg = atof(argv[++i]);
         else if (!strcmp(argv[i], "--sharpen") && i+1<argc) M.cfg.sharpen = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--flat"))     M.cfg.geometry = GEOM_FLAT;
+        else if (!strcmp(argv[i], "--cylinder")) M.cfg.geometry = GEOM_CYLINDER;
         else if (!strcmp(argv[i], "--smooth")   && i+1<argc) {
             M.cfg.pose_smoothing = atof(argv[++i]);
             M.cfg.pose_oneeuro = false;   /* --smooth opts into the legacy filter */

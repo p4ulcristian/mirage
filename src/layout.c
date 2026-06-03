@@ -32,12 +32,21 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
      * (Was (col - (cols-1)/2), which reversed it to VIRT3,VIRT2,VIRT1.) */
     float yaw   = ((cols - 1) * 0.5f - (float)col) * (ang_w + gap);
 
-    /* panel height in metres (matches render.c build_curved_mesh) */
+    /* panel height in metres - matches the mesh so rows abut. Flat panels
+     * (build_flat_mesh) are 2*d*tan(ang_w/2)*aspect tall; the curved strip is
+     * d*ang_w*aspect (arc length * aspect). Same yaw + straight-up lift either
+     * way, so the orientation is identical - flat just isn't bent. */
     const screen_t *s = &m->screen[i];
     float aspect = (s->width > 0 && s->height > 0)
                    ? (float)s->height / (float)s->width : 9.0f/16.0f;
-    float h    = c->screen_distance_m * ang_w * aspect;
-    float lift = (float)row * h;                               /* rows stack up */
+    float h = (c->geometry == GEOM_FLAT)
+              ? 2.0f * c->screen_distance_m * tanf(ang_w * 0.5f) * aspect
+              : c->screen_distance_m * ang_w * aspect;
+    /* Row gap to match the column gap: columns are spaced by `gap` radians of
+     * yaw, so a metric d*gap between rows subtends the same ~gap angle at the
+     * screen distance - equal-looking gaps in both directions. */
+    float vgap = c->screen_distance_m * gap;
+    float lift = (float)row * (h + vgap);                     /* rows stack up, gapped */
 
     /* rotate onto the cylinder column, then lift straight up (no tilt) */
     mat4 R = m4_from_quat(q_from_euler_ypr(yaw, 0, 0));

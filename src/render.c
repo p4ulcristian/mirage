@@ -120,6 +120,32 @@ static void build_curved_mesh(struct mirage *m, screen_t *s) {
     free(buf);
 }
 
+/* Same screen as build_curved_mesh but FLAT: a single quad tangent to the
+ * radius-d sphere at -Z, subtending the same angular width (so the layout's
+ * yaw spacing and gaps are unchanged). The layout still rotates it onto its
+ * column and lifts it straight up - same orientation as the cylinder, just not
+ * bent, so text stays straight. 4 verts (flat = already perspective-correct). */
+static void build_flat_mesh(struct mirage *m, screen_t *s) {
+    const mirage_config *c = &m->cfg;
+    float d      = c->screen_distance_m;
+    float ang_w  = c->screen_arc_deg * (float)M_PI/180.0f;
+    float aspect = (s->width > 0 && s->height > 0)
+                   ? (float)s->height / (float)s->width : 9.0f/16.0f;
+    float hw = d * tanf(ang_w * 0.5f);       /* half width  (subtends ang_w) */
+    float hh = hw * aspect;                  /* half height keeps 16:9       */
+
+    const GLfloat q[] = {                    /* TL, TR, BL, BR (strip)       */
+        -hw,  hh, -d,  0.0f, 0.0f,
+         hw,  hh, -d,  1.0f, 0.0f,
+        -hw, -hh, -d,  0.0f, 1.0f,
+         hw, -hh, -d,  1.0f, 1.0f,
+    };
+    glGenBuffers(1, &s->mesh_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, s->mesh_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
+    s->mesh_verts = 4;
+}
+
 bool render_init(struct mirage *m) {
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
     if (m->edpy == EGL_NO_DISPLAY) { fprintf(stderr, "render: no EGL display\n"); return false; }
@@ -179,11 +205,13 @@ bool render_init(struct mirage *m) {
 
     glEnable(GL_DEPTH_TEST);
 
-    /* build one curved mesh per screen */
+    /* build one mesh per screen (flat quad or curved strip) */
     int nbuild = m->n_screen;
     if (nbuild < 0 || nbuild > MIRAGE_MAX_SCREENS) nbuild = 0;
-    for (int i = 0; i < nbuild; i++)
-        build_curved_mesh(m, &m->screen[i]);
+    for (int i = 0; i < nbuild; i++) {
+        if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, &m->screen[i]);
+        else                              build_curved_mesh(m, &m->screen[i]);
+    }
 
     fprintf(stderr, "render: EGL %d.%d, GL_RENDERER=%s\n", major, minor,
             (const char*)glGetString(GL_RENDERER));

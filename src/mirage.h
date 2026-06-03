@@ -24,6 +24,10 @@
 
 #define MIRAGE_MAX_SCREENS 8
 
+/* screen surface: curved cylinder strips, or flat quads in the same column-yaw
+ * / straight-up-row layout (no bend, but same orientation). */
+enum mirage_geometry { GEOM_CYLINDER = 0, GEOM_FLAT = 1 };
+
 struct mirage; /* fwd */
 
 /* One captured virtual display, ready to texture onto a quad. */
@@ -77,6 +81,7 @@ typedef struct {
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
+    int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */
