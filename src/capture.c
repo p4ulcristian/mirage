@@ -16,6 +16,20 @@ static PFNEGLCREATEIMAGEKHRPROC            p_eglCreateImageKHR;
 static PFNEGLDESTROYIMAGEKHRPROC           p_eglDestroyImageKHR;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC p_glEGLImageTargetTexture2DOES;
 
+/* Max anisotropy the driver supports (1 = unsupported/off). Captured screens are
+ * minified ~1.13x head-on and far more on the side/top screens viewed at a
+ * glancing angle, where an anisotropic footprint sharpens text the most. */
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+static float g_aniso = 1.0f;
+
+static bool has_gl_ext(const char *name) {
+    const char *e = (const char*)glGetString(GL_EXTENSIONS);
+    return e && strstr(e, name) != NULL;
+}
+
 static int open_render_node(void) {
     /* render nodes are typically /dev/dri/renderD12N */
     for (int n = 128; n < 140; n++) {
@@ -40,6 +54,13 @@ bool capture_init(struct mirage *m) {
     if (!p_eglCreateImageKHR || !p_glEGLImageTargetTexture2DOES) {
         fprintf(stderr, "capture: dmabuf EGLImage import not available\n");
         return false;
+    }
+
+    if (has_gl_ext("GL_EXT_texture_filter_anisotropic")) {
+        GLfloat amax = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
+        g_aniso = amax > 8.0f ? 8.0f : amax;   /* 8x is plenty; diminishing past it */
+        fprintf(stderr, "capture: anisotropic filtering up to %.0fx\n", g_aniso);
     }
     return true;
 }
@@ -100,6 +121,8 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (g_aniso > 1.0f)
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, g_aniso);
     p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, s->image);
 
     fprintf(stderr, "capture[%s]: %dx%d fmt %.4s mod %llx stride %u -> tex %u\n",

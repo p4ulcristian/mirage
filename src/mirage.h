@@ -75,6 +75,8 @@ typedef struct {
     float yaw_gain;             /* head-yaw amplification (1 = 1:1)      */
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
+    float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
+    float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
 
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */

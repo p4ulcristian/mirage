@@ -18,6 +18,8 @@ void mirage_config_defaults(mirage_config *c) {
     c->yaw_gain          = 2.5f;   /* amplify head yaw: reach side screens w/ ~16deg turn */
     c->pitch_gain        = 3.0f;   /* amplify head pitch: reach the top row w/ ~7deg look-up */
     c->roll_damp         = 0.25f;  /* keep 25% of head roll: mostly horizon-locked  */
+    c->read_deadband_deg = 0.12f;  /* freeze <0.12deg tremor so held text stays still */
+    c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
 }

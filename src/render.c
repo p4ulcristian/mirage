@@ -9,27 +9,44 @@ static const char *VERT_SRC =
     "attribute vec2 aUV;\n"
     "uniform mat4 uMVP;\n"
     "uniform float uYFlip;\n"
-    "varying vec2 vUV;\n"
+    "varying highp vec2 vUV;\n"
     "void main() {\n"
     "  gl_Position = uMVP * vec4(aPos, 1.0);\n"
     "  vUV = vec2(aUV.x, mix(aUV.y, 1.0 - aUV.y, uYFlip));\n"
     "}\n";
 
+/* Contrast-adaptive sharpen (RCAS-style): an unsharp mask whose result is
+ * clamped to the 4-neighbour min/max, so it crisps glyph stems WITHOUT the
+ * overshoot halos a plain unsharp produces. Recovers apparent resolution lost
+ * to minifying the desktop onto the arc - the cheap win the research flagged
+ * over (bandwidth-hungry, near-useless here) supersampling. uTexel is one
+ * source texel in UV; highp so the sub-pixel taps land precisely. */
 static const char *FRAG_SRC =
     "precision mediump float;\n"
-    "varying vec2 vUV;\n"
+    "varying highp vec2 vUV;\n"
     "uniform sampler2D uTex;\n"
     "uniform float uHasTex;\n"
     "uniform vec3 uColor;\n"
+    "uniform highp vec2 uTexel;\n"
+    "uniform float uSharpen;\n"
     "void main() {\n"
-    "  vec3 c = uHasTex > 0.5 ? texture2D(uTex, vUV).rgb : uColor;\n"
-    "  gl_FragColor = vec4(c, 1.0);\n"
+    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, 1.0); return; }\n"
+    "  vec3 e = texture2D(uTex, vUV).rgb;\n"
+    "  if (uSharpen > 0.0) {\n"
+    "    vec3 b = texture2D(uTex, vUV + vec2(0.0, -uTexel.y)).rgb;\n"
+    "    vec3 d = texture2D(uTex, vUV + vec2(-uTexel.x, 0.0)).rgb;\n"
+    "    vec3 f = texture2D(uTex, vUV + vec2( uTexel.x, 0.0)).rgb;\n"
+    "    vec3 h = texture2D(uTex, vUV + vec2(0.0,  uTexel.y)).rgb;\n"
+    "    vec3 s = e + (e - (b + d + f + h) * 0.25) * uSharpen;\n"
+    "    e = clamp(s, min(min(b,d), min(f,h)), max(max(b,d), max(f,h)));\n"
+    "  }\n"
+    "  gl_FragColor = vec4(e, 1.0);\n"
     "}\n";
 
 static struct {
     GLuint prog;
     GLint  aPos, aUV;
-    GLint  uMVP, uYFlip, uHasTex, uColor, uTex;
+    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
     GLuint vbo;
 } R;
 
@@ -153,6 +170,8 @@ bool render_init(struct mirage *m) {
     R.uHasTex = glGetUniformLocation(R.prog, "uHasTex");
     R.uColor  = glGetUniformLocation(R.prog, "uColor");
     R.uTex    = glGetUniformLocation(R.prog, "uTex");
+    R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
+    R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
 
     glGenBuffers(1, &R.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
@@ -197,6 +216,30 @@ void render_frame(struct mirage *m, quat head) {
     head = q_from_euler_ypr(yaw * m->cfg.yaw_gain, pitch * m->cfg.pitch_gain,
                             roll * m->cfg.roll_damp);
 
+    /* Reading-stability deadband. The comfort gains above amplify head tremor
+     * 2.5-3x, so even a still head leaves text shimmering. We hold the last
+     * presented orientation and only follow once the camera has moved past a
+     * small angle, then follow the EXCESS over that angle - a soft deadband, so
+     * crossing the threshold doesn't snap. Sub-threshold tremor is frozen out
+     * entirely (text sits dead still), while a real head turn dwarfs the
+     * threshold and passes through with only ~deadband worth of lag. */
+    if (m->cfg.read_deadband_deg > 0.0f) {
+        static quat presented; static bool seeded = false;
+        if (!seeded) { presented = head; seeded = true; }
+        else {
+            float dot = presented.w*head.w + presented.x*head.x
+                      + presented.y*head.y + presented.z*head.z;
+            if (dot < 0.0f) dot = -dot;
+            if (dot > 1.0f) dot = 1.0f;
+            float ang = 2.0f * acosf(dot);                 /* rad moved this frame */
+            float db  = m->cfg.read_deadband_deg * (float)M_PI/180.0f;
+            float follow = ang > 1e-6f ? (ang - db) / ang : 0.0f;
+            if (follow < 0.0f) follow = 0.0f;              /* inside deadband: freeze */
+            presented = q_nlerp(presented, head, follow);
+        }
+        head = presented;
+    }
+
     mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);
 
@@ -224,6 +267,9 @@ void render_frame(struct mirage *m, quat head) {
             glUniform1i(R.uTex, 0);
             glUniform1f(R.uHasTex, 1.0f);
             glUniform1f(R.uYFlip, s->y_invert ? 1.0f : 0.0f);
+            glUniform2f(R.uTexel, s->width > 0 ? 1.0f/(float)s->width : 0.0f,
+                                  s->height > 0 ? 1.0f/(float)s->height : 0.0f);
+            glUniform1f(R.uSharpen, m->cfg.sharpen);
         } else {
             const float *p = PLACEHOLDER[i % 5];
             glUniform3f(R.uColor, p[0], p[1], p[2]);
@@ -279,6 +325,9 @@ static void render_flat_to(struct mirage *m, EGLSurface surf, int W, int H) {
             glUniform1i(R.uTex, 0);
             glUniform1f(R.uHasTex, 1.0f);
             glUniform1f(R.uYFlip, s->y_invert ? 1.0f : 0.0f);
+            glUniform2f(R.uTexel, s->width > 0 ? 1.0f/(float)s->width : 0.0f,
+                                  s->height > 0 ? 1.0f/(float)s->height : 0.0f);
+            glUniform1f(R.uSharpen, m->cfg.sharpen);
         } else {
             const float *p = PLACEHOLDER[i % 5];
             glUniform3f(R.uColor, p[0], p[1], p[2]);
