@@ -6,7 +6,7 @@ void mirage_config_defaults(mirage_config *c) {
     c->screen_count     = 6;       /* 2 rows x 3 cols (VIRT1-6); auto-bound by discovery */
     c->screen_distance_m = 2.0f;   /* screens sit 2 m away              */
     c->screen_width_m    = 1.30f;  /* ~1.3 m wide each (a big monitor)  */
-    c->arc_spacing_deg   = 0.0f;   /* extra gap between screens; 0 = touching */
+    c->arc_spacing_deg   = 2.0f;   /* small gap between screens (deg); 0 = touching */
     c->screen_arc_deg    = 40.0f;  /* each curved screen spans 40 deg of arc */
     c->screen_cols       = 3;      /* 3 per row; extra screens stack above   */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
