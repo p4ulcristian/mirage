@@ -266,7 +266,6 @@ int main(int argc, char **argv) {
     M.zoom = 1.0f;
     M.lens_power = M.lens_target = 1.0f;   /* loupe off until Alt is held */
     M.view_focus = (M.cfg.screen_cols > 0 ? M.cfg.screen_cols - 1 : 2) / 2;  /* centre screen */
-    M.orbit_x = M.orbit_y = 0.0f;          /* eye at origin until focus moves */
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--output")   && i+1<argc) opt_output = argv[++i];
         else if (!strcmp(argv[i], "--port")     && i+1<argc) M.cfg.pose_port = atoi(argv[++i]);

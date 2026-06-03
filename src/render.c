@@ -413,27 +413,9 @@ void render_frame(struct mirage *m, quat head) {
         m->pan_pitch += (tp - m->pan_pitch) * k;
         quat pan = q_from_euler_ypr(m->pan_yaw, m->pan_pitch, 0.0f);
         head = q_mul(pan, head);
-
-        /* Orbit: slide the eye sideways toward the focused screen so a Cmd+H
-         * swipe moves the viewpoint in the swipe direction (right -> right),
-         * getting around to the next row on wrap. Lateral + vertical only;
-         * depth is held constant, so it's a slide, not a dolly. One column of
-         * travel = ORBIT_SIDE * d metres; one row up = ORBIT_LIFT * d. */
-        const float ORBIT_SIDE = 0.25f, ORBIT_LIFT = 0.25f;
-        int cols = m->cfg.screen_cols > 0 ? m->cfg.screen_cols : 3;
-        int colf = f % cols, rowf = f / cols;
-        float cx = (cols - 1) * 0.5f;
-        float d  = m->cfg.screen_distance_m;
-        float ex = ORBIT_SIDE * d * ((float)colf - cx);   /* +x = right         */
-        float ey = ORBIT_LIFT * d * (float)rowf;          /* +y = up, per row    */
-        m->orbit_x += (ex - m->orbit_x) * k;
-        m->orbit_y += (ey - m->orbit_y) * k;
     }
 
-    /* world -> head space: rotate about the (panned) head, then offset by the
-     * orbit eye position so the viewpoint slides with the focused screen. */
-    mat4 view = m4_mul(m4_from_quat(q_conj(head)),
-                       m4_translate(v3(-m->orbit_x, -m->orbit_y, 0.0f)));
+    mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);
 
     glUseProgram(R.prog);

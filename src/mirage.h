@@ -160,8 +160,6 @@ struct mirage {
     int   view_focus; /* Cmd+H-scroll focus: display the view pans to (ring idx) */
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
-    float orbit_x;    /* eased eye slide (world m) toward view_focus: +x = right */
-    float orbit_y;    /* eased eye lift  (world m) toward view_focus: +y = up    */
     float lens_power;  /* eased current loupe magnification; 1.0 = off (no warp) */
     float lens_target; /* where lens_power eases: lens_max while Alt held, else 1 */
     bool running;
