@@ -264,6 +264,7 @@ static void usage(const char *p) {
 int main(int argc, char **argv) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
+    M.view_focus = (M.cfg.screen_cols > 0 ? M.cfg.screen_cols - 1 : 2) / 2;  /* centre screen */
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--output")   && i+1<argc) opt_output = argv[++i];
         else if (!strcmp(argv[i], "--port")     && i+1<argc) M.cfg.pose_port = atoi(argv[++i]);

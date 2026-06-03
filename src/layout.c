@@ -53,3 +53,28 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
     mat4 T = m4_translate(v3(0.0f, lift, 0.0f));
     return m4_mul(T, R);
 }
+
+/* The camera orientation that puts display `i` dead-centre. Yaw is the screen's
+ * own column yaw (so q_conj of it un-rotates the screen to -Z); pitch looks up
+ * at the row's lifted centre. Geometry must match layout_model_matrix above. */
+void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch) {
+    const mirage_config *c = &m->cfg;
+    int cols = c->screen_cols > 0 ? c->screen_cols : 3;
+    int col = i % cols;
+    int row = i / cols;
+
+    float ang_w = c->screen_arc_deg * (float)M_PI/180.0f;
+    float gap   = c->arc_spacing_deg * (float)M_PI/180.0f;
+    *yaw = ((cols - 1) * 0.5f - (float)col) * (ang_w + gap);
+
+    const screen_t *s = &m->screen[i];
+    float aspect = (s->width > 0 && s->height > 0)
+                   ? (float)s->height / (float)s->width : 9.0f/16.0f;
+    float h = (c->geometry == GEOM_FLAT)
+              ? 2.0f * c->screen_distance_m * tanf(ang_w * 0.5f) * aspect
+              : c->screen_distance_m * ang_w * aspect;
+    float vgap = c->screen_distance_m * gap;
+    float lift = (float)row * (h + vgap);
+    /* screen centre is `lift` above eye at horizontal distance d; look up to it */
+    *pitch = atan2f(lift, c->screen_distance_m);
+}

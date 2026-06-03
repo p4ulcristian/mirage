@@ -57,6 +57,7 @@ typedef struct {
     int    cur;                 /* screen the cursor is currently on      */
     float  sens;               /* motion scale                          */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
+    double hscroll_acc;        /* accumulated H delta -> Cmd-pan display steps */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
@@ -208,6 +209,24 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
     case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS: {
         struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
+
+        /* Super+horizontal -> pan the wall across the display ring, snapping one
+         * screen per swipe (VIRT1..N as a loop). Independent of the vertical
+         * (zoom) axis, so a diagonal swipe can do both. */
+        enum libinput_pointer_axis hax = LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL;
+        if (g->super && libinput_event_pointer_has_axis(p, hax)) {
+            double hv = libinput_event_pointer_get_scroll_value(p, hax);
+            const double PAN_NOTCH = 30.0;   /* trackpad units per display step */
+            int nscr = g->n > 0 ? g->n : 1;
+            g->hscroll_acc += hv;
+            while (g->hscroll_acc >= PAN_NOTCH || g->hscroll_acc <= -PAN_NOTCH) {
+                int dir = g->hscroll_acc > 0 ? 1 : -1;  /* +1 = scroll right -> next screen */
+                g->hscroll_acc -= dir * PAN_NOTCH;
+                g->m->view_focus = (g->m->view_focus + dir + nscr) % nscr;
+            }
+            if (hv == 0.0) g->hscroll_acc = 0.0;   /* reset on finger lift */
+        }
+
         enum libinput_pointer_axis ax = LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
         if (!libinput_event_pointer_has_axis(p, ax)) break;
         double v = libinput_event_pointer_get_scroll_value(p, ax);

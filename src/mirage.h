@@ -150,6 +150,9 @@ struct mirage {
 
     mirage_config cfg;
     float zoom;       /* view zoom (Super+scroll); 1.0 = default, clamped       */
+    int   view_focus; /* Cmd+H-scroll focus: display the view pans to (ring idx) */
+    float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
+    float pan_pitch;
     bool running;
 };
 
@@ -175,6 +178,9 @@ void capture_finish(struct mirage *m);
 
 /* layout.c - where each screen sits in 3D */
 mat4 layout_model_matrix(const struct mirage *m, int screen_index);
+/* Camera yaw/pitch (rad) that centres display `i` in view - used to pan the
+ * wall to a focused screen. Mirrors the yaw + lift placement in the model. */
+void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch);
 
 /* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
  * drive a cursor across the virtual screens as one continuous strip. */
