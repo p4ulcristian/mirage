@@ -41,12 +41,15 @@ static struct {
     float speed_lp;  /* low-passed angular speed (rad/s)          */
     bool have_signal;
     bool want_recenter;
+    bool smooth_on;       /* runtime A/B toggle; raw passthrough when false  */
     uint64_t last_sample_ms;
+    uint32_t sample_count; /* raw samples since last pose_take_sample_count() */
     int fd;          /* listening socket / source fd             */
 } P = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
     .reference = {1,0,0,0},
+    .smooth_on = true,
     .fd = -1,
 };
 
@@ -85,6 +88,12 @@ static void submit_raw(quat raw) {
         P.smoothed = raw;
         P.prev_raw = raw;
         P.speed_lp = 0.0f;
+    } else if (!P.smooth_on) {
+        /* runtime toggle off: pass the raw sample straight through (zero added
+         * filter lag). Keep prev_raw current so re-enabling doesn't see a stale
+         * derivative and spike the One-Euro cutoff. */
+        P.smoothed = raw;
+        P.prev_raw = raw;
     } else if (P.cfg.use_oneeuro) {
         /* One-Euro: cutoff (and thus follow speed) rises with head angular
          * speed, so the image locks when you hold still yet keeps up when you
@@ -110,6 +119,7 @@ static void submit_raw(quat raw) {
     P.raw = raw;
     P.have_signal = true;
     P.last_sample_ms = t;
+    P.sample_count++;
     pthread_mutex_unlock(&P.lock);
 }
 
@@ -262,6 +272,29 @@ uint32_t pose_age_ms(void) {
                                  : UINT32_MAX;
     pthread_mutex_unlock(&P.lock);
     return age;
+}
+
+uint32_t pose_take_sample_count(void) {
+    pthread_mutex_lock(&P.lock);
+    uint32_t c = P.sample_count;
+    P.sample_count = 0;
+    pthread_mutex_unlock(&P.lock);
+    return c;
+}
+
+bool pose_toggle_smoothing(void) {
+    pthread_mutex_lock(&P.lock);
+    P.smooth_on = !P.smooth_on;
+    bool s = P.smooth_on;
+    pthread_mutex_unlock(&P.lock);
+    return s;
+}
+
+bool pose_smoothing_enabled(void) {
+    pthread_mutex_lock(&P.lock);
+    bool s = P.smooth_on;
+    pthread_mutex_unlock(&P.lock);
+    return s;
 }
 
 bool pose_has_signal(void) {

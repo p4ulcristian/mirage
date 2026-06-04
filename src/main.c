@@ -22,9 +22,11 @@ static struct mirage M;
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_recenter = 0;
 static volatile sig_atomic_t g_grab_toggle = 0;
+static volatile sig_atomic_t g_smooth_toggle = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
 static void on_recenter(int s) { (void)s; g_recenter = 1; }     /* SIGUSR1 */
 static void on_grab(int s) { (void)s; g_grab_toggle = 1; }      /* SIGUSR2 */
+static void on_smooth(int s) { (void)s; g_smooth_toggle = 1; }  /* SIGHUP  */
 
 /* override which output is the render target (default: auto by glasses_match) */
 static const char *opt_output = NULL;
@@ -251,6 +253,12 @@ static void usage(const char *p) {
            "  --read-deadband D freeze camera tremor below D deg for steady text (default 0.22; 0 = off)\n"
            "  --sharpen S       contrast-adaptive text sharpen strength (default 0.35; 0 = off)\n"
            "  --flat/--cylinder  screen surface: flat panels (default) or curved strips\n"
+           "  --slab-depth M    screen thickness in metres (default 0.05; 0 = flat, no slab)\n"
+           "  --no-terrain      hide the mountain landscape you float above\n"
+           "  --floor           show the flat grass floor instead of terrain\n"
+           "  --floor-height M  floor distance below eye level (default 1.8 m)\n"
+           "  --shadows         drop the slabs' shadow onto the floor (needs --floor)\n"
+           "  --no-sky          hide the gradient + cloud sky dome\n"
            "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
            "  --invert-yaw      flip yaw if turning your head feels reversed\n"
@@ -258,6 +266,7 @@ static void usage(const char *p) {
            "  --invert-roll     flip roll\n"
            "  --windowed [WxH]  render into a normal window (scene setup; default 1280x720)\n"
            "  --preview [WxH]   also open a laptop window mirroring the screens (default 1280x480)\n"
+           "  --no-gaze-cursor  start with gaze-cursor mode off (on by default; double-tap Cmd toggles; needs --3d)\n"
            "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n", p);
 }
 
@@ -280,6 +289,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--roll-damp") && i+1<argc) M.cfg.roll_damp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--read-deadband") && i+1<argc) M.cfg.read_deadband_deg = atof(argv[++i]);
         else if (!strcmp(argv[i], "--sharpen") && i+1<argc) M.cfg.sharpen = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--slab-depth") && i+1<argc) M.cfg.slab_depth_m = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--no-floor"))  M.cfg.floor_on = false;
+        else if (!strcmp(argv[i], "--floor-height") && i+1<argc) M.cfg.floor_height_m = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--no-shadows")) M.cfg.shadows_on = false;
+        else if (!strcmp(argv[i], "--shadows"))    M.cfg.shadows_on = true;
+        else if (!strcmp(argv[i], "--no-sky"))     M.cfg.sky_on = false;
+        else if (!strcmp(argv[i], "--no-terrain")) M.cfg.terrain_on = false;
+        else if (!strcmp(argv[i], "--floor"))      M.cfg.floor_on = true;
         else if (!strcmp(argv[i], "--flat"))     M.cfg.geometry = GEOM_FLAT;
         else if (!strcmp(argv[i], "--cylinder")) M.cfg.geometry = GEOM_CYLINDER;
         else if (!strcmp(argv[i], "--smooth")   && i+1<argc) {
@@ -290,6 +307,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--invert-yaw"))   opt_sign_yaw   = -1.0f;
         else if (!strcmp(argv[i], "--invert-pitch")) opt_sign_pitch = -1.0f;
         else if (!strcmp(argv[i], "--invert-roll"))  opt_sign_roll  = -1.0f;
+        else if (!strcmp(argv[i], "--gaze-cursor"))    M.cfg.gaze_cursor = true;
+        else if (!strcmp(argv[i], "--no-gaze-cursor")) M.cfg.gaze_cursor = false;
         else if (!strcmp(argv[i], "--3d")) opt_3d = true;
         else if (!strcmp(argv[i], "--windowed")) {
             opt_windowed = true;
@@ -308,6 +327,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, on_sig);
     signal(SIGUSR1, on_recenter);   /* recenter head pose on demand */
     signal(SIGUSR2, on_grab);       /* Super+G: toggle pointer capture */
+    signal(SIGHUP,  on_smooth);     /* A/B the pose smoothing filter (perf diag) */
 
     M.display = wl_display_connect(NULL);
     if (!M.display) { fprintf(stderr, "mirage: cannot connect to wayland\n"); return 1; }
@@ -399,7 +419,9 @@ int main(int argc, char **argv) {
             opt_3d ? "3D head-tracked" : "flat capture-only");
     M.running = true;
     struct timespec fps_t0; clock_gettime(CLOCK_MONOTONIC, &fps_t0);
+    struct timespec frame_prev = fps_t0;   /* for per-frame interval timing */
     long fps_frames = 0;
+    double worst_ms = 0.0;                  /* slowest frame in the window   */
     /* Capture desktop content at ~60 Hz, independent of the (up-to-120 Hz)
      * camera redraw: re-blitting 3 outputs every vsync starves presentation and
      * costs frames, and screen content past 60 Hz isn't perceptible anyway. */
@@ -451,6 +473,11 @@ int main(int argc, char **argv) {
         }
 
         if (g_grab_toggle) { grab_toggle(&M); g_grab_toggle = 0; }
+        if (g_smooth_toggle) {
+            bool on = pose_toggle_smoothing(); g_smooth_toggle = 0;
+            fprintf(stderr, "mirage: pose smoothing %s\n",
+                    on ? "ON (filtered)" : "OFF (raw passthrough)");
+        }
         grab_pump(&M);   /* drain trackpad motion/buttons while captured */
 
         if (opt_3d) {
@@ -468,13 +495,32 @@ int main(int argc, char **argv) {
         if (M.pv_enabled) render_preview(&M);   /* laptop mirror window */
         wl_display_flush(M.display);
 
-        /* once-a-second render-rate readout (gated by capture + glasses vsync) */
-        if (++fps_frames >= 60) {
+        /* once-a-second perf readout. fps = throughput (gated by capture +
+         * glasses vsync); 'worst' is the slowest single frame in the window —
+         * an average of 120 can still hide a recurring 16 ms hitch. In 3D we
+         * also print head-pose freshness: 'pose Hz' is the inbound sample rate
+         * (if the source is 60 Hz you render 120 fps but only half carry a new
+         * head reading), 'age' is staleness of the newest sample, and the
+         * SMOOTHING flag shows whether the filter (a latency source) is on. */
+        fps_frames++;
+        {
             struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            double fdt = (now.tv_sec - frame_prev.tv_sec) + (now.tv_nsec - frame_prev.tv_nsec) * 1e-9;
+            frame_prev = now;
+            if (fdt > worst_ms) worst_ms = fdt;
             double dt = (now.tv_sec - fps_t0.tv_sec) + (now.tv_nsec - fps_t0.tv_nsec) * 1e-9;
             if (dt >= 1.0) {
-                fprintf(stderr, "mirage: %.1f fps\n", fps_frames / dt);
-                fps_t0 = now; fps_frames = 0;
+                if (opt_3d) {
+                    double phz = pose_take_sample_count() / dt;
+                    uint32_t age = pose_age_ms();
+                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | pose %.0f Hz, "
+                            "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, phz,
+                            age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
+                } else {
+                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms\n",
+                            fps_frames / dt, worst_ms * 1000.0);
+                }
+                fps_t0 = now; fps_frames = 0; worst_ms = 0.0;
             }
         }
     }

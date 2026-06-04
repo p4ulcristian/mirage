@@ -56,6 +56,10 @@ typedef struct {
     double gx, gy;              /* cursor position in strip space         */
     int    cur;                 /* screen the cursor is currently on      */
     float  sens;               /* motion scale                          */
+    float  gaze_ease;          /* per-frame lerp of cursor toward gaze (mode on) */
+    uint32_t gaze_hold_ms;     /* trackpad use suppresses gaze for this long      */
+    uint32_t last_motion_ms;   /* last trackpad motion (gaze yields to the hand)  */
+    uint32_t last_cmd_ms;      /* last Cmd press (for double-tap toggle detection) */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
     double hscroll_acc;        /* accumulated H delta -> Cmd-pan display steps */
 
@@ -181,6 +185,46 @@ static void push_cursor(grab_state *g) {
     zwlr_virtual_pointer_v1_frame(g->vp[s]);
 }
 
+/* Inverse of layout_focus_angles + push_cursor: given the camera look angles
+ * render_frame published (m->gaze_yaw/pitch), find the strip position (gx,gy)
+ * the eye is pointing at. We pick the screen whose centre is angularly nearest
+ * the gaze, then offset within it by the leftover angle: a screen spans
+ * screen_arc_deg horizontally and ~the same * aspect vertically, mapped linearly
+ * to its pixel box. +yaw is the viewer's left (see layout.c), so we subtract.
+ * Out-of-screen gaze (the gaps between panels) clamps to the nearest edge. */
+static void gaze_target(grab_state *g, double *out_gx, double *out_gy) {
+    struct mirage *m = g->m;
+    const mirage_config *c = &m->cfg;
+    float gy_a = m->gaze_yaw, gp_a = m->gaze_pitch;
+
+    int best = -1; float bestd = 1e30f, bty = 0, btp = 0;
+    for (int i = 0; i < g->n; i++) {
+        float ty, tp; layout_focus_angles(m, i, &ty, &tp);
+        float dy = gy_a - ty, dp = gp_a - tp;
+        float dd = dy*dy + dp*dp;
+        if (dd < bestd) { bestd = dd; best = i; bty = ty; btp = tp; }
+    }
+    if (best < 0) { *out_gx = g->gx; *out_gy = g->gy; return; }
+
+    float ang_w = c->screen_arc_deg * (float)M_PI/180.0f;     /* horizontal span */
+    float aspect = (g->w[best] > 0 && g->h[best] > 0)
+                   ? (float)g->h[best] / (float)g->w[best] : 9.0f/16.0f;
+    float h_m = (c->geometry == GEOM_FLAT)
+                ? 2.0f * c->screen_distance_m * tanf(ang_w * 0.5f) * aspect
+                : c->screen_distance_m * ang_w * aspect;
+    float vspan = 2.0f * atan2f(0.5f * h_m, c->screen_distance_m);  /* vertical span */
+
+    float lx = g->w[best] * 0.5f - ((gy_a - bty) / ang_w)  * g->w[best];
+    float ly = g->h[best] * 0.5f - ((gp_a - btp) / vspan)  * g->h[best];
+    if (lx < 0) lx = 0;
+    if (lx > g->w[best] - 1) lx = g->w[best] - 1;
+    if (ly < 0) ly = 0;
+    if (ly > g->h[best] - 1) ly = g->h[best] - 1;
+
+    *out_gx = g->x0[best] + lx;
+    *out_gy = g->y0[best] + ly;
+}
+
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
     float z = g->m->zoom > 0.0f ? g->m->zoom : 1.0f;
@@ -198,8 +242,22 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t key = libinput_event_keyboard_get_key(k);
         bool down = libinput_event_keyboard_get_key_state(k)
                     == LIBINPUT_KEY_STATE_PRESSED;
-        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA)
+        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
             g->super = down;               /* Cmd gates scroll zoom + H-pan */
+            /* Double-tap Cmd toggles gaze mode. Two presses within 350 ms and
+             * we flip it; a normal Cmd hold (one press) just scrolls/pans. */
+            if (down) {
+                uint32_t t = now_ms();
+                if (t - g->last_cmd_ms < 350u) {
+                    g->m->cfg.gaze_cursor = !g->m->cfg.gaze_cursor;
+                    g->last_cmd_ms = 0;    /* consume, so a third tap re-arms */
+                    fprintf(stderr, "grab: gaze cursor %s\n",
+                            g->m->cfg.gaze_cursor ? "ON" : "OFF");
+                } else {
+                    g->last_cmd_ms = t;
+                }
+            }
+        }
         if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
             /* Alt held raises the gaze-centre loupe; release springs it back.
              * render_frame eases lens_power toward this each frame. Kept off
@@ -218,6 +276,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
          * so boundaries cross at any speed. Our MIRAGE_SENS scales it. */
         g->gx += libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
         g->gy += libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
+        g->last_motion_ms = now_ms();    /* hand owns the cursor; gaze backs off */
         push_cursor(g);
         break;
     }
@@ -300,6 +359,21 @@ void grab_pump(struct mirage *m) {
         handle_event(g, ev);
         libinput_event_destroy(ev);
     }
+
+    /* Gaze cursor (toggled by double-tap Cmd): when the mode is on, ease the
+     * cursor toward where the eye points - but only once the hand has been idle
+     * for gaze_hold_ms. Any trackpad motion stamps last_motion_ms and suppresses
+     * the pull, so fine placement is always the hand's and never fights the eye;
+     * let go and after the hold window the cursor re-homes to your gaze. */
+    if (m->cfg.gaze_cursor && m->gaze_have &&
+        now_ms() - g->last_motion_ms >= g->gaze_hold_ms) {
+        double tx, ty;
+        gaze_target(g, &tx, &ty);
+        g->gx += (tx - g->gx) * g->gaze_ease;
+        g->gy += (ty - g->gy) * g->gaze_ease;
+        push_cursor(g);
+    }
+
     wl_display_flush(m->display);
 }
 
@@ -318,6 +392,15 @@ bool grab_init(struct mirage *m) {
      * (set for accelerated motion) made the cursor hypersensitive and overshoot
      * whole screens. ~0.3 reproduces the old usable mid-speed feel, linearly. */
     g->sens = sv ? (float)atof(sv) : 0.3f;
+    /* How fast the cursor chases the gaze while Cmd is held (per frame lerp).
+     * ~0.25 @120 Hz settles in ~80 ms: snappy but not a hard teleport. */
+    const char *ge = getenv("MIRAGE_GAZE_EASE");
+    g->gaze_ease = ge ? (float)atof(ge) : 0.25f;
+    /* How long a trackpad touch suppresses the gaze pull (ms): the hand owns the
+     * cursor while moving and for this long after, so fine placement never fights
+     * the eye. After it lapses the cursor re-homes to your gaze. */
+    const char *gh = getenv("MIRAGE_GAZE_HOLD");
+    g->gaze_hold_ms = gh ? (uint32_t)atoi(gh) : 500u;
     g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
     const char *td = getenv("MIRAGE_TRACKPAD");
     const char *kb = getenv("MIRAGE_KEYBOARD");

@@ -56,6 +56,15 @@ typedef struct {
     /* curved-screen mesh (built once, drawn each frame in 3D mode) */
     GLuint   mesh_vbo;
     int      mesh_verts;
+
+    /* slab body: 5 solid faces (top/bottom/left/right/back) extruded behind the
+     * front face to give each screen real thickness (built once, 3D mode only). */
+    GLuint   slab_vbo;
+    int      slab_verts;
+
+    /* drop-shadow footprint on the floor (front face projected along the key
+     * light; static in world space, so built once). */
+    GLuint   shadow_vbo;
 } screen_t;
 
 typedef struct {
@@ -66,6 +75,13 @@ typedef struct {
     float arc_spacing_deg;      /* extra gap between screens (0 = touch)  */
     float screen_arc_deg;       /* angular width each curved screen spans */
     int   screen_cols;          /* screens per row (rows stack vertically) */
+    float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
+    bool  floor_on;             /* draw the emitted ground plane below the wall */
+    float floor_height_m;       /* how far the floor sits below eye level (m)   */
+    bool  shadows_on;           /* drop the slabs' shadow onto the floor glow   */
+    bool  sky_on;               /* draw the gradient + cloud sky dome           */
+    bool  terrain_on;           /* mountain heightfield you float above         */
+    bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
     /* glasses optics */
     float fov_deg;              /* vertical field of view of the glasses */
@@ -160,6 +176,11 @@ struct mirage {
     int   view_focus; /* Cmd+H-scroll focus: display the view pans to (ring idx) */
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
+    /* gaze cursor (grab.c): the final camera yaw/pitch (rad) render_frame looked
+     * along this frame, so the cursor can warp to where the eye points while Cmd
+     * is held. gaze_have gates it off until the first head-tracked frame. */
+    float gaze_yaw, gaze_pitch;
+    bool  gaze_have;
     float lens_power;  /* eased current loupe magnification; 1.0 = off (no warp) */
     float lens_target; /* where lens_power eases: lens_max while Alt held, else 1 */
     bool running;

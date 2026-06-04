@@ -58,8 +58,25 @@ quat pose_latest(void);
 /* Set the current raw orientation as the new "looking straight ahead" zero. */
 void pose_recenter(void);
 
-/* Monotonic milliseconds since the last fresh sample (UINT32_MAX if none). */
+/* Monotonic milliseconds since the last fresh sample (UINT32_MAX if none).
+ * NB: this is sender staleness only — it does NOT include the smoothing-filter
+ * lag or the render/present pipeline. The inbound sample RATE (below) is the
+ * real "is the head pose even 120 Hz fresh?" number. */
 uint32_t pose_age_ms(void);
+
+/* Number of raw samples received since the previous call, and resets the
+ * counter. Divide by the elapsed wall time to get the inbound pose rate (Hz):
+ * if the source only emits 60/s you render 120 fps but only half the frames
+ * carry a new head sample. */
+uint32_t pose_take_sample_count(void);
+
+/* Runtime A/B toggle for the smoothing filter. With smoothing OFF the raw
+ * orientation is passed straight through (jittery but zero added filter lag),
+ * which is the quick test for "is text unreadable-while-turning a LATENCY
+ * problem?" — if it reads better raw, the filter lag is the culprit, not fps.
+ * pose_toggle_smoothing() returns the new enabled state. */
+bool pose_toggle_smoothing(void);
+bool pose_smoothing_enabled(void);
 
 /* Has at least one sample been received? */
 bool pose_has_signal(void);
