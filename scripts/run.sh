@@ -23,24 +23,8 @@ detect_input() {  # $1 = Name regex -> prints /dev/input/eventN
         }
     ' /proc/bus/input/devices
 }
-# Like detect_input, but prints EVERY matching device's event node, ':'-joined.
-# This machine exposes duplicate input devices (a real node + a virtual one)
-# with identical names, and the live one isn't stable across boots - so for the
-# keyboard we observe them all and let grab.c sort out which carries the keys.
-detect_input_all() {  # $1 = Name regex -> prints /dev/input/eventN[:eventM...]
-    awk -v re="$1" '
-        /^N: Name=/ { match($0, re); hit = RSTART > 0 }
-        hit && /^H: Handlers=/ {
-            n = split($0, f, /[ \t]/)
-            for (i = 1; i <= n; i++) if (f[i] ~ /^event[0-9]+$/) {
-                out = out (out ? ":" : "") "/dev/input/" f[i]; break
-            }
-        }
-        END { print out }
-    ' /proc/bus/input/devices
-}
 : "${MIRAGE_TRACKPAD:=$(detect_input "multi-touch|[Tt]ouchpad|[Tt]rackpad")}"
-: "${MIRAGE_KEYBOARD:=$(detect_input_all "[Kk]eyboard")}"
+: "${MIRAGE_KEYBOARD:=$(detect_input "[Kk]eyboard")}"
 export MIRAGE_TRACKPAD MIRAGE_KEYBOARD
 echo "input: trackpad=${MIRAGE_TRACKPAD:-?} keyboard=${MIRAGE_KEYBOARD:-?}"
 
