@@ -323,17 +323,30 @@ static GLuint compile(GLenum type, const char *src) {
     return s;
 }
 
+/* We deliberately ask for an OPAQUE (0-alpha) config: a fullscreen XR24 buffer
+ * is what the compositor needs to direct-scanout the glasses overlay straight to
+ * the panel (an alpha AR24 buffer is rejected with "mismatched format" and falls
+ * back to compositing, capping us below the panel's refresh). The glasses optics
+ * are additive, so we never needed per-pixel alpha anyway - black reads as
+ * transparent regardless. */
 static EGLConfig choose_config(EGLDisplay dpy) {
     const EGLint attrs[] = {
         EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0,
         EGL_NONE
     };
-    EGLConfig cfg;
+    EGLConfig cfgs[32];
     EGLint n = 0;
-    if (!eglChooseConfig(dpy, attrs, &cfg, 1, &n) || n < 1) return NULL;
-    return cfg;
+    if (!eglChooseConfig(dpy, attrs, cfgs, 32, &n) || n < 1) return NULL;
+    /* eglChooseConfig's ALPHA_SIZE is a minimum, so it can still hand back an
+     * alpha config; pick one with EXACTLY 0 alpha bits (true XRGB8888). */
+    for (EGLint i = 0; i < n; i++) {
+        EGLint a = 8;
+        eglGetConfigAttrib(dpy, cfgs[i], EGL_ALPHA_SIZE, &a);
+        if (a == 0) return cfgs[i];
+    }
+    return cfgs[0];
 }
 
 /* Build a curved screen: a vertical triangle strip swept along an arc of a
