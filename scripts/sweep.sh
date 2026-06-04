@@ -36,17 +36,20 @@ do_sweep() {
 import json, os, subprocess
 
 def hypr(*args):
-    out = subprocess.check_output(["hyprctl", "-j", *args])
-    return json.loads(out)
+    return json.loads(subprocess.check_output(["hyprctl", "-j", *args]))
 
 # slots = VIRT outputs in name order; slot i -> its active workspace id.
+# Keep their monitor IDs too: a client's "monitor" field is an integer ID, NOT
+# the name, so VIRT membership must be tested by ID.
 mons = sorted(hypr("monitors"), key=lambda m: m["name"])
-slots = [m["activeWorkspace"]["id"] for m in mons if m["name"].startswith("VIRT")]
+virt = [m for m in mons if m["name"].startswith("VIRT")]
+slots = [m["activeWorkspace"]["id"] for m in virt]
+virt_ids = {m["id"] for m in virt}
 if not slots:
     raise SystemExit("sweep: no VIRT outputs - run setup-displays.sh first")
 nslots = len(slots)
 
-# remembered key -> slot from the last quit (clamped to current slot count).
+# remembered address -> slot from the last quit (clamped to current slot count).
 try:
     remembered = {k: v for k, v in json.load(open(os.environ["LAYOUT"])).items()
                   if isinstance(v, int) and 0 <= v < nslots}
@@ -54,8 +57,9 @@ except (OSError, ValueError):
     remembered = {}
 
 # candidate windows: real, mapped, non-pinned, on a normal workspace, not mirage,
-# not already parked on a VIRT output. Sort by address for a stable order so the
-# per-identity occurrence index is reproducible.
+# not already parked on a VIRT output. The Hyprland address is stable across a
+# mirage restart (the window isn't recreated, only moved), so it is our layout
+# key; sort by it for a stable newcomer fill order.
 cands = []
 for c in sorted(hypr("clients"), key=lambda c: c["address"]):
     if not c.get("mapped") or c.get("pinned"):
@@ -64,49 +68,41 @@ for c in sorted(hypr("clients"), key=lambda c: c["address"]):
         continue
     if c.get("class", "") == "mirage":
         continue
-    if str(c.get("monitor", "")).startswith("VIRT"):
+    if c.get("monitor") in virt_ids:
         continue
     cands.append(c)
 
-# stable identity key: initialClass + initialTitle + per-identity occurrence.
-seen = {}
-def key_of(c):
-    base = "%s\x1f%s" % (c.get("initialClass", c.get("class", "")),
-                         c.get("initialTitle", ""))
-    i = seen.get(base, 0); seen[base] = i + 1
-    return "%s\x1f%d" % (base, i)
-
-items = [(key_of(c), c) for c in cands]
-
 # assign slots: remembered windows first (skip if their slot is taken), then
 # newcomers into whatever slots remain, then any overflow round-robins.
-taken = {}            # slot -> key, first claimant wins
-assigned = {}         # key -> slot
-def claim(key, slot):
-    if taken.get(slot) in (None, key):
-        taken[slot] = key; assigned[key] = slot; return True
+taken = {}            # slot -> address, first claimant wins
+assigned = {}         # address -> slot
+def claim(addr, slot):
+    if taken.get(slot) in (None, addr):
+        taken[slot] = addr; assigned[addr] = slot; return True
     return False
 
-for key, _ in items:
-    if key in remembered:
-        claim(key, remembered[key])
+for c in cands:
+    a = c["address"]
+    if a in remembered:
+        claim(a, remembered[a])
 free = [s for s in range(nslots) if s not in taken]
 fi = 0
-for key, _ in items:
-    if key in assigned:
+for c in cands:
+    a = c["address"]
+    if a in assigned:
         continue
     if fi < len(free):
-        claim(key, free[fi]); fi += 1
+        claim(a, free[fi]); fi += 1
     else:
-        assigned[key] = (len(assigned)) % nslots   # overflow: stable round-robin
+        assigned[a] = len(assigned) % nslots   # overflow: stable round-robin
 
 # snapshot real workspaces (for restore) and emit the moves onto the arc.
 snap, moves = [], []
-for key, c in items:
-    snap.append({"address": c["address"], "key": key,
-                 "ws": c["workspace"]["id"], "floating": bool(c.get("floating"))})
-    moves.append("dispatch movetoworkspacesilent %d,address:%s"
-                 % (slots[assigned[key]], c["address"]))
+for c in cands:
+    a = c["address"]
+    snap.append({"address": a, "ws": c["workspace"]["id"],
+                 "floating": bool(c.get("floating"))})
+    moves.append("dispatch movetoworkspacesilent %d,address:%s" % (slots[assigned[a]], a))
 
 json.dump(snap, open(os.environ["STATE"], "w"))
 print(len(snap))
@@ -121,8 +117,9 @@ PY
 }
 
 do_restore() {
-    # First, learn from where things sit NOW: record key -> slot for every window
-    # currently on a VIRT output, so next launch reproduces this exact layout.
+    # First, learn from where things sit NOW: record address -> slot for every
+    # window currently on a VIRT output, so next launch reproduces this layout.
+    # A client's "monitor" is an integer ID, so map VIRT IDs -> slot index.
     STATE="$STATE" LAYOUT="$LAYOUT" python3 - <<'PY' || true
 import json, os, subprocess
 
@@ -130,22 +127,19 @@ def hypr(*args):
     return json.loads(subprocess.check_output(["hyprctl", "-j", *args]))
 
 mons = sorted(hypr("monitors"), key=lambda m: m["name"])
-virt = [m["name"] for m in mons if m["name"].startswith("VIRT")]
-slot_of = {name: i for i, name in enumerate(virt)}
+virt = [m for m in mons if m["name"].startswith("VIRT")]
+slot_of_id = {m["id"]: i for i, m in enumerate(virt)}
 if not virt:
     raise SystemExit  # nothing on the arc to learn from
 
-seen, layout = {}, {}
-for c in sorted(hypr("clients"), key=lambda c: c["address"]):
+layout = {}
+for c in hypr("clients"):
     if not c.get("mapped") or c.get("class", "") == "mirage":
         continue
-    mon = str(c.get("monitor", ""))
-    if mon not in slot_of:
+    slot = slot_of_id.get(c.get("monitor"))
+    if slot is None:
         continue
-    base = "%s\x1f%s" % (c.get("initialClass", c.get("class", "")),
-                         c.get("initialTitle", ""))
-    i = seen.get(base, 0); seen[base] = i + 1
-    layout["%s\x1f%d" % (base, i)] = slot_of[mon]
+    layout[c["address"]] = slot
 
 if layout:
     json.dump(layout, open(os.environ["LAYOUT"], "w"))

@@ -62,7 +62,7 @@ typedef struct {
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
     char   dev[64];             /* trackpad device path (grabbed)         */
-    char   kbd[64];             /* keyboard device path (observed, not grabbed) */
+    char   kbd[256];            /* keyboard device path(s), ':'-separated, observed */
     int    uifd;                /* uinput wheel device fd (-1 if unavailable) */
 } grab_state;
 
@@ -376,10 +376,21 @@ void grab_toggle(struct mirage *m) {
         if (libinput_device_config_accel_is_available(dev))
             libinput_device_config_accel_set_profile(
                 dev, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
-        /* observe (don't grab) the keyboard, for the Super+scroll zoom modifier */
-        if (!libinput_path_add_device(g->li, g->kbd))
-            fprintf(stderr, "grab: note - keyboard %s not observed; Super+scroll "
-                    "zoom disabled\n", g->kbd);
+        /* Observe (don't grab) the keyboard(s), for the Super/Alt modifiers that
+         * gate scroll-zoom + pan + loupe. g->kbd may be a ':'-separated list of
+         * nodes: this machine exposes duplicate keyboard devices (a real node +
+         * a virtual one) and the Cmd key can land on either, so we add them all
+         * rather than guess which one carries the modifier. */
+        {
+            char kbds[sizeof g->kbd];
+            snprintf(kbds, sizeof kbds, "%s", g->kbd);
+            int any = 0;
+            for (char *t = strtok(kbds, ":"); t; t = strtok(NULL, ":"))
+                if (libinput_path_add_device(g->li, t)) any = 1;
+            if (!any)
+                fprintf(stderr, "grab: note - no keyboard observed (%s); "
+                        "Super+scroll zoom disabled\n", g->kbd);
+        }
         if (g->uifd < 0) g->uifd = uinput_open();   /* real wheel for scroll */
         g->scroll_acc = 0.0;
         g->super = false;
