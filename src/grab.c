@@ -154,6 +154,20 @@ static void push_cursor(grab_state *g) {
     int lay_row = (g->rows - 1) - band;
     int s = lay_row * g->cols + col;
     if (s >= g->n) return;               /* empty cell in a partial last row */
+
+    /* Opt-in trace (MIRAGE_GRAB_DEBUG=1, off by default): log every screen change
+     * plus a throttled position sample, to diagnose cursor traversal. */
+    static int dbg = -1;
+    static unsigned tick = 0;
+    if (dbg < 0) dbg = getenv("MIRAGE_GRAB_DEBUG") ? 1 : 0;
+    if (dbg && s != g->cur)
+        fprintf(stderr, "grab: cursor -> screen %d (gx=%.0f gy=%.0f col=%d band=%d "
+                "strip=%dx%d cell=%dx%d)\n",
+                s, g->gx, g->gy, col, band, g->strip_w, g->strip_h, g->cellw, g->cellh);
+    else if (dbg && (++tick % 30u) == 0u)
+        fprintf(stderr, "grab: pos gx=%.0f gy=%.0f (screen %d col=%d band=%d)\n",
+                g->gx, g->gy, s, col, band);
+
     g->cur = s;
     if (!g->vp[s]) return;
 
@@ -196,8 +210,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     }
     case LIBINPUT_EVENT_POINTER_MOTION: {
         struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
-        g->gx += libinput_event_pointer_get_dx(p) * g->sens;
-        g->gy += libinput_event_pointer_get_dy(p) * g->sens;
+        /* RAW (unaccelerated) deltas: libinput's accelerated get_dx() shrinks
+         * slow motion toward zero, so a slow drag stalls at a screen edge and
+         * can't cross the 1920px cell into the next screen - you had to flick.
+         * The unaccelerated delta is linear in finger travel regardless of
+         * speed (and regardless of whether the device exposes an accel config),
+         * so boundaries cross at any speed. Our MIRAGE_SENS scales it. */
+        g->gx += libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
+        g->gy += libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
         push_cursor(g);
         break;
     }
@@ -225,11 +245,22 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             double hv = libinput_event_pointer_get_scroll_value(p, hax);
             const double PAN_NOTCH = 30.0;   /* trackpad units per display step */
             int nscr = g->n > 0 ? g->n : 1;
+            int cols = g->m->cfg.screen_cols > 0 ? g->m->cfg.screen_cols : 3;
             g->hscroll_acc += hv;
             while (g->hscroll_acc >= PAN_NOTCH || g->hscroll_acc <= -PAN_NOTCH) {
                 int dir = g->hscroll_acc > 0 ? 1 : -1;  /* +1 = scroll right -> next screen */
                 g->hscroll_acc -= dir * PAN_NOTCH;
-                g->m->view_focus = (g->m->view_focus + dir + nscr) % nscr;
+                /* Step in snake (boustrophedon) order so every notch lands on a
+                 * physical neighbour: bottom row L->R, up a row, top row R->L.
+                 * Odd rows reverse, so the raw 2->3 / 5->0 cross-wall leaps go
+                 * away. Convert screen idx -> snake pos, step, convert back. */
+                int idx = g->m->view_focus;
+                int row = idx / cols, col = idx % cols;
+                int pos = row * cols + ((row & 1) ? (cols - 1 - col) : col);
+                pos = (pos + dir + nscr) % nscr;
+                row = pos / cols; col = pos % cols;
+                int next = row * cols + ((row & 1) ? (cols - 1 - col) : col);
+                g->m->view_focus = (next >= 0 && next < nscr) ? next : pos;
             }
             if (hv == 0.0) g->hscroll_acc = 0.0;   /* reset on finger lift */
         }
@@ -282,7 +313,11 @@ bool grab_init(struct mirage *m) {
     m->grab = g;
     g->m = m;
     const char *sv = getenv("MIRAGE_SENS");   /* trackpad cursor speed (both axes) */
-    g->sens = sv ? (float)atof(sv) : 2.0f;
+    /* Tuned for the RAW (unaccelerated) deltas we now read in handle_event:
+     * those run ~8x larger than libinput's accelerated deltas, so the old 2.0
+     * (set for accelerated motion) made the cursor hypersensitive and overshoot
+     * whole screens. ~0.3 reproduces the old usable mid-speed feel, linearly. */
+    g->sens = sv ? (float)atof(sv) : 0.3f;
     g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
     const char *td = getenv("MIRAGE_TRACKPAD");
     const char *kb = getenv("MIRAGE_KEYBOARD");
@@ -326,11 +361,21 @@ void grab_toggle(struct mirage *m) {
     if (!g->active) {
         g->li = libinput_path_create_context(&LI_IFACE, g);
         if (!g->li) { fprintf(stderr, "grab: libinput context failed\n"); return; }
-        if (!libinput_path_add_device(g->li, g->dev)) {
+        struct libinput_device *dev = libinput_path_add_device(g->li, g->dev);
+        if (!dev) {
             fprintf(stderr, "grab: cannot open trackpad %s (permission? wrong "
                     "device? set MIRAGE_TRACKPAD)\n", g->dev);
             libinput_unref(g->li); g->li = NULL; return;
         }
+        /* Flat (constant) acceleration: map finger travel linearly to cursor
+         * travel. libinput's default adaptive profile DECELERATES slow motion
+         * toward zero, so a slow drag parks at a screen edge and can't push the
+         * cursor across the 1920px-wide cell boundary into the next screen -
+         * only a fast flick accumulates enough delta. Flat removes that "wall",
+         * so boundaries cross smoothly at any speed. Our own MIRAGE_SENS scales. */
+        if (libinput_device_config_accel_is_available(dev))
+            libinput_device_config_accel_set_profile(
+                dev, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
         /* observe (don't grab) the keyboard, for the Super+scroll zoom modifier */
         if (!libinput_path_add_device(g->li, g->kbd))
             fprintf(stderr, "grab: note - keyboard %s not observed; Super+scroll "

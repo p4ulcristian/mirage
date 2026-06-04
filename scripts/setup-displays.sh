@@ -21,7 +21,13 @@
 set -euo pipefail
 
 VW=${VW:-1920}; VH=${VH:-1080}; VR=${VR:-60}; VSCALE=${VSCALE:-1}
-VCOUNT=${VCOUNT:-6}; VCOLS=${VCOLS:-3}; VORIGIN=${VORIGIN:-8000}; VGAP=${VGAP:-200}
+# VGAP=0 by default: the virtual displays must ABUT in the compositor's
+# coordinate space. Any gap is dead no-man's-land between outputs, and the
+# cursor can only leap a dead gap with momentum - a slow drag parks at the
+# screen edge and never crosses. Abutting them makes the wall one continuous
+# surface so the cursor flows screen-to-screen at any speed. (Visual spacing in
+# the glasses is mirage's arc rendering, unrelated to this layout gap.)
+VCOUNT=${VCOUNT:-6}; VCOLS=${VCOLS:-3}; VORIGIN=${VORIGIN:-8000}; VGAP=${VGAP:-0}
 
 command -v hyprctl >/dev/null || { echo "hyprctl not found (need Hyprland)"; exit 1; }
 

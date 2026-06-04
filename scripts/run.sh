@@ -60,6 +60,16 @@ if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     exit 1
 fi
 
+# Self-heal: if mirage isn't running but stray VIRT outputs are still around (a
+# previous session was hard-killed past its cleanup), remove them so we always
+# start from a clean slate. Normal quits already tear them down, so this is a
+# no-op in the common case.
+if ! pgrep -x mirage >/dev/null 2>&1 \
+   && hyprctl monitors all -j 2>/dev/null | grep -q '"name": *"VIRT'; then
+    echo "self-heal: clearing stray VIRT outputs from a previous session"
+    bash "$HERE/scripts/teardown-displays.sh" 2>&1 | sed 's/^/  [displays] /' || true
+fi
+
 # Ensure the virtual displays exist (idempotent: skips any already present).
 # stop.sh tears them down on quit, so we recreate them on every launch -
 # otherwise the first start after a quit would have nothing to capture.
@@ -73,8 +83,29 @@ VR="${VR:-60}" bash "$HERE/scripts/setup-displays.sh" 2>&1 | sed 's/^/  [display
 bash "$HERE/scripts/sweep.sh" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
 "$BIN" "$@" >"$LOG" 2>&1 &
-echo $! > "$PIDFILE"
-echo "mirage started (pid $(cat "$PIDFILE")), log: $LOG"
+MPID=$!
+echo "$MPID" > "$PIDFILE"
+echo "mirage started (pid $MPID), log: $LOG"
+
+# Supervisor watchdog: own the display lifecycle for exactly mirage's lifetime.
+# It waits for the mirage pid to vanish - by ANY route: Super+Shift+Q, a crash,
+# killactive, a Hyprland reload - then runs the idempotent cleanup (save layout,
+# restore windows, remove VIRT, drop the mirror). This is what stops virtual
+# displays leaking when mirage exits some way other than the quit keybind.
+# Backgrounded + disowned so it outlives this launcher script.
+(
+    while kill -0 "$MPID" 2>/dev/null; do sleep 0.5; done
+    bash "$HERE/scripts/stop.sh" --restore
+) >>"$LOG" 2>&1 &
+disown
+echo "  (supervisor armed; displays will be torn down whenever mirage exits)"
+
+# Mirror the glasses onto the laptop panel so a bystander sees the same AR view.
+# stop.sh turns this back off. Override with MIRROR=0 to keep the laptop as its
+# own standalone desktop while mirage runs.
+if [ "${MIRROR:-1}" = "1" ]; then
+    bash "$HERE/scripts/mirror-laptop.sh" on 2>&1 | sed 's/^/  [mirror] /' || true
+fi
 
 # Auto-grab the mouse/keyboard onto the arc once the renderer is up. This sends
 # the same SIGUSR2 toggle that Super+G uses, after waiting for the first frame

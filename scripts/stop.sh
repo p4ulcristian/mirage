@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# stop.sh - quit the mirage compositor (graceful SIGINT, then SIGKILL).
-#   stop.sh           quit just the renderer
-#   stop.sh --restore quit, move windows off the virtual displays back to a
-#                     real monitor, then remove the virtual displays
+# stop.sh - quit the mirage compositor and clean up after it.
+#   stop.sh           quit just the renderer (leave displays up)
+#   stop.sh --restore quit, save the on-arc layout, move windows back to a real
+#                     monitor, then remove the virtual displays
 #   stop.sh --all     quit, CLOSE the demo terminals, remove virtual displays
+#
+# Cleanup is idempotent and serialised with a lock, so it's safe to call from
+# both the Super+Shift+Q keybind AND run.sh's supervisor trap - whichever runs
+# first does the work, the other is a no-op. That's what makes teardown reliable
+# no matter how mirage exits (clean quit, crash, killactive, reload).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIDFILE=/tmp/mirage.pid
+LOCK=/tmp/mirage-cleanup.lock
 RESTORE_MON="${RESTORE_MON:-}"   # target monitor; auto-detected if empty
 
-stop_mirage() {
+stop_mirage() {  # harmless if mirage already exited
     local pid=""
     [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE" 2>/dev/null)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -19,20 +25,18 @@ stop_mirage() {
         done
         kill -KILL "$pid" 2>/dev/null || true
     fi
-    # belt and suspenders: catch any stray instance
-    pkill -INT -x mirage 2>/dev/null || true
+    pkill -INT -x mirage 2>/dev/null || true   # catch any stray instance
     rm -f "$PIDFILE"
     # stop the RayNeo bridge too (runs under sudo until a udev replug)
     sudo pkill -INT -f rayneo-bridge 2>/dev/null || pkill -INT -f rayneo-bridge 2>/dev/null || true
-    echo "mirage + bridge stopped"
 }
 
-# Move every workspace that lives on a VIRT output back to a real monitor, so
-# windows aren't stranded when the virtual displays go away.
+# Save the arc layout, then move every window that lives on a VIRT output back to
+# a real monitor so nothing is stranded when the virtual displays go away.
 restore_windows() {
-    # Preferred: per-window restore from the sweep snapshot (puts each window
-    # back on its exact original workspace). Falls back to the workspace-level
-    # sweep below when there is no snapshot (e.g. windows placed manually).
+    # Preferred: per-window restore from the sweep snapshot (records the current
+    # arc layout for next launch, then puts each window back on its original
+    # workspace). Falls back to the workspace-level sweep when there's no snapshot.
     if [ -f "${MIRAGE_SWEEP_STATE:-/tmp/mirage-sweep.json}" ]; then
         bash "$HERE/scripts/sweep.sh" restore || true
         return
@@ -40,7 +44,6 @@ restore_windows() {
 
     local target="$RESTORE_MON"
     if [ -z "$target" ]; then
-        # first monitor whose name doesn't start with VIRT (prefer eDP-*)
         target="$(hyprctl monitors -j | python3 -c '
 import json,sys
 mons=[m["name"] for m in json.load(sys.stdin)]
@@ -50,7 +53,6 @@ print((edp or real or [""])[0])')"
     fi
     [ -z "$target" ] && { echo "restore: no real monitor found"; return; }
 
-    # workspace ids currently on VIRT monitors
     local wss
     wss="$(hyprctl workspaces -j | python3 -c '
 import json,sys
@@ -63,18 +65,40 @@ for w in json.load(sys.stdin):
     done
 }
 
+# The full post-quit cleanup, run under a non-blocking lock so concurrent callers
+# don't interleave. Every step is independently idempotent, so even if it does
+# run twice the second pass is a harmless no-op.
+cleanup() {  # $1 = restore mode: "restore" | "all" | ""
+    bash "$HERE/scripts/mirror-laptop.sh" off 2>&1 | sed 's/^/  [mirror] /' || true
+    case "${1:-}" in
+        restore)
+            restore_windows
+            bash "$HERE/scripts/teardown-displays.sh" || true
+            echo "windows restored, virtual displays removed"
+            ;;
+        all)
+            pkill -f 'kitty --title V[123]' 2>/dev/null || true
+            bash "$HERE/scripts/teardown-displays.sh" || true
+            echo "full teardown complete"
+            ;;
+    esac
+}
+
+mode=""
+case "${1:-}" in
+    --restore) mode="restore" ;;
+    --all)     mode="all" ;;
+esac
+
 stop_mirage
+echo "mirage + bridge stopped"
 
-if [ "${1:-}" = "--restore" ]; then
-    restore_windows
-    [ -x "$HERE/scripts/teardown-displays.sh" ] && bash "$HERE/scripts/teardown-displays.sh" || true
-    echo "windows restored, virtual displays removed"
-fi
-
-if [ "${1:-}" = "--all" ]; then
-    # close demo terminals titled V1/V2/V3
-    pkill -f 'kitty --title V[123]' 2>/dev/null || true
-    # remove the virtual displays
-    [ -x "$HERE/scripts/teardown-displays.sh" ] && bash "$HERE/scripts/teardown-displays.sh" || true
-    echo "full teardown complete"
+# Serialise + dedupe cleanup across the keybind and the supervisor trap.
+if command -v flock >/dev/null; then
+    exec 9>"$LOCK"
+    if flock -n 9; then
+        cleanup "$mode"
+    fi   # lock held by the other caller -> it's doing the cleanup; skip
+else
+    cleanup "$mode"
 fi

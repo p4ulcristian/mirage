@@ -8,6 +8,13 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Unbind first so re-running this (e.g. after a Hyprland reload, or on every
+# launch) doesn't stack duplicate binds that all fire on one keypress.
+hyprctl keyword unbind "SUPER SHIFT, Q" >/dev/null 2>&1 || true
+hyprctl keyword unbind "SUPER SHIFT, X" >/dev/null 2>&1 || true
+hyprctl keyword unbind "SUPER SHIFT, C" >/dev/null 2>&1 || true
+hyprctl keyword unbind "SUPER, G"       >/dev/null 2>&1 || true
+
 hyprctl keyword bind "SUPER SHIFT, Q, exec, bash $HERE/scripts/stop.sh --restore" >/dev/null
 hyprctl keyword bind "SUPER SHIFT, X, exec, bash $HERE/scripts/stop.sh --all" >/dev/null
 hyprctl keyword bind "SUPER SHIFT, C, exec, pkill -USR1 -x mirage" >/dev/null
