@@ -254,11 +254,11 @@ static void usage(const char *p) {
            "  --sharpen S       contrast-adaptive text sharpen strength (default 0.35; 0 = off)\n"
            "  --flat/--cylinder  screen surface: flat panels (default) or curved strips\n"
            "  --slab-depth M    screen thickness in metres (default 0.05; 0 = flat, no slab)\n"
-           "  --no-terrain      hide the mountain landscape you float above\n"
-           "  --floor           show the flat grass floor instead of terrain\n"
+           "  --terrain         show the mountain landscape (OFF by default; costs frames)\n"
+           "  --floor           show the flat grass floor (OFF by default)\n"
            "  --floor-height M  floor distance below eye level (default 1.8 m)\n"
            "  --shadows         drop the slabs' shadow onto the floor (needs --floor)\n"
-           "  --no-sky          hide the gradient + cloud sky dome\n"
+           "  --sky             show the gradient + cloud sky dome (OFF by default; costs frames)\n"
            "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
            "  --screens N       expected virtual screen count (default 3)\n"
            "  --invert-yaw      flip yaw if turning your head feels reversed\n"
@@ -295,7 +295,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-shadows")) M.cfg.shadows_on = false;
         else if (!strcmp(argv[i], "--shadows"))    M.cfg.shadows_on = true;
         else if (!strcmp(argv[i], "--no-sky"))     M.cfg.sky_on = false;
+        else if (!strcmp(argv[i], "--sky"))        M.cfg.sky_on = true;
         else if (!strcmp(argv[i], "--no-terrain")) M.cfg.terrain_on = false;
+        else if (!strcmp(argv[i], "--terrain"))    M.cfg.terrain_on = true;
         else if (!strcmp(argv[i], "--floor"))      M.cfg.floor_on = true;
         else if (!strcmp(argv[i], "--flat"))     M.cfg.geometry = GEOM_FLAT;
         else if (!strcmp(argv[i], "--cylinder")) M.cfg.geometry = GEOM_CYLINDER;
@@ -510,6 +512,7 @@ int main(int argc, char **argv) {
             if (fdt > worst_ms) worst_ms = fdt;
             double dt = (now.tv_sec - fps_t0.tv_sec) + (now.tv_nsec - fps_t0.tv_nsec) * 1e-9;
             if (dt >= 1.0) {
+                M.fps = (float)(fps_frames / dt);   /* publish for the in-scene HUD */
                 if (opt_3d) {
                     double phz = pose_take_sample_count() / dt;
                     uint32_t age = pose_age_ms();

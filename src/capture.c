@@ -60,7 +60,11 @@ bool capture_init(struct mirage *m) {
     if (has_gl_ext("GL_EXT_texture_filter_anisotropic")) {
         GLfloat amax = 1.0f;
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
-        g_aniso = amax > 8.0f ? 8.0f : amax;   /* 8x is plenty; diminishing past it */
+        /* 2x: anisotropic re-samples the texture many times per fragment, and on
+         * this tile-based GPU (with no mipmaps on the captured dmabufs) that
+         * dominated the frame. 2x keeps most of the side-screen sharpening for a
+         * fraction of the bandwidth; 8x straddled the 120Hz budget. */
+        g_aniso = amax > 2.0f ? 2.0f : amax;
         fprintf(stderr, "capture: anisotropic filtering up to %.0fx\n", g_aniso);
     }
     return true;
@@ -71,10 +75,16 @@ bool capture_init(struct mirage *m) {
 static bool ensure_buffer(struct mirage *m, screen_t *s) {
     if (s->buffer) return true;
 
+    /* Prefer the GPU's optimal (tiled) layout. Sampling a LINEAR dmabuf every
+     * frame is the slow path on this tile-based GPU (it's the CPU-friendly
+     * interchange layout, not the GPU one) and dominated the frame budget. Plain
+     * GBM_BO_USE_RENDERING lets the driver pick its tiled modifier, which we pass
+     * through to both the wl_buffer and the EGLImage below. Fall back to LINEAR
+     * only if a tiled allocation isn't possible here. */
     struct gbm_bo *bo = gbm_bo_create(m->gbm, s->width, s->height, s->drm_format,
-                                      GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+                                      GBM_BO_USE_RENDERING);
     if (!bo) bo = gbm_bo_create(m->gbm, s->width, s->height, s->drm_format,
-                                GBM_BO_USE_RENDERING);
+                                GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
     if (!bo) { fprintf(stderr, "capture[%s]: gbm_bo_create failed\n", s->name); return false; }
 
     s->bo        = bo;

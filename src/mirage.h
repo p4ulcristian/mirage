@@ -176,6 +176,7 @@ struct mirage {
     int   view_focus; /* Cmd+H-scroll focus: display the view pans to (ring idx) */
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
+    float fps;        /* last measured throughput, published by the main loop (HUD) */
     /* gaze cursor (grab.c): the final camera yaw/pitch (rad) render_frame looked
      * along this frame, so the cursor can warp to where the eye points while Cmd
      * is held. gaze_have gates it off until the first head-tracked frame. */

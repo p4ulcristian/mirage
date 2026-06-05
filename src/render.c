@@ -296,6 +296,9 @@ static struct {
      * drawn on the unit QUAD via R.prog). */
     GLuint label_on, label_off;
     int    label_w, label_h;
+    /* live FPS plaque: re-baked only when the integer value changes */
+    GLuint label_fps;
+    int    fps_w, fps_h, fps_val;
 } R;
 
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
@@ -766,18 +769,36 @@ static const unsigned char *glyph_rows(char ch) {
     static const unsigned char O[] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
     static const unsigned char N[] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
     static const unsigned char F[] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+    static const unsigned char P[] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+    static const unsigned char S[] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
     static const unsigned char C[] = {0x00,0x04,0x04,0x00,0x04,0x04,0x00}; /* colon */
-    static const unsigned char S[] = {0,0,0,0,0,0,0};                     /* space */
+    static const unsigned char SP[] = {0,0,0,0,0,0,0};                    /* space */
+    static const unsigned char D0[] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
+    static const unsigned char D1[] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
+    static const unsigned char D2[] = {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
+    static const unsigned char D3[] = {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E};
+    static const unsigned char D4[] = {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02};
+    static const unsigned char D5[] = {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E};
+    static const unsigned char D6[] = {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E};
+    static const unsigned char D7[] = {0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
+    static const unsigned char D8[] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
+    static const unsigned char D9[] = {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C};
     switch (ch) {
     case 'G': return G; case 'A': return A; case 'Z': return Z;
     case 'E': return E; case 'O': return O; case 'N': return N;
-    case 'F': return F; case ':': return C; default:  return S;
+    case 'F': return F; case 'P': return P; case 'S': return S;
+    case ':': return C;
+    case '0': return D0; case '1': return D1; case '2': return D2;
+    case '3': return D3; case '4': return D4; case '5': return D5;
+    case '6': return D6; case '7': return D7; case '8': return D8;
+    case '9': return D9;
+    default:  return SP;
     }
 }
 
 /* Rasterise `str` into a fresh RGBA texture. PX = pixels per font cell; text in
  * fg over a dark plaque background. Stores the (shared) pixel dims in R. */
-static GLuint bake_label(const char *str, const float fg[3]) {
+static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
     const int PX = 5, PAD = 6, GAP = 1;
     int n = (int)strlen(str);
     int tw = PAD*2 + n*GLYPH_W*PX + (n-1)*GAP*PX;
@@ -811,7 +832,8 @@ static GLuint bake_label(const char *str, const float fg[3]) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     free(px);
-    R.label_w = tw; R.label_h = th;
+    if (ow) *ow = tw;
+    if (oh) *oh = th;
     return tex;
 }
 
@@ -995,8 +1017,9 @@ bool render_init(struct mirage *m) {
     /* gaze-mode status plaque (ON green, OFF grey) - same dims for both */
     { const float on[3]  = {0.31f, 0.90f, 0.47f};
       const float off[3] = {0.42f, 0.45f, 0.52f};
-      R.label_on  = bake_label("GAZE: ON ", on);   /* trailing space: same dims */
-      R.label_off = bake_label("GAZE: OFF", off); }
+      R.label_on  = bake_label("GAZE: ON ", on, &R.label_w, &R.label_h);   /* trailing space: same dims */
+      R.label_off = bake_label("GAZE: OFF", off, &R.label_w, &R.label_h); }
+    R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
 
     fprintf(stderr, "render: EGL %d.%d, GL_RENDERER=%s\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
@@ -1300,6 +1323,36 @@ void render_frame(struct mirage *m, quat head) {
             glUniform1f(R.uYFlip, 0.0f);
             glUniform1f(R.uSharpen, 0.0f);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+            /* FPS counter, one row below the GAZE plaque. Re-bake the digits only
+             * when the integer value changes (~once a second); the vbo + vertex
+             * attribs are still bound from the GAZE draw above, so we just swap the
+             * texture and the MVP. */
+            int fv = (int)(m->fps + 0.5f);
+            if (fv < 0)   fv = 0;
+            if (fv > 999) fv = 999;
+            if (fv != R.fps_val) {
+                if (R.label_fps) glDeleteTextures(1, &R.label_fps);
+                char buf[16]; snprintf(buf, sizeof buf, "FPS %d", fv);
+                const float fc[3] = {0.62f, 0.78f, 0.95f};   /* cool blue */
+                R.label_fps = bake_label(buf, fc, &R.fps_w, &R.fps_h);
+                R.fps_val = fv;
+            }
+            if (R.label_fps) {
+                float fpsW  = fullH * ((float)R.fps_w / (float)R.fps_h);
+                float yc2   = yc - fullH - 0.02f;            /* one row lower */
+                mat4 local2 = m4_mul(m4_translate(v3(0.0f, yc2, -d)),
+                                     m4_scale(v3(fpsW, fullH, 1.0f)));
+                mat4 model2 = m4_mul(layout_model_matrix(m, ci), local2);
+                mat4 mvp2   = m4_mul(vp, model2);
+                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp2.m);
+                glBindTexture(GL_TEXTURE_2D, R.label_fps);
+                glUniform1i(R.uTex, 0);
+                glUniform1f(R.uHasTex, 1.0f);
+                glUniform1f(R.uYFlip, 0.0f);
+                glUniform1f(R.uSharpen, 0.0f);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            }
         }
     }
 

@@ -9,3 +9,5 @@ rayneo-bridge
 *.log
 *.pid
 *.tar.gz
+# unrelated tooling cache
+.sass-cache/

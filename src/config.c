@@ -13,8 +13,8 @@ void mirage_config_defaults(mirage_config *c) {
     c->floor_on          = false;  /* flat grass floor (replaced by terrain)       */
     c->floor_height_m    = 1.8f;   /* floor sits 1.8 m below eye (standing height) */
     c->shadows_on        = false;  /* slab drop-shadows (parked for now)           */
-    c->sky_on            = true;   /* gradient + cloud sky dome                    */
-    c->terrain_on        = true;   /* mountain heightfield you float above         */
+    c->sky_on            = false;  /* OFF by default: cloud-dome fbm is per-frame GPU we don't need (--sky to enable) */
+    c->terrain_on        = false;  /* OFF by default: 219k-vert noise heightfield was the top frame cost (--terrain) */
     c->gaze_cursor       = true;   /* Cmd-held: cursor follows head gaze (--no-gaze-cursor off) */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
     c->pose_port         = 4242;
