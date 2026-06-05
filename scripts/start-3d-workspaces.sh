@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # start-3d-workspaces.sh - one-shot launcher for the wofi/start-menu app entry.
-# Registers the Hyprland keybinds, then starts mirage in 3D head-tracked mode
-# (run.sh brings up the bridge + virtual displays + window sweep itself).
+# Registers the Hyprland keybinds, then starts mirage via glasses.sh - the
+# DIRECT-SCANOUT path (locked ~120Hz), not the slower layer-shell overlay.
+# glasses.sh is self-contained: it sets render:direct_scanout + fullscreen/opaque
+# windowrules, pauses HyprPanel off the glasses output + parks the cursor (both
+# restored on quit), brings up the VIRT displays + RayNeo bridge + window sweep,
+# then runs mirage fullscreen and BLOCKS until you quit it (Super+Shift+Q), at
+# which point its trap restores the desktop.
 #
 # Safe to launch from a .desktop file: it inherits the Hyprland session env, so
 # hyprctl works; it logs to /tmp and notifies on the obvious failure (glasses
@@ -23,5 +28,7 @@ if ! hyprctl monitors all -j | grep -q SmartGlasses; then
 fi
 
 bash "$HERE/scripts/keybinds.sh"
-bash "$HERE/scripts/run.sh" --3d
+# notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
+# until you quit, then restores the desktop.
 notify "Started — Super+G grab · Super+Shift+C recenter · Super+Shift+Q quit"
+bash "$HERE/scripts/glasses.sh"
