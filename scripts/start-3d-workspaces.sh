@@ -31,4 +31,6 @@ bash "$HERE/scripts/keybinds.sh"
 # notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
 # until you quit, then restores the desktop.
 notify "Started — Super+G grab · Super+Shift+C recenter · Super+Shift+Q quit"
-bash "$HERE/scripts/glasses.sh"
+# AUTOGRAB=1: this is a real session (not hands-off testing), so grab mouse +
+# keyboard onto the arc once the first frame is up. Super+G releases it.
+AUTOGRAB=1 bash "$HERE/scripts/glasses.sh"

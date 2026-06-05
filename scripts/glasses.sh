@@ -74,5 +74,25 @@ echo "[glasses] sweeping your windows onto the virtual screens..."
 bash "$HERE/scripts/sweep.sh" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
 echo "[glasses] launching mirage fullscreen on $GLASSES (AUTOGRAB=${AUTOGRAB:-0}; Super+G toggles grab)"
+
+# Once mirage's first frame lands, enforce the two things the windowrule alone
+# misses: (1) put the window into REAL fullscreen on the glasses (the static
+# `fullscreen` rule is unreliable for a --windowed xdg toplevel; fullscreenstate
+# 2 = fullscreen, and it's idempotent so it won't toggle back off if the rule did
+# fire), and (2) if AUTOGRAB=1 (default for a real session; 0 for hands-off
+# testing) grab mouse/keyboard onto the arc via the same SIGUSR2 Super+G sends.
+( for _ in $(seq 1 80); do
+      grep -q -e 'fps' -e 'capture\[' /tmp/mirage.log 2>/dev/null && break
+      sleep 0.1
+  done
+  focused=0
+  for _ in 1 2 3 4 5; do
+      [ "$(hyprctl dispatch focuswindow "class:^(mirage)\$" 2>&1)" = ok ] && { focused=1; break; }
+      sleep 0.2
+  done
+  [ "$focused" = 1 ] && hyprctl dispatch fullscreenstate 2 2 >/dev/null 2>&1
+  [ "${AUTOGRAB:-0}" = 1 ] && pkill -USR2 -x mirage
+) &
+
 AUTOGRAB="${AUTOGRAB:-0}" ./mirage --windowed 1920x1080 --3d "$@" >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
