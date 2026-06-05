@@ -276,6 +276,7 @@ static void usage(const char *p) {
 
 int main(int argc, char **argv) {
     mirage_config_defaults(&M.cfg);
+    M.profile = getenv("MIRAGE_PROFILE") != NULL;   /* per-frame gpu/swap timing */
     M.zoom = 1.0f;
     M.lens_power = M.lens_target = 1.0f;   /* loupe off until Alt is held */
     M.view_focus = (M.cfg.screen_cols > 0 ? M.cfg.screen_cols - 1 : 2) / 2;  /* centre screen */
@@ -536,6 +537,10 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | pose %.0f Hz, "
                             "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, phz,
                             age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
+                    if (M.profile)
+                        fprintf(stderr, "  prof: gpu %.1f ms (draw+sampling) | "
+                                "swap %.1f ms (present)\n",
+                                M.prof_gpu_ms, M.prof_swap_ms);
                 } else {
                     fprintf(stderr, "mirage: %.1f fps | worst %.1f ms\n",
                             fps_frames / dt, worst_ms * 1000.0);

@@ -177,6 +177,11 @@ struct mirage {
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
     float fps;        /* last measured throughput, published by the main loop (HUD) */
+    /* perf profiling (MIRAGE_PROFILE=1): split a frame into pure GPU draw cost
+     * (glFinish before swap) vs present wait (eglSwapBuffers). gpu high = render/
+     * texture-sampling bound; swap high = compositor/present bound (no scanout). */
+    bool   profile;
+    double prof_gpu_ms, prof_swap_ms;
     /* gaze cursor (grab.c): the final camera yaw/pitch (rad) render_frame looked
      * along this frame, so the cursor can warp to where the eye points while Cmd
      * is held. gaze_have gates it off until the first head-tracked frame. */

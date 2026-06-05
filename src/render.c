@@ -2,8 +2,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <wayland-egl.h>
+
+/* MIRAGE_PROFILE timing helper: milliseconds between two monotonic samples. */
+static double prof_ms(struct timespec a, struct timespec b) {
+    return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1e6;
+}
 
 static const char *VERT_SRC =
     "attribute vec3 aPos;\n"
@@ -1066,6 +1072,7 @@ static bool ensure_fbo(int w, int h) {
 
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
+    struct timespec rt0; if (m->profile) clock_gettime(CLOCK_MONOTONIC, &rt0);
 
     /* Ease the loupe toward its target (lens_max while Alt held, else 1.0).
      * Active only above ~1, so the FBO indirection is skipped entirely when the
@@ -1382,7 +1389,21 @@ void render_frame(struct mirage *m, quat head) {
         glEnable(GL_DEPTH_TEST);
     }
 
-    eglSwapBuffers(m->edpy, m->esurf);
+    if (m->profile) {
+        /* glFinish drains the GPU so rt0->tg is pure draw cost (texture sampling
+         * included); tg->ts is the present wait. High gpu = render/sampling bound;
+         * high swap = compositor/present bound (scanout not engaging). glFinish is
+         * harmful in production - only on under MIRAGE_PROFILE. */
+        struct timespec tg, ts;
+        glFinish();
+        clock_gettime(CLOCK_MONOTONIC, &tg);
+        eglSwapBuffers(m->edpy, m->esurf);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        m->prof_gpu_ms  = prof_ms(rt0, tg);
+        m->prof_swap_ms = prof_ms(tg, ts);
+    } else {
+        eglSwapBuffers(m->edpy, m->esurf);
+    }
 }
 
 /* Flat capture-only view: lay the N captured screens out in a row, each fit to
