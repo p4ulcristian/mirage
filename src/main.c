@@ -402,7 +402,10 @@ int main(int argc, char **argv) {
     /* optional laptop preview: a normal toplevel window mirroring the flat view,
      * so the virtual screens stay visible/usable without the glasses. Separate
      * surface, drawn each frame from the same captured textures. */
-    if (opt_preview && !opt_windowed && g_wm_base) {
+    /* Allowed in --windowed/scanout mode too: the preview is a SEPARATE laptop
+     * toplevel, so it mirrors the screens onto eDP-1 without ever touching the
+     * glasses output - DP-1 stays direct-scanned-out at full rate. */
+    if (opt_preview && g_wm_base) {
         M.pv_surface = wl_compositor_create_surface(M.compositor);
         M.pv_xsurf = xdg_wm_base_get_xdg_surface(g_wm_base, M.pv_surface);
         xdg_surface_add_listener(M.pv_xsurf, &PV_XSURF_LISTENER, NULL);

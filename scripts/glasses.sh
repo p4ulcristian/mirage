@@ -64,6 +64,16 @@ hyprctl keyword render:direct_scanout 1 >/dev/null
 for r in "monitor $GLASSES" "opaque" "noblur" "norounding"; do
     hyprctl keyword windowrulev2 "$r,class:^(mirage)\$" >/dev/null
 done
+# Laptop mirror (MIRROR=1, default): mirage opens a second --preview toplevel showing
+# the flat view of the same screens. It's a SEPARATE surface on the laptop, so it
+# never touches the glasses output - DP-1 stays scanned out at full rate. Pin it to
+# the laptop, floating, so it doesn't tile over your desktop. MIRROR=0 to skip it.
+LAPTOP="${LAPTOP:-eDP-1}"
+if [ "${MIRROR:-1}" = 1 ]; then
+    for r in "monitor $LAPTOP" "float" "noblur"; do
+        hyprctl keyword windowrulev2 "$r,class:^(mirage-preview)\$" >/dev/null
+    done
+fi
 
 echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
 hyprctl dispatch movecursor 300 300 >/dev/null
@@ -88,5 +98,6 @@ if [ "${AUTOGRAB:-0}" = 1 ]; then
     pkill -USR2 -x mirage ) &
 fi
 
-./mirage --windowed 1920x1080 --fullscreen --3d "$@" >/tmp/mirage.log 2>&1
+PREVIEW=; [ "${MIRROR:-1}" = 1 ] && PREVIEW="--preview"
+./mirage --windowed 1920x1080 --fullscreen --3d $PREVIEW "$@" >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
