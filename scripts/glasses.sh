@@ -52,8 +52,13 @@ restore() {
 }
 trap restore EXIT INT TERM
 
-echo "[glasses] keeping the desktop shell off $GLASSES (watchdog)..."
-( while :; do for p in $(panel_pids); do kill "$p" 2>/dev/null; done; sleep 1.5; done ) &
+echo "[glasses] quitting HyprPanel so its bar/notifications leave $GLASSES (scanout needs a clean output)..."
+# Use HyprPanel's OWN clean quit, not SIGKILL gjs. A hard kill leaves it flickering
+# back (top-layer bar/notifications re-land on DP-1 and disqualify direct scanout for
+# ~1.5s at a time - measured as fps oscillating 58<->77). `hyprpanel -q` makes it stay
+# down and clears DP-1 to scanout-eligible. Backup watchdog re-quits if it ever returns.
+hyprpanel -q 2>/dev/null || true
+( while :; do pgrep -x gjs >/dev/null 2>&1 && hyprpanel -q 2>/dev/null; sleep 2; done ) &
 SUPPRESS_PID=$!
 sleep 1
 
