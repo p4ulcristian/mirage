@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <math.h>
 
 #include <gbm.h>
 #include <drm_fourcc.h>
@@ -257,11 +258,33 @@ static void arm_frame(struct mirage *m, screen_t *s) {
     zwlr_screencopy_frame_v1_add_listener(s->frame, &FRAME_LISTENER, s);
 }
 
+/* Only capture panels the head is actually pointed near. Capturing an animated
+ * desktop that's behind you or far in the periphery is pure waste - Hyprland
+ * recomposites it and we copy it, for pixels you can't see. mirage knows the gaze
+ * direction (render_frame publishes it) and each panel's layout angle, so gate
+ * capture on a generous in-view window: the focused panel + its neighbours + a
+ * margin, so a panel is captured BEFORE you actually turn to it (no stale flash).
+ * Before the first tracked frame (or flat / no-pose), capture everything.
+ * Tunable live via MIRAGE_VIEW_YAW / MIRAGE_VIEW_PITCH (degrees). */
+static bool screen_in_view(struct mirage *m, const screen_t *s) {
+    if (!m->gaze_have) return true;
+    static float yaw_r = -1.0f, pitch_r = -1.0f;
+    if (yaw_r < 0.0f) {
+        const char *y = getenv("MIRAGE_VIEW_YAW"), *p = getenv("MIRAGE_VIEW_PITCH");
+        yaw_r   = (y ? atof(y) : 55.0f) * (float)M_PI / 180.0f;
+        pitch_r = (p ? atof(p) : 42.0f) * (float)M_PI / 180.0f;
+    }
+    float ty, tp;
+    layout_focus_angles(m, s->index, &ty, &tp);
+    return fabsf(m->gaze_yaw - ty) < yaw_r && fabsf(m->gaze_pitch - tp) < pitch_r;
+}
+
 void capture_begin_frame(struct mirage *m) {
     g_capture_mirage = m;
     for (int i = 0; i < m->n_screen; i++) {
         screen_t *s = &m->screen[i];
         if (s->frame) continue;              /* still in flight / re-armed */
+        if (!screen_in_view(m, s)) continue; /* skip panels out of view    */
         arm_frame(m, s);
     }
 }
@@ -290,8 +313,11 @@ bool capture_poll(struct mirage *m) {
              * keystroke - the "one letter behind" lag. A re-armed damage frame is
              * free while idle, so this keeps cc7b371's savings. On failure we
              * leave it NULL so capture_begin_frame re-arms on the throttled tick,
-             * avoiding a busy loop on a persistently failing output. */
-            if (ready) arm_frame(m, s);
+             * avoiding a busy loop on a persistently failing output. Only re-arm
+             * if the panel is still in view - once it leaves the FOV it stops
+             * capturing entirely (no Hyprland recomposite, no copy) until you
+             * look back and capture_begin_frame re-arms it. */
+            if (ready && screen_in_view(m, s)) arm_frame(m, s);
         }
     }
     return all_settled;
