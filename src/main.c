@@ -36,6 +36,9 @@ static float opt_sign_yaw = 1.0f, opt_sign_pitch = 1.0f, opt_sign_roll = 1.0f;
 static bool opt_3d = false;
 /* windowed scene-setup mode: render into a normal xdg-shell window */
 static bool opt_windowed = false;
+/* request xdg fullscreen on the glasses output (scanout path; deterministic,
+ * unlike a Hyprland windowrule/dispatch race) */
+static bool opt_fullscreen = false;
 static bool opt_preview  = false;          /* laptop preview window (--preview) */
 static int  opt_pv_w = 1280, opt_pv_h = 480;
 static int  opt_win_w = 1280, opt_win_h = 720;
@@ -265,6 +268,7 @@ static void usage(const char *p) {
            "  --invert-pitch    flip pitch\n"
            "  --invert-roll     flip roll\n"
            "  --windowed [WxH]  render into a normal window (scene setup; default 1280x720)\n"
+           "  --fullscreen      request xdg fullscreen on the glasses (with --windowed; for scanout)\n"
            "  --preview [WxH]   also open a laptop window mirroring the screens (default 1280x480)\n"
            "  --no-gaze-cursor  start with gaze-cursor mode off (on by default; double-tap Cmd toggles; needs --3d)\n"
            "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n", p);
@@ -312,6 +316,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--gaze-cursor"))    M.cfg.gaze_cursor = true;
         else if (!strcmp(argv[i], "--no-gaze-cursor")) M.cfg.gaze_cursor = false;
         else if (!strcmp(argv[i], "--3d")) opt_3d = true;
+        else if (!strcmp(argv[i], "--fullscreen")) opt_fullscreen = true;
         else if (!strcmp(argv[i], "--windowed")) {
             opt_windowed = true;
             if (i+1 < argc && argv[i+1][0] != '-' &&
@@ -357,6 +362,15 @@ int main(int argc, char **argv) {
         xdg_toplevel_add_listener(g_toplevel, &XTOP_LISTENER, NULL);
         xdg_toplevel_set_title(g_toplevel, "mirage (scene setup)");
         xdg_toplevel_set_app_id(g_toplevel, "mirage");
+        /* Ask the compositor for true fullscreen on the glasses output up front.
+         * This is the deterministic path to the opaque-fullscreen surface direct
+         * scanout needs - far more reliable than a `fullscreen` windowrule or a
+         * post-launch `hyprctl dispatch`, which race the window's first map and
+         * (when they flip windowed->fullscreen mid-flight) can drop scanout into
+         * an unpresented surface that free-runs at hundreds of fps. NULL output =
+         * let the compositor choose (no glasses found). */
+        if (opt_fullscreen)
+            xdg_toplevel_set_fullscreen(g_toplevel, M.glasses_out);
         wl_surface_commit(M.surface);
     } else {
         /* layer-shell fullscreen overlay on the glasses */

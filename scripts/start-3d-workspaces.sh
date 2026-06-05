@@ -27,6 +27,15 @@ if ! hyprctl monitors all -j | grep -q SmartGlasses; then
     exit 1
 fi
 
+# Clean start: if a previous session is still up, stop it and wait for the VIRT
+# displays to tear down first, otherwise this instance dies in the teardown race.
+if pgrep -x mirage >/dev/null; then
+    echo "existing mirage running; stopping it before relaunch..."
+    pkill -x mirage
+    for _ in $(seq 1 20); do pgrep -x mirage >/dev/null || break; sleep 0.5; done
+    sleep 2
+fi
+
 bash "$HERE/scripts/keybinds.sh"
 # notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
 # until you quit, then restores the desktop.
