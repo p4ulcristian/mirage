@@ -40,7 +40,6 @@ static struct con {
     uint64_t mods[MAX_MODS];        /* modifiers offered for that fourcc     */
     int      n_mods;
     bool     got_size, got_fmt;
-    bool     first_capture;         /* damage the whole buffer once          */
 } g_con[MIRAGE_MAX_SCREENS];
 
 static bool has_gl_ext(const char *name) {
@@ -90,7 +89,6 @@ static void se_done(void *d, struct ext_image_copy_capture_session_v1 *s) {
     (void)s; screen_t *sc = d; struct con *c = &g_con[sc->index];
     if (c->got_size && c->got_fmt) {
         sc->session_ready = true;
-        c->first_capture  = true;
         fprintf(stderr, "capture[%s]: session ready %ux%u fmt %.4s (%d modifiers)\n",
                 sc->name, c->cap_w, c->cap_h, (char*)&c->fmt, c->n_mods);
     }
@@ -134,9 +132,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     if (!bo) { fprintf(stderr, "capture[%s]: gbm_bo_create failed\n", s->name); return false; }
 
     s->bo         = bo;
-    s->y_invert   = true;   /* dmabuf is top-left origin; GL samples bottom-up. Default
-                             * flip (matches the old wlr-screencopy path); a FLIPPED_180
-                             * transform event, if sent, cancels it in fr_transform. */
+    s->y_invert   = false;  /* upright by default; fr_transform flips only for 180 */
     s->width      = (int32_t)c->cap_w;     /* buffer size is authoritative */
     s->height     = (int32_t)c->cap_h;
     s->drm_format = c->fmt;
@@ -197,9 +193,10 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
 /* ---- frame listener ---- */
 static void fr_transform(void *d, struct ext_image_copy_capture_frame_v1 *f, uint32_t t) {
     (void)f; screen_t *s = d;
-    /* dmabuf is delivered top-left origin; flip for GL's bottom-left sampling.
-     * A FLIPPED_180 transform cancels that flip. */
-    s->y_invert = !(t == WL_OUTPUT_TRANSFORM_FLIPPED_180 || t == WL_OUTPUT_TRANSFORM_180);
+    /* ext-image-copy-capture delivers the buffer already upright (NORMAL), unlike
+     * wlr-screencopy's bottom-up Y_INVERT convention - so DON'T flip for NORMAL;
+     * only a 180 / flipped-180 transform needs the vertical flip. */
+    s->y_invert = (t == WL_OUTPUT_TRANSFORM_180 || t == WL_OUTPUT_TRANSFORM_FLIPPED_180);
 }
 static void fr_damage(void *d, struct ext_image_copy_capture_frame_v1 *f,
                       int32_t x, int32_t y, int32_t w, int32_t h) {
@@ -214,6 +211,9 @@ static void fr_ready(void *d, struct ext_image_copy_capture_frame_v1 *f) {
 }
 static void fr_failed(void *d, struct ext_image_copy_capture_frame_v1 *f, uint32_t reason) {
     (void)f; screen_t *s = d; s->frame_state = 3;
+    static int logged[MIRAGE_MAX_SCREENS] = {0};
+    if (s->index >= 0 && s->index < MIRAGE_MAX_SCREENS && !logged[s->index]++)
+        fprintf(stderr, "capture[%s]: frame FAILED reason=%u\n", s->name, reason);
     if (reason == EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
         /* our buffer no longer matches; drop it so it's re-allocated from fresh
          * constraints on the next session done. */
@@ -232,16 +232,14 @@ static const struct ext_image_copy_capture_frame_v1_listener FRAME_LISTENER = {
 /* Arm a fresh capture frame for one screen against its persistent buffer. */
 static void arm_frame(struct mirage *m, screen_t *s) {
     if (!ensure_buffer(m, s)) { s->frame_state = 3; return; }
-    struct con *c = &g_con[s->index];
     s->frame = ext_image_copy_capture_session_v1_create_frame(s->session);
     ext_image_copy_capture_frame_v1_add_listener(s->frame, &FRAME_LISTENER, s);
     ext_image_copy_capture_frame_v1_attach_buffer(s->frame, s->buffer);
-    /* First capture into a fresh buffer must fill the whole thing; after that we
-     * let the compositor copy only its own damage (the win of this protocol). */
-    if (c->first_capture) {
-        ext_image_copy_capture_frame_v1_damage_buffer(s->frame, 0, 0, s->width, s->height);
-        c->first_capture = false;
-    }
+    /* Damage the whole buffer every frame: a headless output Hyprland renders
+     * lazily only delivers content when we declare our buffer fully stale (else
+     * the first un-rendered capture stays black forever). This matches what
+     * wlr-screencopy did with a full copy each frame; cheap on 0.55. */
+    ext_image_copy_capture_frame_v1_damage_buffer(s->frame, 0, 0, s->width, s->height);
     ext_image_copy_capture_frame_v1_capture(s->frame);
     s->frame_state = 1;
 }
