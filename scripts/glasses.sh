@@ -74,16 +74,17 @@ echo "[glasses] locking $GLASSES to ${GLASSES_HZ}Hz for a stable vsync..."
 hyprctl keyword monitor "$GLASSES,1920x1080@${GLASSES_HZ},auto,1" >/dev/null || true
 # fullscreen is requested by mirage itself (--fullscreen, below); these rules just
 # keep the surface scanout-eligible (opaque, no blur/rounding) and pin it to $GLASSES.
-for r in "monitor $GLASSES" "opaque" "noblur" "norounding"; do
-    hyprctl keyword windowrulev2 "$r,class:^(mirage)\$" >/dev/null
+# Hyprland 0.55 windowrule syntax: "<effect> <value>, match:<prop> <value>".
+for r in "monitor $GLASSES" "opaque 1" "no_blur 1" "rounding 0"; do
+    hyprctl keyword windowrule "$r, match:class ^(mirage)\$" >/dev/null
 done
 # Laptop mirror (opt-in: MIRROR=1): mirage opens a second --preview toplevel showing
 # the flat view of the same screens on the laptop. OFF by default - the extra surface
 # interfered with the glasses coming up cleanly; needs revisiting before re-enabling.
 LAPTOP="${LAPTOP:-eDP-1}"
 if [ "${MIRROR:-0}" = 1 ]; then
-    for r in "monitor $LAPTOP" "float" "noblur"; do
-        hyprctl keyword windowrulev2 "$r,class:^(mirage-preview)\$" >/dev/null
+    for r in "monitor $LAPTOP" "float 1" "no_blur 1"; do
+        hyprctl keyword windowrule "$r, match:class ^(mirage-preview)\$" >/dev/null
     done
 fi
 

@@ -50,8 +50,8 @@ for m in mons:
 else:
     print(next((m["name"] for m in mons if m["name"].startswith("DP-")), "DP-1"))
 ')"
-    hyprctl keyword windowrulev2 "monitor $GLASSES,class:^(mirage)$" >/dev/null
-    hyprctl keyword windowrulev2 "fullscreen,class:^(mirage)$"       >/dev/null
+    hyprctl keyword windowrule "monitor $GLASSES, match:class ^(mirage)$" >/dev/null
+    hyprctl keyword windowrule "fullscreen 1, match:class ^(mirage)$"     >/dev/null
 fi
 
 # don't stack instances

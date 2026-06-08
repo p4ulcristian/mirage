@@ -554,15 +554,18 @@ int main(int argc, char **argv) {
             double fdt = (now.tv_sec - frame_prev.tv_sec) + (now.tv_nsec - frame_prev.tv_nsec) * 1e-9;
             frame_prev = now;
             if (fdt > worst_ms) worst_ms = fdt;
+            static long hitch_count = 0; static double hitch_ms_sum = 0;
+            if (fdt > 0.022) { hitch_count++; hitch_ms_sum += fdt * 1000.0; }   /* >22ms = missed a 60Hz vblank */
             double dt = (now.tv_sec - fps_t0.tv_sec) + (now.tv_nsec - fps_t0.tv_nsec) * 1e-9;
             if (dt >= 1.0) {
                 M.fps = (float)(fps_frames / dt);   /* publish for the in-scene HUD */
                 if (opt_3d) {
                     double phz = pose_take_sample_count() / dt;
                     uint32_t age = pose_age_ms();
-                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | pose %.0f Hz, "
-                            "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, phz,
+                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | hitches %ld | pose %.0f Hz, "
+                            "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, hitch_count, phz,
                             age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
+                    hitch_count = 0; hitch_ms_sum = 0; (void)hitch_ms_sum;
                     if (M.profile)
                         fprintf(stderr, "  prof: gpu %.1f ms (draw+sampling) | "
                                 "swap %.1f ms (present)\n",
