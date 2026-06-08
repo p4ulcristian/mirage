@@ -874,11 +874,13 @@ bool render_init(struct mirage *m) {
     if (!eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx)) {
         fprintf(stderr, "render: makeCurrent failed\n"); return false;
     }
-    /* screenshare: lock to 60Hz, vsync on. The glasses panel scans at 120Hz, so
-     * swap-interval 2 presents every 2nd vblank => tear-free 60fps with no
-     * free-running. (Whole pipeline at 60: capture also runs at 60 below.) The
+    /* Stable 60: present every vblank with vsync on. glasses.sh drops the panel to
+     * a native 60Hz mode, so one vblank = 16.6ms and this hardware-locks us to a
+     * rock-solid 60 (GPU draw is <1ms, so every frame lands with ~15ms to spare).
+     * NB interval 2 ("every 2nd vblank") is NOT honored on the Hyprland
+     * direct-scanout path - the panel mode is what actually fixes the rate. The
      * leased path instead paces in lease_out_present (atomic flip + MIRAGE_FPS_CAP). */
-    eglSwapInterval(m->edpy, 2);
+    eglSwapInterval(m->edpy, 1);
     }   /* end !m->lease */
 
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);

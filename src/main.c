@@ -465,7 +465,14 @@ int main(int argc, char **argv) {
      * camera redraw: re-blitting 3 outputs every vsync starves presentation and
      * costs frames, and screen content past 60 Hz isn't perceptible anyway. */
     struct timespec cap_t = fps_t0;
-    const double CAP_PERIOD = 1.0 / 60.0;   /* screenshare: capture at the locked 60Hz scanout rate */
+    /* Capture content at 30Hz, half the 60Hz scanout. Profiling showed a full-frame
+     * 5120x1440 screencopy every vblank (~29MB) periodically stalls the compositor's
+     * release of our buffer (present spikes 33-63ms = dropped frames). The WALL keeps
+     * moving at 60 (head-tracked redraw); only the desktop CONTENT refreshes at 30,
+     * which is imperceptible for non-video and buys a rock-solid present. Override
+     * with MIRAGE_CAP_HZ. */
+    double cap_hz = getenv("MIRAGE_CAP_HZ") ? atof(getenv("MIRAGE_CAP_HZ")) : 30.0;
+    const double CAP_PERIOD = cap_hz > 0 ? 1.0 / cap_hz : 1.0 / 30.0;
     while (M.running && !g_stop) {
         /* drain pending events first (xdg ping/pong, resizes) so the
          * compositor never flags us as unresponsive */
