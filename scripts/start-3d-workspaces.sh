@@ -19,8 +19,9 @@ echo "=== launch $(cat /proc/uptime | cut -d' ' -f1)s uptime ==="
 
 notify() { command -v notify-send >/dev/null && notify-send "3D Workspaces" "$1" || true; }
 
-# Glasses must be present as the DP-1 SmartGlasses output, extended (not
-# mirrored). If only eDP-1 is advertised, there's nothing to render onto.
+# Glasses must be present as DP-1 SmartGlasses. On the patched kernel they come up
+# non-desktop (Hyprland lists them disabled and offers them for lease) - that still
+# matches here, and lease.sh leases them. If only eDP-1 is advertised, they're gone.
 if ! hyprctl monitors all -j | grep -q SmartGlasses; then
     echo "glasses (DP-1 SmartGlasses) not found"
     notify "Glasses not detected — plug in the RayNeo and make sure they're extended, not mirrored."
@@ -37,9 +38,9 @@ if pgrep -x mirage >/dev/null; then
 fi
 
 bash "$HERE/scripts/keybinds.sh"
-# notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
-# until you quit, then restores the desktop.
-notify "Started — Super+G grab · Super+Shift+C recenter · Super+Shift+Q quit"
-# AUTOGRAB=1: this is a real session (not hands-off testing), so grab mouse +
-# keyboard onto the arc once the first frame is up. Super+G releases it.
-AUTOGRAB=1 bash "$HERE/scripts/glasses.sh"
+# notify BEFORE lease.sh - it runs mirage in the foreground and blocks here until
+# you quit. The leased path needs no desktop restore (Hyprland never drives DP-1).
+notify "Started (leased) — Super+G grab · Super+Shift+C recenter · Super+Shift+Q quit"
+# lease.sh: lease DP-1, bring up the ultrawide VIRT to capture, run mirage --lease.
+# It owns the libinput grab itself (MIRAGE_TRACKPAD/KEYBOARD), so no AUTOGRAB here.
+bash "$HERE/scripts/lease.sh"

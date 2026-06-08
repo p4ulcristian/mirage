@@ -157,6 +157,7 @@ struct mirage {
     EGLContext ectx;
     EGLSurface esurf;
     EGLConfig  ecfg;
+    bool       lease;   /* --lease: scan out via a leased KMS connector (non-desktop glasses) */
 
     /* gbm for capture buffer allocation */
     int  drm_fd;

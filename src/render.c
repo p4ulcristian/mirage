@@ -1,4 +1,5 @@
 #include "mirage.h"
+#include "lease_out.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -844,9 +845,13 @@ static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
 }
 
 bool render_init(struct mirage *m) {
+    EGLint major = 0, minor = 0;   /* EGL version, logged below (set in the !lease path) */
+    /* Leased-KMS output (glasses): lease_out_init() already stood up the EGL
+     * display/config/context/surface from GBM and made it current, so skip the
+     * Wayland-surface EGL bring-up and go straight to GL program setup. */
+    if (!m->lease) {
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
     if (m->edpy == EGL_NO_DISPLAY) { fprintf(stderr, "render: no EGL display\n"); return false; }
-    EGLint major, minor;
     if (!eglInitialize(m->edpy, &major, &minor)) {
         fprintf(stderr, "render: eglInitialize failed\n"); return false;
     }
@@ -871,8 +876,10 @@ bool render_init(struct mirage *m) {
     }
     /* screenshare: lock to 60Hz, vsync on. The glasses panel scans at 120Hz, so
      * swap-interval 2 presents every 2nd vblank => tear-free 60fps with no
-     * free-running. (Whole pipeline at 60: capture also runs at 60 below.) */
+     * free-running. (Whole pipeline at 60: capture also runs at 60 below.) The
+     * leased path instead paces in lease_out_present (atomic flip + MIRAGE_FPS_CAP). */
     eglSwapInterval(m->edpy, 2);
+    }   /* end !m->lease */
 
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);
     GLuint fs = compile(GL_FRAGMENT_SHADER, FRAG_SRC);
@@ -1400,12 +1407,12 @@ void render_frame(struct mirage *m, quat head) {
         struct timespec tg, ts;
         glFinish();
         clock_gettime(CLOCK_MONOTONIC, &tg);
-        eglSwapBuffers(m->edpy, m->esurf);
+        if (m->lease) lease_out_present(m); else eglSwapBuffers(m->edpy, m->esurf);
         clock_gettime(CLOCK_MONOTONIC, &ts);
         m->prof_gpu_ms  = prof_ms(rt0, tg);
         m->prof_swap_ms = prof_ms(tg, ts);
     } else {
-        eglSwapBuffers(m->edpy, m->esurf);
+        if (m->lease) lease_out_present(m); else eglSwapBuffers(m->edpy, m->esurf);
     }
 }
 
@@ -1463,7 +1470,11 @@ static void render_flat_to(struct mirage *m, EGLSurface surf, int W, int H) {
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    eglSwapBuffers(m->edpy, surf);
+    /* Glasses present: leased KMS does eglSwapBuffers + atomic page-flip (and paces
+     * the loop); the Wayland-surface paths (windowed/preview) just swap. The preview
+     * surface always swaps - lease only ever owns m->esurf. */
+    if (m->lease && surf == m->esurf) lease_out_present(m);
+    else eglSwapBuffers(m->edpy, surf);
 }
 
 void render_frame_flat(struct mirage *m) {

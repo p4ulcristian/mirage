@@ -1,5 +1,6 @@
 #include "mirage.h"
 #include "pose.h"
+#include "lease_out.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,7 +185,10 @@ static const struct zwlr_layer_surface_v1_listener LS_LISTENER = {
 };
 
 static int classify_outputs(void) {
-    /* glasses output */
+    /* glasses output (Wayland). Skipped in lease mode: there the glasses are a
+     * leased KMS connector, not a Wayland output, and glasses_w/h are already set
+     * by lease_out_init - we only need the VIRT discovery below. */
+    if (!M.lease) {
     int glasses = -1;
     for (int i = 0; i < M.n_pending; i++) {
         const char *n = M.pending[i].name, *de = M.pending[i].desc;
@@ -215,6 +219,7 @@ static int classify_outputs(void) {
         snprintf(M.glasses_name, sizeof M.glasses_name, "windowed");
         M.glasses_w = opt_win_w; M.glasses_h = opt_win_h;
     }
+    }   /* end !M.lease (glasses Wayland output) */
 
     /* virtual screens: outputs named VIRT*, in name order */
     for (int pass = 1; pass <= MIRAGE_MAX_SCREENS; pass++) {
@@ -271,7 +276,10 @@ static void usage(const char *p) {
            "  --fullscreen      request xdg fullscreen on the glasses (with --windowed; for scanout)\n"
            "  --preview [WxH]   also open a laptop window mirroring the screens (default 1280x480)\n"
            "  --no-gaze-cursor  start with gaze-cursor mode off (on by default; double-tap Cmd toggles; needs --3d)\n"
-           "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n", p);
+           "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n"
+           "  --lease           scan out to the glasses via a leased KMS connector\n"
+           "                    (non-desktop DP-1; implies --3d). Content still captured\n"
+           "                    from the VIRT display(s). Pace with MIRAGE_FPS_CAP (Hz).\n", p);
 }
 
 int main(int argc, char **argv) {
@@ -317,6 +325,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--gaze-cursor"))    M.cfg.gaze_cursor = true;
         else if (!strcmp(argv[i], "--no-gaze-cursor")) M.cfg.gaze_cursor = false;
         else if (!strcmp(argv[i], "--3d")) opt_3d = true;
+        else if (!strcmp(argv[i], "--lease")) { M.lease = true; opt_3d = true; }
         else if (!strcmp(argv[i], "--fullscreen")) opt_fullscreen = true;
         else if (!strcmp(argv[i], "--windowed")) {
             opt_windowed = true;
@@ -351,6 +360,15 @@ int main(int argc, char **argv) {
                 (void*)M.screencopy, (void*)M.dmabuf);
         return 1;
     }
+    if (M.lease) {
+        /* Glasses are a leased non-desktop connector (kernel apple-dcp patch): there
+         * is no Wayland output/surface for them. Lease DP-1 and stand up GBM/EGL
+         * (fills glasses_w/h + makes the context current); render_init then skips the
+         * Wayland-surface EGL bring-up and present goes through lease_out_present.
+         * Content is still captured from the VIRT display(s) over Wayland as usual. */
+        if (!lease_out_init(&M)) { fprintf(stderr, "mirage: lease setup failed\n"); return 1; }
+        if (classify_outputs() != 0) return 1;   /* discover VIRT screens to capture */
+    } else {
     if (classify_outputs() != 0) return 1;
 
     M.surface = wl_compositor_create_surface(M.compositor);
@@ -394,6 +412,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "mirage: bad glasses size %dx%d\n", M.glasses_w, M.glasses_h);
         return 1;
     }
+    }   /* end !M.lease (Wayland-surface setup) */
 
     if (!render_init(&M))  { fprintf(stderr, "mirage: render_init failed\n");  return 1; }
     if (!capture_init(&M)) { fprintf(stderr, "mirage: capture_init failed\n"); return 1; }
@@ -555,6 +574,7 @@ int main(int argc, char **argv) {
     capture_finish(&M);
     grab_destroy(&M);
     render_finish(&M);
+    if (M.lease) lease_out_finish(&M);   /* release DP-1 + tear down GBM/KMS */
     wl_display_disconnect(M.display);
     return 0;
 }
