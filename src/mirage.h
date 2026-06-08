@@ -47,9 +47,11 @@ typedef struct {
     EGLImageKHR           image;
     GLuint                tex;
 
-    /* per-frame capture state */
-    struct zwlr_screencopy_frame_v1 *frame;
+    /* per-frame capture state (ext-image-copy-capture-v1) */
+    struct ext_image_copy_capture_session_v1 *session;  /* persistent per output */
+    struct ext_image_copy_capture_frame_v1   *frame;    /* one capture in flight */
     int      frame_state;       /* 0 idle, 1 pending, 2 ready, 3 failed  */
+    bool     session_ready;     /* buffer constraints (size+format) received */
     bool     have_tex;          /* texture has valid contents            */
     bool     y_invert;          /* compositor reported flipped Y         */
 
@@ -118,7 +120,9 @@ struct mirage {
     struct wl_registry   *registry;
     struct wl_compositor *compositor;
     struct zwlr_layer_shell_v1        *layer_shell;
-    struct zwlr_screencopy_manager_v1 *screencopy;
+    /* ext-image-copy-capture-v1: the modern, damage-aware capture path */
+    struct ext_output_image_capture_source_manager_v1 *capture_src_mgr;
+    struct ext_image_copy_capture_manager_v1           *copy_capture_mgr;
     struct zwp_linux_dmabuf_v1        *dmabuf;
     struct wl_shm        *shm;
 

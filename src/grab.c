@@ -443,8 +443,13 @@ bool grab_init(struct mirage *m) {
     g->strip_w = g->cols * g->cellw;
     g->strip_h = g->rows * g->cellh;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s). "
-            "Super+G to capture.\n", g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev);
+    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s).\n",
+            g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev);
+    /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
+     * from the first frame - no Super+G toggle. MIRAGE_NOGRAB=1 skips activation
+     * for hands-off perf testing so the laptop trackpad stays usable. */
+    if (!getenv("MIRAGE_NOGRAB"))
+        grab_toggle(m);
     return true;
 }
 

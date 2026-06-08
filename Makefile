@@ -21,9 +21,12 @@ PROTO_NAMES := \
 	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \
 	drm-lease-v1 \
+	ext-foreign-toplevel-list-v1 \
+	ext-image-capture-source-v1 \
+	ext-image-copy-capture-v1 \
 	hyprland-global-shortcuts-v1
 
-vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/drm-lease
+vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/drm-lease:$(SYS_PROTO)/staging/ext-foreign-toplevel-list:$(SYS_PROTO)/staging/ext-image-capture-source:$(SYS_PROTO)/staging/ext-image-copy-capture
 
 PROTO_HDR := $(PROTO_NAMES:%=build/proto/%-client-protocol.h)
 PROTO_SRC := $(PROTO_NAMES:%=build/proto/%-protocol.c)

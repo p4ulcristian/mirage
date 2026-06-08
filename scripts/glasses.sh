@@ -98,19 +98,11 @@ bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
 echo "[glasses] sweeping your windows onto the virtual screens..."
 bash "$HERE/scripts/sweep.sh" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
-echo "[glasses] launching mirage fullscreen on $GLASSES (AUTOGRAB=${AUTOGRAB:-0}; Super+G toggles grab)"
+echo "[glasses] launching mirage fullscreen on $GLASSES (trackpad capture is always on; Super+Shift+Q quits)"
 
-# Auto-grab only: once the first frame lands, if AUTOGRAB=1 (real session; 0 =
-# hands-off testing) send the SIGUSR2 that Super+G uses to capture mouse/keyboard
-# onto the arc. Fullscreen is handled by mirage itself (--fullscreen below).
-if [ "${AUTOGRAB:-0}" = 1 ]; then
-  ( for _ in $(seq 1 80); do
-        grep -q -e 'fps' -e 'capture\[' /tmp/mirage.log 2>/dev/null && break
-        sleep 0.1
-    done
-    pkill -USR2 -x mirage ) &
-fi
-
+# Capture is always-on now (mirage grabs the trackpad in grab_init from the first
+# frame), so there's no AUTOGRAB/SIGUSR2 dance. MIRAGE_NOGRAB=1 leaves the trackpad
+# free for hands-off testing.
 PREVIEW=; [ "${MIRROR:-0}" = 1 ] && PREVIEW="--preview"
 ./mirage --windowed 1920x1080 --fullscreen --3d $PREVIEW "$@" >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs

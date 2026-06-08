@@ -11,7 +11,8 @@
 #include <poll.h>
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
-#include "wlr-screencopy-unstable-v1-client-protocol.h"
+#include "ext-image-capture-source-v1-client-protocol.h"
+#include "ext-image-copy-capture-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
@@ -129,9 +130,12 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
     } else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name)) {
         M.layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface,
                                          ver < 4 ? ver : 4);
-    } else if (!strcmp(iface, zwlr_screencopy_manager_v1_interface.name)) {
-        M.screencopy = wl_registry_bind(r, name, &zwlr_screencopy_manager_v1_interface,
-                                        ver < 3 ? ver : 3);
+    } else if (!strcmp(iface, ext_output_image_capture_source_manager_v1_interface.name)) {
+        M.capture_src_mgr = wl_registry_bind(r, name,
+            &ext_output_image_capture_source_manager_v1_interface, 1);
+    } else if (!strcmp(iface, ext_image_copy_capture_manager_v1_interface.name)) {
+        M.copy_capture_mgr = wl_registry_bind(r, name,
+            &ext_image_copy_capture_manager_v1_interface, 1);
     } else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name)) {
         M.dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface,
                                     ver < 3 ? ver : 3);
@@ -353,11 +357,11 @@ int main(int argc, char **argv) {
     wl_display_roundtrip(M.display);   /* globals */
     wl_display_roundtrip(M.display);   /* output name/desc/mode events */
 
-    if (!M.compositor || !M.layer_shell || !M.screencopy || !M.dmabuf) {
+    if (!M.compositor || !M.layer_shell || !M.capture_src_mgr || !M.copy_capture_mgr || !M.dmabuf) {
         fprintf(stderr, "mirage: missing required wayland globals "
-                "(compositor=%p layer_shell=%p screencopy=%p dmabuf=%p)\n",
+                "(compositor=%p layer_shell=%p capture_src=%p copy_capture=%p dmabuf=%p)\n",
                 (void*)M.compositor, (void*)M.layer_shell,
-                (void*)M.screencopy, (void*)M.dmabuf);
+                (void*)M.capture_src_mgr, (void*)M.copy_capture_mgr, (void*)M.dmabuf);
         return 1;
     }
     if (M.lease) {
@@ -461,18 +465,13 @@ int main(int argc, char **argv) {
     struct timespec frame_prev = fps_t0;   /* for per-frame interval timing */
     long fps_frames = 0;
     double worst_ms = 0.0;                  /* slowest frame in the window   */
-    /* Capture desktop content at ~60 Hz, independent of the (up-to-120 Hz)
-     * camera redraw: re-blitting 3 outputs every vsync starves presentation and
-     * costs frames, and screen content past 60 Hz isn't perceptible anyway. */
     struct timespec cap_t = fps_t0;
-    /* Capture content at 30Hz, half the 60Hz scanout. Profiling showed a full-frame
-     * 5120x1440 screencopy every vblank (~29MB) periodically stalls the compositor's
-     * release of our buffer (present spikes 33-63ms = dropped frames). The WALL keeps
-     * moving at 60 (head-tracked redraw); only the desktop CONTENT refreshes at 30,
-     * which is imperceptible for non-video and buys a rock-solid present. Override
-     * with MIRAGE_CAP_HZ. */
-    double cap_hz = getenv("MIRAGE_CAP_HZ") ? atof(getenv("MIRAGE_CAP_HZ")) : 30.0;
-    const double CAP_PERIOD = cap_hz > 0 ? 1.0 / cap_hz : 1.0 / 30.0;
+    /* Capture content at 60Hz to match the scanout, so the desktop + cursor track
+     * smoothly (30Hz felt laggy). ext-image-copy-capture only re-copies DAMAGED
+     * regions, so a mostly-static desktop is cheap even at 60 - the old full-output
+     * wlr-screencopy blit that forced 30Hz is gone. Override with MIRAGE_CAP_HZ. */
+    double cap_hz = getenv("MIRAGE_CAP_HZ") ? atof(getenv("MIRAGE_CAP_HZ")) : 60.0;
+    const double CAP_PERIOD = cap_hz > 0 ? 1.0 / cap_hz : 1.0 / 60.0;
     while (M.running && !g_stop) {
         /* drain pending events first (xdg ping/pong, resizes) so the
          * compositor never flags us as unresponsive */
@@ -518,7 +517,7 @@ int main(int argc, char **argv) {
             break;
         }
 
-        if (g_grab_toggle) { grab_toggle(&M); g_grab_toggle = 0; }
+        /* grab is always-on (activated in grab_init); no Super+G toggle */
         if (g_smooth_toggle) {
             bool on = pose_toggle_smoothing(); g_smooth_toggle = 0;
             fprintf(stderr, "mirage: pose smoothing %s\n",
