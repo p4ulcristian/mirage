@@ -446,7 +446,7 @@ int main(int argc, char **argv) {
      * camera redraw: re-blitting 3 outputs every vsync starves presentation and
      * costs frames, and screen content past 60 Hz isn't perceptible anyway. */
     struct timespec cap_t = fps_t0;
-    const double CAP_PERIOD = 1.0 / 62.0;   /* a hair over 60 for headroom */
+    const double CAP_PERIOD = 1.0 / 60.0;   /* screenshare: capture at the locked 60Hz scanout rate */
     while (M.running && !g_stop) {
         /* drain pending events first (xdg ping/pong, resizes) so the
          * compositor never flags us as unresponsive */

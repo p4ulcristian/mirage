@@ -869,7 +869,10 @@ bool render_init(struct mirage *m) {
     if (!eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx)) {
         fprintf(stderr, "render: makeCurrent failed\n"); return false;
     }
-    eglSwapInterval(m->edpy, 1);
+    /* screenshare: lock to 60Hz, vsync on. The glasses panel scans at 120Hz, so
+     * swap-interval 2 presents every 2nd vblank => tear-free 60fps with no
+     * free-running. (Whole pipeline at 60: capture also runs at 60 below.) */
+    eglSwapInterval(m->edpy, 2);
 
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);
     GLuint fs = compile(GL_FRAGMENT_SHADER, FRAG_SRC);

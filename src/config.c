@@ -3,12 +3,12 @@
 
 void mirage_config_defaults(mirage_config *c) {
     memset(c, 0, sizeof *c);
-    c->screen_count     = 6;       /* 2 rows x 3 cols (VIRT1-6); auto-bound by discovery */
-    c->screen_distance_m = 2.0f;   /* screens sit 2 m away              */
-    c->screen_width_m    = 1.30f;  /* ~1.3 m wide each (a big monitor)  */
+    c->screen_count     = 1;       /* screenshare: ONE 32:9 ultrawide wall (VIRT1) */
+    c->screen_distance_m = 2.0f;   /* screen sits 2 m away              */
+    c->screen_width_m    = 2.80f;  /* wide 32:9 wall (height follows capture aspect) */
     c->arc_spacing_deg   = 1.0f;   /* small gap between screens (deg), columns & rows */
-    c->screen_arc_deg    = 40.0f;  /* each curved screen spans 40 deg of arc */
-    c->screen_cols       = 3;      /* 3 per row; extra screens stack above   */
+    c->screen_arc_deg    = 70.0f;  /* the single wall spans 70 deg of arc (glance to edges, no neck-pan) */
+    c->screen_cols       = 1;      /* one column: the wall is centred dead-ahead */
     c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
     c->floor_on          = false;  /* flat grass floor (replaced by terrain)       */
     c->floor_height_m    = 1.8f;   /* floor sits 1.8 m below eye (standing height) */
