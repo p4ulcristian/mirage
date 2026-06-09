@@ -3,7 +3,8 @@
  * mirage runs as a normal Wayland client on Hyprland:
  *   - it captures the N virtual outputs (VIRT1..) via wlr-screencopy into GL
  *     textures (zero-copy through dmabuf/EGLImage),
- *   - it owns one fullscreen layer-shell surface on the glasses output,
+ *   - it owns one fullscreen xdg-shell surface on the glasses output, which
+ *     Hyprland page-flips straight to the panel (direct scanout),
  *   - each frame it draws the captured screens as quads floating in a 3D arc,
  *     viewed through a camera rotated by the live head pose,
  *   - Super+G confines input to the virtual workspace (see grab.c).
@@ -63,10 +64,6 @@ typedef struct {
      * front face to give each screen real thickness (built once, 3D mode only). */
     GLuint   slab_vbo;
     int      slab_verts;
-
-    /* drop-shadow footprint on the floor (front face projected along the key
-     * light; static in world space, so built once). */
-    GLuint   shadow_vbo;
 } screen_t;
 
 typedef struct {
@@ -78,11 +75,6 @@ typedef struct {
     float screen_arc_deg;       /* angular width each curved screen spans */
     int   screen_cols;          /* screens per row (rows stack vertically) */
     float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
-    bool  floor_on;             /* draw the emitted ground plane below the wall */
-    float floor_height_m;       /* how far the floor sits below eye level (m)   */
-    bool  shadows_on;           /* drop the slabs' shadow onto the floor glow   */
-    bool  sky_on;               /* draw the gradient + cloud sky dome           */
-    bool  terrain_on;           /* mountain heightfield you float above         */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
     /* glasses optics */
@@ -101,13 +93,6 @@ typedef struct {
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
-    /* Alt-held loupe: a flat-top fisheye magnifier at the gaze centre. The
-     * central disk (radius lens_rin) is uniformly magnified; lens_rin..lens_rout
-     * is a smooth falloff back to 1x; beyond lens_rout the wall is untouched. */
-    float lens_max;             /* peak magnification when Cmd is held             */
-    float lens_rin;             /* plateau radius, fraction of half-height (~0.18) */
-    float lens_rout;            /* falloff outer edge, same units    (~0.34)       */
-
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */
 
@@ -119,7 +104,6 @@ struct mirage {
     struct wl_display    *display;
     struct wl_registry   *registry;
     struct wl_compositor *compositor;
-    struct zwlr_layer_shell_v1        *layer_shell;
     /* ext-image-copy-capture-v1: the modern, damage-aware capture path */
     struct ext_output_image_capture_source_manager_v1 *capture_src_mgr;
     struct ext_image_copy_capture_manager_v1           *copy_capture_mgr;
@@ -141,27 +125,14 @@ struct mirage {
     char     glasses_desc[128];
     int32_t  glasses_w, glasses_h;
     struct wl_surface             *surface;
-    struct zwlr_layer_surface_v1  *layer_surface;
     struct wl_egl_window          *egl_window;
     bool     configured;
-
-    /* optional laptop preview: a second toplevel window mirroring the flat view
-     * of the virtual screens, so they stay visible/usable without the glasses. */
-    struct wl_surface   *pv_surface;
-    struct xdg_surface  *pv_xsurf;
-    struct xdg_toplevel *pv_xtop;
-    struct wl_egl_window *pv_egl_window;
-    EGLSurface           pv_esurf;
-    int32_t  pv_w, pv_h;            /* current backing size                 */
-    int32_t  pv_cfg_w, pv_cfg_h;   /* size requested by the last configure */
-    bool     pv_enabled;
 
     /* egl/gl */
     EGLDisplay edpy;
     EGLContext ectx;
     EGLSurface esurf;
     EGLConfig  ecfg;
-    bool       lease;   /* --lease: scan out via a leased KMS connector (non-desktop glasses) */
 
     /* gbm for capture buffer allocation */
     int  drm_fd;
@@ -182,9 +153,9 @@ struct mirage {
     float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
     float pan_pitch;
     float fps;        /* last measured throughput, published by the main loop (HUD) */
-    /* perf profiling (MIRAGE_PROFILE=1): split a frame into pure GPU draw cost
-     * (glFinish before swap) vs present wait (eglSwapBuffers). gpu high = render/
-     * texture-sampling bound; swap high = compositor/present bound (no scanout). */
+    /* perf profiling (dormant; set profile=true to enable): split a frame into pure
+     * GPU draw cost (glFinish before swap) vs present wait (eglSwapBuffers). gpu high
+     * = render/texture-sampling bound; swap high = compositor/present bound. */
     bool   profile;
     double prof_gpu_ms, prof_swap_ms;
     /* gaze cursor (grab.c): the final camera yaw/pitch (rad) render_frame looked
@@ -192,15 +163,11 @@ struct mirage {
      * is held. gaze_have gates it off until the first head-tracked frame. */
     float gaze_yaw, gaze_pitch;
     bool  gaze_have;
-    float lens_power;  /* eased current loupe magnification; 1.0 = off (no warp) */
-    float lens_target; /* where lens_power eases: lens_max while Alt held, else 1 */
     bool running;
 };
 
 #define MIRAGE_ZOOM_MIN 0.5f
 #define MIRAGE_ZOOM_MAX 4.0f
-#define MIRAGE_LENS_MIN 1.0f   /* loupe off */
-#define MIRAGE_LENS_MAX 2.5f   /* peak Alt-held magnification */
 
 /* config.c */
 void mirage_config_defaults(mirage_config *c);
@@ -208,9 +175,6 @@ void mirage_config_defaults(mirage_config *c);
 /* render.c - EGL/GLES scene rendering */
 bool render_init(struct mirage *m);
 void render_frame(struct mirage *m, quat head);   /* 3D head-tracked arc      */
-void render_frame_flat(struct mirage *m);         /* flat capture-only, no pose */
-bool render_preview_init(struct mirage *m);       /* laptop preview EGL surface */
-void render_preview(struct mirage *m);            /* draw the preview window    */
 void render_finish(struct mirage *m);
 
 /* capture.c - wlr-screencopy into GL textures */

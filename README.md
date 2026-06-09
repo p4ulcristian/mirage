@@ -1,99 +1,93 @@
 # mirage — head-tracked virtual displays for Hyprland + AR glasses
 
-Turns N headless virtual outputs into floating screens arranged in a 3D arc,
-captured live and rendered onto your AR glasses, with the camera driven by your
-head pose. Built for Hyprland on Wayland; verified on RayNeo glasses (DP-1) with
-an Apple M2 GPU (Asahi).
+Turns a headless virtual output into one 32:9 ultrawide screen, curved into a 3D
+wall floating in front of you, captured live and rendered onto your AR glasses
+with the camera driven by your head pose. Built for Hyprland on Wayland; verified
+on RayNeo glasses (DP-1) with an Apple M2 GPU (Asahi).
+
+It runs as an ordinary Wayland app: a fullscreen, opaque window on the glasses
+output that Hyprland page-flips straight to the panel (direct scanout) at the
+panel's native 120 Hz — no compositor, lease, or kernel changes.
+
+There are no command-line flags or environment knobs. The one configuration lives
+in `src/config.c` (curved wall, 1:1 world-fixed tracking, sharpening);
+edit it and rebuild to change the scene.
 
 ## Status
 
 | Piece | State |
 |-------|-------|
-| 3 virtual displays (Hyprland headless) | ✅ working |
-| Live screencopy → GL textures (zero-copy dmabuf) | ✅ working |
-| 3D arc layout + perspective on the glasses | ✅ working |
-| Head-pose camera (OpenTrack UDP / JSON socket) | ✅ working |
-| Quit hotkeys | ✅ working |
-| Super+G input grab/confine | ⏳ todo (grab.c stub) |
-| RayNeo IMU driver | 🧑‍💻 you are writing this |
-
-## Pose contract (how your IMU driver feeds mirage)
-
-mirage consumes head orientation; your driver produces it. Pick one:
-
-1. **OpenTrack UDP** (default) → `127.0.0.1:4242`, 6 little-endian doubles
-   `{x, y, z, yaw, pitch, roll}`, angles in **degrees**. This is exactly what
-   `xr_driver_cli --opentrack-app` already emits, so a RayNeo IMU plugin into
-   XRLinuxDriver needs zero glue.
-2. **JSON unix dgram socket** → `{"quat":[w,x,y,z]}` newline-delimited.
-
-If turning your head feels reversed, flip an axis: `--invert-yaw` /
-`--invert-pitch` / `--invert-roll`. mirage auto-recenters on the first sample,
-so "straight ahead" = wherever you're looking at launch.
+| 32:9 virtual display (Hyprland headless) | ✅ working |
+| Live capture → GL textures (zero-copy dmabuf, ext-image-copy-capture) | ✅ working |
+| Curved wall + perspective on the glasses, direct scanout @120 Hz | ✅ working |
+| Head-pose camera (RayNeo IMU → OpenTrack UDP) | ✅ working |
+| Trackpad cursor confined to the wall + Cmd-scroll zoom | ✅ working |
+| Quit / recenter hotkeys | ✅ working |
 
 ## Quick start
 
 ```bash
-make && make bridge               # build mirage, posedump, and the RayNeo bridge
-bash scripts/setup-displays.sh    # create/configure VIRT1..3
-bash scripts/keybinds.sh          # register quit hotkeys
-bash scripts/bridge.sh            # RayNeo head tracking -> OpenTrack UDP :4242
-bash scripts/run.sh --3d          # head-tracked AR on the glasses
-#   flat capture-only (no tracking):  scripts/run.sh --windowed
-#   tuning:  scripts/run.sh --3d --fov 50 --spacing 22 --invert-yaw
+make && make bridge            # build mirage, the pose tool, and the RayNeo bridge
+bash scripts/start-mirage.sh   # register hotkeys, then run on the glasses (blocks until quit)
 ```
 
-The **RayNeo bridge** (`scripts/bridge.sh`) links the driver in
-`../rayneo-air-pro-4`, runs its Madgwick AHRS, and streams head pose to mirage.
-For drift-free yaw, calibrate the magnetometer once:
-`sudo ../rayneo-air-pro-4/rayneo-track --calibrate` (then the bridge auto-loads
-it for 9-axis fusion).
+`start-mirage.sh` is the launcher (also safe from a `.desktop` entry). It registers
+the Hyprland keybinds and hands off to `scripts/glasses.sh`, which enables direct
+scanout, brings up the virtual display + RayNeo bridge + window sweep, runs mirage
+fullscreen, and restores the desktop when you quit.
 
-Verify your driver's pose stream without the renderer:
+The glasses must be present as the extended `DP-1` SmartGlasses output (not mirrored).
+
+## Head pose
+
+The **RayNeo bridge** (`scripts/bridge.sh` → `rayneo-bridge`) reads the glasses' IMU
+over hidraw, runs a Madgwick AHRS, and streams head orientation to mirage as
+OpenTrack UDP on `127.0.0.1:4242` (6 little-endian doubles `{x, y, z, yaw, pitch,
+roll}`, angles in degrees). mirage auto-recenters on the first sample, so "straight
+ahead" = wherever you're looking at launch (or press Alt+C any time).
+
+It runs **6-axis** (gyro + accel): the bridge's gyro-bias auto-zero makes it
+essentially drift-free at a desk, where the magnetometer's heading is distorted by
+the laptop's local field. hidraw is root-only until a udev rule applies on a glasses
+replug, so the bridge uses `sudo` until then.
+
+Verify the pose stream without the renderer:
 
 ```bash
-./mirage-posedump                 # prints live quat + yaw/pitch/roll
+./mirage-posedump              # prints live quat + yaw/pitch/roll
 ```
 
 ## Controls (Hyprland keybinds)
 
 | Key | Action |
 |-----|--------|
-| `SUPER+SHIFT+Q` | quit mirage (clean shutdown) |
-| `SUPER+SHIFT+X` | quit + close demo terminals + remove virtual displays |
+| `SUPER+SHIFT+Q` | quit mirage, restore windows, remove the virtual display |
+| `ALT+C` | recenter head pose (look straight ahead, then press) |
 
-These are compositor-level binds, so they fire even while the mirage overlay
-covers the glasses. Re-run `scripts/keybinds.sh` after a Hyprland reload.
-
-## Tuning (CLI flags)
-
-```
---output NAME     render target (default: auto-detect glasses by description)
---port N          OpenTrack UDP port (default 4242)
---fov DEG         glasses vertical FOV (default 26)
---distance M      screen distance in metres (default 2.0)
---spacing DEG     yaw between adjacent screens (default 38)
---smooth F        pose smoothing 0..1 (default 0.35)
---screens N       expected virtual screen count (default 3)
---invert-yaw/pitch/roll
-```
+These are compositor-level binds, so they fire even while mirage covers the glasses.
+Re-run `scripts/keybinds.sh` after a Hyprland reload. Trackpad capture is on from the
+first frame; while captured, the trackpad drives a cursor across the wall and Cmd+scroll
+zooms (telephoto). Double-tap Alt toggles the gaze-follow cursor.
 
 ## Architecture
 
 ```
-your IMU driver ──(OpenTrack UDP / JSON)──▶ pose.c ──▶ head quaternion
-Hyprland VIRT1..3 ──(wlr-screencopy + dmabuf)──▶ capture.c ──▶ GL textures
-                                                        │
-   layout.c (arc placement) ─┐                          ▼
-   pose (camera) ────────────┴──▶ render.c ──▶ layer-shell overlay on glasses
+RayNeo IMU ──(rayneo-bridge: AHRS)──▶ OpenTrack UDP :4242 ──▶ pose.c ──▶ head quaternion
+Hyprland VIRT1 ──(ext-image-copy-capture + dmabuf)──▶ capture.c ──▶ GL textures
+                                                            │
+   layout.c (wall placement) ─┐                             ▼
+   pose (camera) ─────────────┴──▶ render.c ──▶ fullscreen window on the glasses
 ```
 
-- `src/pose.c`      head-pose input (OpenTrack UDP / JSON socket), smoothing, recenter
-- `src/capture.c`   wlr-screencopy → gbm/dmabuf → EGLImage → GLES2 texture
-- `src/render.c`    EGL/GLES2, 3 textured quads, perspective camera from pose
-- `src/layout.c`    where each screen sits on the arc
-- `src/grab.c`      input confine (todo)
-- `src/math3d.h`    vec/quat/mat4 (no glm dependency)
-- `protocol/`       vendored wlroots/hyprland protocol XML
-- `scripts/`        setup-displays, teardown-displays, run, stop, keybinds
+- `src/main.c`     Wayland setup, the frame loop, fullscreen window on the glasses
+- `src/pose.c`     head-pose input (OpenTrack UDP), One-Euro smoothing, recenter
+- `src/capture.c`  ext-image-copy-capture → gbm/dmabuf → EGLImage → GLES2 texture
+- `src/render.c`   EGL/GLES2: curved textured wall, perspective camera, sharpen
+- `src/layout.c`   where the screen sits on the arc
+- `src/grab.c`     trackpad capture, the arc cursor, gaze cursor, zoom
+- `src/config.c`   the one hardcoded scene/tracking configuration
+- `src/math3d.h`   vec/quat/mat4 (no glm dependency)
+- `src/rayneo*.c`, `src/magcal.c`  the RayNeo IMU bridge (Madgwick AHRS, mag calibration)
+- `protocol/`      vendored wlroots/hyprland protocol XML
+- `scripts/`       start-mirage, glasses, bridge, setup/teardown-displays, sweep, keybinds, stop
 ```

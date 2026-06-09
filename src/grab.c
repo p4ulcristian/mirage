@@ -41,6 +41,7 @@
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
 #define GRAB_MAX MIRAGE_MAX_SCREENS
+#define MAX_KBD  8           /* how many keyboards we observe for the Super key */
 
 typedef struct {
     struct mirage *m;           /* back-ref for zoom etc.                 */
@@ -59,14 +60,14 @@ typedef struct {
     float  gaze_gain;          /* scales gaze delta -> cursor delta (1 = 1:1)     */
     double gaze_prev_gx, gaze_prev_gy;  /* last frame's gaze strip point          */
     bool   gaze_prev_valid;    /* false until the first gaze sample is seeded     */
-    uint32_t last_cmd_ms;      /* last Cmd press (for double-tap toggle detection) */
+    uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
-    double hscroll_acc;        /* accumulated H delta -> Cmd-pan display steps */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
     char   dev[64];             /* trackpad device path (grabbed)         */
-    char   kbd[64];             /* keyboard device path (observed, not grabbed) */
+    char   kbd[MAX_KBD][64];    /* keyboard device paths (observed, not grabbed) */
+    int    n_kbd;               /* how many entries of kbd[] are valid    */
     int    uifd;                /* uinput wheel device fd (-1 if unavailable) */
 } grab_state;
 
@@ -84,8 +85,10 @@ static int li_open(const char *path, int flags, void *u) {
     grab_state *g = u;
     int fd = open(path, flags);
     if (fd < 0) return -errno;
-    bool is_kbd = g && !strcmp(path, g->kbd);
-    if (!is_kbd) ioctl(fd, EVIOCGRAB, (void*)1);
+    bool is_kbd = false;
+    if (g) for (int i = 0; i < g->n_kbd; i++)
+        if (!strcmp(path, g->kbd[i])) { is_kbd = true; break; }
+    if (!is_kbd) ioctl(fd, EVIOCGRAB, (void*)1);   /* grab the trackpad, observe keyboards */
     return fd;
 }
 static void li_close(int fd, void *u) {
@@ -159,19 +162,6 @@ static void push_cursor(grab_state *g) {
     int s = lay_row * g->cols + col;
     if (s >= g->n) return;               /* empty cell in a partial last row */
 
-    /* Opt-in trace (MIRAGE_GRAB_DEBUG=1, off by default): log every screen change
-     * plus a throttled position sample, to diagnose cursor traversal. */
-    static int dbg = -1;
-    static unsigned tick = 0;
-    if (dbg < 0) dbg = getenv("MIRAGE_GRAB_DEBUG") ? 1 : 0;
-    if (dbg && s != g->cur)
-        fprintf(stderr, "grab: cursor -> screen %d (gx=%.0f gy=%.0f col=%d band=%d "
-                "strip=%dx%d cell=%dx%d)\n",
-                s, g->gx, g->gy, col, band, g->strip_w, g->strip_h, g->cellw, g->cellh);
-    else if (dbg && (++tick % 30u) == 0u)
-        fprintf(stderr, "grab: pos gx=%.0f gy=%.0f (screen %d col=%d band=%d)\n",
-                g->gx, g->gy, s, col, band);
-
     g->cur = s;
     if (!g->vp[s]) return;
 
@@ -242,28 +232,24 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t key = libinput_event_keyboard_get_key(k);
         bool down = libinput_event_keyboard_get_key_state(k)
                     == LIBINPUT_KEY_STATE_PRESSED;
-        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
-            g->super = down;               /* Cmd gates scroll zoom + H-pan */
-            /* Double-tap Cmd toggles gaze mode. Two presses within 350 ms and
-             * we flip it; a normal Cmd hold (one press) just scrolls/pans. */
+        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA)
+            g->super = down;               /* Cmd gates scroll zoom */
+        if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
+            /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
+             * 350 ms flips it; a single Alt tap (e.g. the Alt+C recenter bind)
+             * does nothing here. */
             if (down) {
                 uint32_t t = now_ms();
-                if (t - g->last_cmd_ms < 350u) {
+                if (t - g->last_alt_ms < 350u) {
                     g->m->cfg.gaze_cursor = !g->m->cfg.gaze_cursor;
                     g->gaze_prev_valid = false;   /* reseed delta on next frame */
-                    g->last_cmd_ms = 0;    /* consume, so a third tap re-arms */
+                    g->last_alt_ms = 0;    /* consume, so a third tap re-arms */
                     fprintf(stderr, "grab: gaze cursor %s\n",
                             g->m->cfg.gaze_cursor ? "ON" : "OFF");
                 } else {
-                    g->last_cmd_ms = t;
+                    g->last_alt_ms = t;
                 }
             }
-        }
-        if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
-            /* Alt held raises the gaze-centre loupe; release springs it back.
-             * render_frame eases lens_power toward this each frame. Kept off
-             * Cmd so zoom/pan can run without the fisheye warp. */
-            g->m->lens_target = down ? g->m->cfg.lens_max : 1.0f;
         }
         break;
     }
@@ -274,7 +260,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
          * can't cross the 1920px cell into the next screen - you had to flick.
          * The unaccelerated delta is linear in finger travel regardless of
          * speed (and regardless of whether the device exposes an accel config),
-         * so boundaries cross at any speed. Our MIRAGE_SENS scales it. */
+         * so boundaries cross at any speed. Our g->sens scales it. */
         g->gx += libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
         g->gy += libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
         push_cursor(g);
@@ -295,34 +281,6 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
     case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS: {
         struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
-
-        /* Super+horizontal -> pan the wall across the display ring, snapping one
-         * screen per swipe (VIRT1..N as a loop). Independent of the vertical
-         * (zoom) axis, so a diagonal swipe can do both. */
-        enum libinput_pointer_axis hax = LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL;
-        if (g->super && libinput_event_pointer_has_axis(p, hax)) {
-            double hv = libinput_event_pointer_get_scroll_value(p, hax);
-            const double PAN_NOTCH = 30.0;   /* trackpad units per display step */
-            int nscr = g->n > 0 ? g->n : 1;
-            int cols = g->m->cfg.screen_cols > 0 ? g->m->cfg.screen_cols : 3;
-            g->hscroll_acc += hv;
-            while (g->hscroll_acc >= PAN_NOTCH || g->hscroll_acc <= -PAN_NOTCH) {
-                int dir = g->hscroll_acc > 0 ? 1 : -1;  /* +1 = scroll right -> next screen */
-                g->hscroll_acc -= dir * PAN_NOTCH;
-                /* Step in snake (boustrophedon) order so every notch lands on a
-                 * physical neighbour: bottom row L->R, up a row, top row R->L.
-                 * Odd rows reverse, so the raw 2->3 / 5->0 cross-wall leaps go
-                 * away. Convert screen idx -> snake pos, step, convert back. */
-                int idx = g->m->view_focus;
-                int row = idx / cols, col = idx % cols;
-                int pos = row * cols + ((row & 1) ? (cols - 1 - col) : col);
-                pos = (pos + dir + nscr) % nscr;
-                row = pos / cols; col = pos % cols;
-                int next = row * cols + ((row & 1) ? (cols - 1 - col) : col);
-                g->m->view_focus = (next >= 0 && next < nscr) ? next : pos;
-            }
-            if (hv == 0.0) g->hscroll_acc = 0.0;   /* reset on finger lift */
-        }
 
         enum libinput_pointer_axis ax = LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
         if (!libinput_event_pointer_has_axis(p, ax)) break;
@@ -391,6 +349,63 @@ void grab_pump(struct mirage *m) {
     wl_display_flush(m->display);
 }
 
+/* True if evdev device `fd` advertises capability `code` of `type` (EV_KEY /
+ * EV_ABS). We detect devices by what they CAN emit rather than by name or event
+ * number: names vary and event numbers aren't stable across boots/replug. The
+ * capability bitmap is readable even when another client (keyd) holds an
+ * exclusive grab on the device. */
+static bool ev_has(int fd, int type, int code) {
+    unsigned long bits[KEY_MAX / (8 * sizeof(long)) + 1];   /* KEY_MAX is the largest map */
+    memset(bits, 0, sizeof bits);
+    if (ioctl(fd, EVIOCGBIT(type, sizeof bits), bits) < 0) return false;
+    return (bits[code / (8 * sizeof(long))] >> (code % (8 * sizeof(long)))) & 1UL;
+}
+
+/* True if the device carries the Super (Meta) key - a keyboard that can deliver
+ * the Cmd modifier we gate zoom/pan on. */
+static bool dev_has_meta(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    bool ok = ev_has(fd, EV_KEY, KEY_LEFTMETA);
+    close(fd);
+    return ok;
+}
+
+/* True if the device is a multitouch trackpad: BTN_TOOL_FINGER + multitouch X.
+ * (A plain mouse / the keyd virtual pointer has REL/ABS but neither of these.) */
+static bool dev_is_trackpad(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    bool ok = ev_has(fd, EV_KEY, BTN_TOOL_FINGER) && ev_has(fd, EV_ABS, ABS_MT_POSITION_X);
+    close(fd);
+    return ok;
+}
+
+/* Collect every keyboard that carries the Super key into g->kbd[]. A keyd setup
+ * exposes two (the raw keyboard and a keyd virtual one), and which one actually
+ * DELIVERS events flips with keyd's grab state - so we read them ALL, ungrabbed,
+ * and take the Super modifier from whichever fires. Skips the trackpad. */
+static void detect_keyboards(grab_state *g) {
+    g->n_kbd = 0;
+    for (int i = 0; i < 32 && g->n_kbd < MAX_KBD; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "/dev/input/event%d", i);
+        if (!strcmp(path, g->dev)) continue;      /* that's the grabbed trackpad */
+        if (dev_has_meta(path))
+            snprintf(g->kbd[g->n_kbd++], sizeof g->kbd[0], "%s", path);
+    }
+}
+
+/* Pick the first multitouch trackpad into g->dev. Falls back to event0 (left as
+ * set by the caller) if none is found. */
+static void detect_trackpad(grab_state *g) {
+    for (int i = 0; i < 32; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "/dev/input/event%d", i);
+        if (dev_is_trackpad(path)) { snprintf(g->dev, sizeof g->dev, "%s", path); return; }
+    }
+}
+
 /* ---- lifecycle ---- */
 bool grab_init(struct mirage *m) {
     if (!m->vpointer_mgr || !m->seat) {
@@ -400,22 +415,20 @@ bool grab_init(struct mirage *m) {
     grab_state *g = calloc(1, sizeof *g);
     m->grab = g;
     g->m = m;
-    const char *sv = getenv("MIRAGE_SENS");   /* trackpad cursor speed (both axes) */
-    /* Tuned for the RAW (unaccelerated) deltas we now read in handle_event:
-     * those run ~8x larger than libinput's accelerated deltas, so the old 2.0
-     * (set for accelerated motion) made the cursor hypersensitive and overshoot
-     * whole screens. ~0.3 reproduces the old usable mid-speed feel, linearly. */
-    g->sens = sv ? (float)atof(sv) : 0.3f;
-    /* Gaze-follow gain: how much cursor travel you get per unit of gaze travel.
-     * 1.0 = the cursor moves exactly as far as the point you're looking at; <1
-     * makes head motion nudge it more gently, >1 amplifies it. */
-    const char *gg = getenv("MIRAGE_GAZE_GAIN");
-    g->gaze_gain = gg ? (float)atof(gg) : 1.0f;
+    /* Trackpad cursor speed. Tuned for the RAW (unaccelerated) deltas we read in
+     * handle_event: those run ~8x larger than libinput's accelerated deltas, so
+     * ~0.3 reproduces a usable mid-speed feel, linearly. */
+    g->sens = 0.3f;
+    /* Gaze-follow gain: cursor travel per unit of gaze travel; 1.0 = the cursor
+     * moves exactly as far as the point you're looking at. */
+    g->gaze_gain = 1.0f;
     g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
-    const char *td = getenv("MIRAGE_TRACKPAD");
-    const char *kb = getenv("MIRAGE_KEYBOARD");
-    snprintf(g->dev, sizeof g->dev, "%s", td ? td : "/dev/input/event0");
-    snprintf(g->kbd, sizeof g->kbd, "%s", kb ? kb : "/dev/input/event1");
+    /* Auto-detect input devices by capability, not name or event number (neither
+     * is stable across boots/replug): the multitouch trackpad, then every
+     * Super-capable keyboard. Trackpad falls back to event0 if none is found. */
+    snprintf(g->dev, sizeof g->dev, "%s", "/dev/input/event0");
+    detect_trackpad(g);
+    detect_keyboards(g);
 
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
 
@@ -443,13 +456,13 @@ bool grab_init(struct mirage *m) {
     g->strip_w = g->cols * g->cellw;
     g->strip_h = g->rows * g->cellh;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s).\n",
-            g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev);
+    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s, %d keyboard(s):",
+            g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev, g->n_kbd);
+    for (int i = 0; i < g->n_kbd; i++) fprintf(stderr, " %s", g->kbd[i]);
+    fprintf(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
-     * from the first frame - no Super+G toggle. MIRAGE_NOGRAB=1 skips activation
-     * for hands-off perf testing so the laptop trackpad stays usable. */
-    if (!getenv("MIRAGE_NOGRAB"))
-        grab_toggle(m);
+     * from the first frame - no Super+G toggle needed. */
+    grab_toggle(m);
     return true;
 }
 
@@ -461,8 +474,8 @@ void grab_toggle(struct mirage *m) {
         if (!g->li) { fprintf(stderr, "grab: libinput context failed\n"); return; }
         struct libinput_device *dev = libinput_path_add_device(g->li, g->dev);
         if (!dev) {
-            fprintf(stderr, "grab: cannot open trackpad %s (permission? wrong "
-                    "device? set MIRAGE_TRACKPAD)\n", g->dev);
+            fprintf(stderr, "grab: cannot open trackpad %s (permission? or "
+                    "name-match auto-detect picked the wrong device)\n", g->dev);
             libinput_unref(g->li); g->li = NULL; return;
         }
         /* Flat (constant) acceleration: map finger travel linearly to cursor
@@ -470,14 +483,18 @@ void grab_toggle(struct mirage *m) {
          * toward zero, so a slow drag parks at a screen edge and can't push the
          * cursor across the 1920px-wide cell boundary into the next screen -
          * only a fast flick accumulates enough delta. Flat removes that "wall",
-         * so boundaries cross smoothly at any speed. Our own MIRAGE_SENS scales. */
+         * so boundaries cross smoothly at any speed. Our own g->sens scales it. */
         if (libinput_device_config_accel_is_available(dev))
             libinput_device_config_accel_set_profile(
                 dev, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
-        /* observe (don't grab) the keyboard, for the Super+scroll zoom modifier */
-        if (!libinput_path_add_device(g->li, g->kbd))
-            fprintf(stderr, "grab: note - keyboard %s not observed; Super+scroll "
-                    "zoom disabled\n", g->kbd);
+        /* observe (don't grab) every Super-capable keyboard, for the Cmd+scroll
+         * zoom / Cmd+H-pan modifier. We add them all so the modifier is seen
+         * whether keyd is grabbing the raw keyboard or passing it through. */
+        int kbd_ok = 0;
+        for (int i = 0; i < g->n_kbd; i++)
+            if (libinput_path_add_device(g->li, g->kbd[i])) kbd_ok++;
+        if (kbd_ok == 0)
+            fprintf(stderr, "grab: note - no keyboard observed; Cmd+scroll zoom disabled\n");
         if (g->uifd < 0) g->uifd = uinput_open();   /* real wheel for scroll */
         g->scroll_acc = 0.0;
         g->super = false;

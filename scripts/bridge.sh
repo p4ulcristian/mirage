@@ -21,15 +21,12 @@ fi
 SUDO=""
 [ -r /dev/hidraw3 ] || SUDO="sudo -n"
 echo "starting rayneo-bridge ${SUDO:+(via sudo)}..."
-# Default to 6-axis. The magnetometer (9-axis) is unreliable at a desk: the
-# laptop's local field distorts "north" and drags heading around, drifting
-# WORSE than 6-axis even after calibration. The bridge's gyro-bias auto-zero
-# makes 6-axis essentially drift-free (measured ~0.00 deg/s at rest), so the mag
-# buys nothing here. Override with AXIS=9 to use it (needs a good
-# `rayneo-track --calibrate` done in a magnetically clean environment).
-AXIS="${AXIS:-6}"; SIXFLAG=""; [ "$AXIS" = "6" ] && SIXFLAG="--6axis"
+# 6-axis only. The magnetometer (9-axis) is unreliable at a desk: the laptop's
+# local field distorts "north" and drags heading around, drifting WORSE than
+# 6-axis even after calibration. The bridge's gyro-bias auto-zero makes 6-axis
+# essentially drift-free (measured ~0.00 deg/s at rest), so the mag buys nothing.
 # setsid + </dev/null + disown fully detaches it so it outlives this launcher
-setsid $SUDO "$BIN" -v $SIXFLAG "$@" >/tmp/bridge.log 2>&1 </dev/null &
+setsid $SUDO "$BIN" -v --6axis >/tmp/bridge.log 2>&1 </dev/null &
 disown 2>/dev/null || true
 sleep 1.5
 if pgrep -f rayneo-bridge >/dev/null 2>&1; then

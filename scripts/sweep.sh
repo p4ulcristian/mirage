@@ -24,8 +24,8 @@
 # mirage's own overlay is a layer-surface, not a toplevel window, so it is never
 # touched by these moves - it stays on the glasses as the container.
 set -euo pipefail
-STATE="${MIRAGE_SWEEP_STATE:-/tmp/mirage-sweep.json}"
-LAYOUT="${MIRAGE_LAYOUT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/mirage/layout.json}"
+STATE="/tmp/mirage-sweep.json"
+LAYOUT="${XDG_STATE_HOME:-$HOME/.local/state}/mirage/layout.json"
 
 command -v hyprctl >/dev/null || { echo "sweep: hyprctl not found"; exit 1; }
 mkdir -p "$(dirname "$LAYOUT")"

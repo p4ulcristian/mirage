@@ -1,6 +1,5 @@
 #include "mirage.h"
 #include "pose.h"
-#include "lease_out.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +9,6 @@
 #include <time.h>
 #include <poll.h>
 
-#include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
@@ -23,31 +21,20 @@
 static struct mirage M;
 static volatile sig_atomic_t g_stop = 0;
 static volatile sig_atomic_t g_recenter = 0;
-static volatile sig_atomic_t g_grab_toggle = 0;
 static volatile sig_atomic_t g_smooth_toggle = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
 static void on_recenter(int s) { (void)s; g_recenter = 1; }     /* SIGUSR1 */
-static void on_grab(int s) { (void)s; g_grab_toggle = 1; }      /* SIGUSR2 */
 static void on_smooth(int s) { (void)s; g_smooth_toggle = 1; }  /* SIGHUP  */
 
-/* override which output is the render target (default: auto by glasses_match) */
-static const char *opt_output = NULL;
-/* per-axis pose inversion (calibrate to your IMU driver's convention) */
-static float opt_sign_yaw = 1.0f, opt_sign_pitch = 1.0f, opt_sign_roll = 1.0f;
-/* head-tracked 3D arc (off for now: capture-only flat view by default) */
-static bool opt_3d = false;
-/* windowed scene-setup mode: render into a normal xdg-shell window */
-static bool opt_windowed = false;
-/* request xdg fullscreen on the glasses output (scanout path; deterministic,
- * unlike a Hyprland windowrule/dispatch race) */
-static bool opt_fullscreen = false;
-static bool opt_preview  = false;          /* laptop preview window (--preview) */
-static int  opt_pv_w = 1280, opt_pv_h = 480;
-static int  opt_win_w = 1280, opt_win_h = 720;
+/* mirage renders as a fullscreen xdg-shell window on the glasses (DP-1), which
+ * Hyprland page-flips straight to the panel (direct scanout). The glasses output
+ * is auto-detected by description (cfg.glasses_match). Backing size before the
+ * compositor's fullscreen configure arrives: */
+#define WIN_W 1920
+#define WIN_H 1080
 static struct xdg_wm_base  *g_wm_base  = NULL;
 static struct xdg_toplevel *g_toplevel = NULL;
 static int32_t g_win_cfg_w = 0, g_win_cfg_h = 0;
-static bool    g_pv_configured = false;
 
 static void wm_ping(void *d, struct xdg_wm_base *b, uint32_t serial) {
     (void)d; xdg_wm_base_pong(b, serial);
@@ -69,24 +56,6 @@ static void xtop_close(void *d, struct xdg_toplevel *t) {
 }
 static const struct xdg_toplevel_listener XTOP_LISTENER = {
     .configure = xtop_configure, .close = xtop_close,
-};
-
-/* ---- laptop preview window: its own xdg listeners (separate config state) ---- */
-static void pv_xsurf_configure(void *d, struct xdg_surface *xs, uint32_t serial) {
-    (void)d; xdg_surface_ack_configure(xs, serial); g_pv_configured = true;
-}
-static const struct xdg_surface_listener PV_XSURF_LISTENER = { .configure = pv_xsurf_configure };
-
-static void pv_xtop_configure(void *d, struct xdg_toplevel *t, int32_t w, int32_t h,
-                              struct wl_array *states) {
-    (void)d;(void)t;(void)states;
-    if (w > 0 && h > 0) { M.pv_cfg_w = w; M.pv_cfg_h = h; }
-}
-static void pv_xtop_close(void *d, struct xdg_toplevel *t) {
-    (void)d;(void)t; M.pv_enabled = false;   /* closing the preview != quitting */
-}
-static const struct xdg_toplevel_listener PV_XTOP_LISTENER = {
-    .configure = pv_xtop_configure, .close = pv_xtop_close,
 };
 
 /* ---- wl_output discovery ---- */
@@ -127,9 +96,6 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
     (void)d;
     if (!strcmp(iface, wl_compositor_interface.name)) {
         M.compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
-    } else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name)) {
-        M.layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface,
-                                         ver < 4 ? ver : 4);
     } else if (!strcmp(iface, ext_output_image_capture_source_manager_v1_interface.name)) {
         M.capture_src_mgr = wl_registry_bind(r, name,
             &ext_output_image_capture_source_manager_v1_interface, 1);
@@ -173,45 +139,18 @@ static const struct wl_registry_listener REGISTRY_LISTENER = {
     .global = reg_global, .global_remove = reg_remove,
 };
 
-/* ---- layer surface ---- */
-static void ls_configure(void *d, struct zwlr_layer_surface_v1 *ls,
-                         uint32_t serial, uint32_t w, uint32_t h) {
-    (void)d;
-    zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w > 0 && h > 0) { M.glasses_w = (int32_t)w; M.glasses_h = (int32_t)h; }
-    M.configured = true;
-}
-static void ls_closed(void *d, struct zwlr_layer_surface_v1 *ls) {
-    (void)d;(void)ls; M.running = false;
-}
-static const struct zwlr_layer_surface_v1_listener LS_LISTENER = {
-    .configure = ls_configure, .closed = ls_closed,
-};
-
 static int classify_outputs(void) {
-    /* glasses output (Wayland). Skipped in lease mode: there the glasses are a
-     * leased KMS connector, not a Wayland output, and glasses_w/h are already set
-     * by lease_out_init - we only need the VIRT discovery below. */
-    if (!M.lease) {
+    /* glasses output (Wayland): the one whose description/name matches the glasses
+     * (cfg.glasses_match, e.g. "SmartGlasses"). We render a fullscreen window onto
+     * it; if it's not present we fall back to a normal window so the scene is still
+     * usable on the laptop. */
     int glasses = -1;
     for (int i = 0; i < M.n_pending; i++) {
         const char *n = M.pending[i].name, *de = M.pending[i].desc;
-        if (opt_output) {
-            if (!strcmp(n, opt_output)) { glasses = i; break; }
-        } else if (strstr(de, M.cfg.glasses_match) || strstr(n, M.cfg.glasses_match)
-                   || strstr(de, "RayNeo")) {
+        if (strstr(de, M.cfg.glasses_match) || strstr(n, M.cfg.glasses_match)
+            || strstr(de, "RayNeo")) {
             glasses = i; break;
         }
-    }
-    if (glasses < 0 && !opt_windowed) {
-        fprintf(stderr, "mirage: glasses output not found (match='%s'%s%s)\n",
-                M.cfg.glasses_match, opt_output ? ", --output=" : "",
-                opt_output ? opt_output : "");
-        fprintf(stderr, "  available outputs:\n");
-        for (int i = 0; i < M.n_pending; i++)
-            fprintf(stderr, "    %-10s %dx%d  [%s]\n", M.pending[i].name,
-                    M.pending[i].w, M.pending[i].h, M.pending[i].desc);
-        return -1;
     }
     if (glasses >= 0) {
         M.glasses_out = M.pending[glasses].wl;
@@ -221,9 +160,8 @@ static int classify_outputs(void) {
         M.glasses_h = M.pending[glasses].h;
     } else {
         snprintf(M.glasses_name, sizeof M.glasses_name, "windowed");
-        M.glasses_w = opt_win_w; M.glasses_h = opt_win_h;
+        M.glasses_w = WIN_W; M.glasses_h = WIN_H;
     }
-    }   /* end !M.lease (glasses Wayland output) */
 
     /* virtual screens: outputs named VIRT*, in name order */
     for (int pass = 1; pass <= MIRAGE_MAX_SCREENS; pass++) {
@@ -249,105 +187,14 @@ static int classify_outputs(void) {
     return M.n_screen > 0 ? 0 : -1;
 }
 
-static void usage(const char *p) {
-    printf("usage: %s [options]\n"
-           "  --output NAME     render target output (default: auto-detect glasses)\n"
-           "  --port N          OpenTrack UDP port (default 4242)\n"
-           "  --fov DEG         glasses vertical FOV (default 26)\n"
-           "  --distance M      screen distance in metres (default 2.0)\n"
-           "  --spacing DEG     extra gap between screens (default 0)\n"
-           "  --arc DEG         angular width of each curved screen (default 40)\n"
-           "  --mincutoff HZ    One-Euro steadiness at rest (default 0.5; lower = steadier)\n"
-           "  --beta F          One-Euro responsiveness in motion (default 1.0; higher = less lag)\n"
-           "  --yaw-gain F      amplify head yaw (default 2.5; >1 = reach side screens with less turn)\n"
-           "  --pitch-gain F    amplify head pitch (default 3.0; >1 = reach the top row with less look-up)\n"
-           "  --roll-damp F     fraction of head roll kept (default 0.25; 0 = full horizon lock)\n"
-           "  --read-deadband D freeze camera tremor below D deg for steady text (default 0.22; 0 = off)\n"
-           "  --sharpen S       contrast-adaptive text sharpen strength (default 0.35; 0 = off)\n"
-           "  --flat/--cylinder  screen surface: flat panels (default) or curved strips\n"
-           "  --slab-depth M    screen thickness in metres (default 0.05; 0 = flat, no slab)\n"
-           "  --terrain         show the mountain landscape (OFF by default; costs frames)\n"
-           "  --floor           show the flat grass floor (OFF by default)\n"
-           "  --floor-height M  floor distance below eye level (default 1.8 m)\n"
-           "  --shadows         drop the slabs' shadow onto the floor (needs --floor)\n"
-           "  --sky             show the gradient + cloud sky dome (OFF by default; costs frames)\n"
-           "  --smooth F        use the legacy fixed nlerp instead of One-Euro (0..1)\n"
-           "  --screens N       expected virtual screen count (default 3)\n"
-           "  --invert-yaw      flip yaw if turning your head feels reversed\n"
-           "  --invert-pitch    flip pitch\n"
-           "  --invert-roll     flip roll\n"
-           "  --windowed [WxH]  render into a normal window (scene setup; default 1280x720)\n"
-           "  --fullscreen      request xdg fullscreen on the glasses (with --windowed; for scanout)\n"
-           "  --preview [WxH]   also open a laptop window mirroring the screens (default 1280x480)\n"
-           "  --no-gaze-cursor  start with gaze-cursor mode off (on by default; double-tap Cmd toggles; needs --3d)\n"
-           "  --3d              enable head-tracked 3D arc (default: flat capture-only)\n"
-           "  --lease           scan out to the glasses via a leased KMS connector\n"
-           "                    (non-desktop DP-1; implies --3d). Content still captured\n"
-           "                    from the VIRT display(s). Pace with MIRAGE_FPS_CAP (Hz).\n", p);
-}
-
-int main(int argc, char **argv) {
+int main(void) {
     mirage_config_defaults(&M.cfg);
-    M.profile = getenv("MIRAGE_PROFILE") != NULL;   /* per-frame gpu/swap timing */
     M.zoom = 1.0f;
-    M.lens_power = M.lens_target = 1.0f;   /* loupe off until Alt is held */
     M.view_focus = (M.cfg.screen_cols > 0 ? M.cfg.screen_cols - 1 : 2) / 2;  /* centre screen */
-    for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--output")   && i+1<argc) opt_output = argv[++i];
-        else if (!strcmp(argv[i], "--port")     && i+1<argc) M.cfg.pose_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--fov")      && i+1<argc) M.cfg.fov_deg = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--distance") && i+1<argc) M.cfg.screen_distance_m = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--spacing")  && i+1<argc) M.cfg.arc_spacing_deg = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--arc")      && i+1<argc) M.cfg.screen_arc_deg = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--mincutoff") && i+1<argc) M.cfg.pose_mincutoff = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--beta")      && i+1<argc) M.cfg.pose_beta = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--yaw-gain")  && i+1<argc) M.cfg.yaw_gain = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--pitch-gain")&& i+1<argc) M.cfg.pitch_gain = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--roll-damp") && i+1<argc) M.cfg.roll_damp = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--read-deadband") && i+1<argc) M.cfg.read_deadband_deg = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--sharpen") && i+1<argc) M.cfg.sharpen = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--slab-depth") && i+1<argc) M.cfg.slab_depth_m = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--no-floor"))  M.cfg.floor_on = false;
-        else if (!strcmp(argv[i], "--floor-height") && i+1<argc) M.cfg.floor_height_m = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--no-shadows")) M.cfg.shadows_on = false;
-        else if (!strcmp(argv[i], "--shadows"))    M.cfg.shadows_on = true;
-        else if (!strcmp(argv[i], "--no-sky"))     M.cfg.sky_on = false;
-        else if (!strcmp(argv[i], "--sky"))        M.cfg.sky_on = true;
-        else if (!strcmp(argv[i], "--no-terrain")) M.cfg.terrain_on = false;
-        else if (!strcmp(argv[i], "--terrain"))    M.cfg.terrain_on = true;
-        else if (!strcmp(argv[i], "--floor"))      M.cfg.floor_on = true;
-        else if (!strcmp(argv[i], "--flat"))     M.cfg.geometry = GEOM_FLAT;
-        else if (!strcmp(argv[i], "--cylinder")) M.cfg.geometry = GEOM_CYLINDER;
-        else if (!strcmp(argv[i], "--smooth")   && i+1<argc) {
-            M.cfg.pose_smoothing = atof(argv[++i]);
-            M.cfg.pose_oneeuro = false;   /* --smooth opts into the legacy filter */
-        }
-        else if (!strcmp(argv[i], "--screens")  && i+1<argc) M.cfg.screen_count = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--invert-yaw"))   opt_sign_yaw   = -1.0f;
-        else if (!strcmp(argv[i], "--invert-pitch")) opt_sign_pitch = -1.0f;
-        else if (!strcmp(argv[i], "--invert-roll"))  opt_sign_roll  = -1.0f;
-        else if (!strcmp(argv[i], "--gaze-cursor"))    M.cfg.gaze_cursor = true;
-        else if (!strcmp(argv[i], "--no-gaze-cursor")) M.cfg.gaze_cursor = false;
-        else if (!strcmp(argv[i], "--3d")) opt_3d = true;
-        else if (!strcmp(argv[i], "--lease")) { M.lease = true; opt_3d = true; }
-        else if (!strcmp(argv[i], "--fullscreen")) opt_fullscreen = true;
-        else if (!strcmp(argv[i], "--windowed")) {
-            opt_windowed = true;
-            if (i+1 < argc && argv[i+1][0] != '-' &&
-                sscanf(argv[i+1], "%dx%d", &opt_win_w, &opt_win_h) == 2) i++;
-        }
-        else if (!strcmp(argv[i], "--preview")) {
-            opt_preview = true;
-            if (i+1 < argc && argv[i+1][0] != '-' &&
-                sscanf(argv[i+1], "%dx%d", &opt_pv_w, &opt_pv_h) == 2) i++;
-        }
-        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
-    }
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
-    signal(SIGUSR1, on_recenter);   /* recenter head pose on demand */
-    signal(SIGUSR2, on_grab);       /* Super+G: toggle pointer capture */
+    signal(SIGUSR1, on_recenter);   /* recenter head pose on demand (Alt+C) */
     signal(SIGHUP,  on_smooth);     /* A/B the pose smoothing filter (perf diag) */
 
     M.display = wl_display_connect(NULL);
@@ -357,109 +204,54 @@ int main(int argc, char **argv) {
     wl_display_roundtrip(M.display);   /* globals */
     wl_display_roundtrip(M.display);   /* output name/desc/mode events */
 
-    if (!M.compositor || !M.layer_shell || !M.capture_src_mgr || !M.copy_capture_mgr || !M.dmabuf) {
+    if (!M.compositor || !g_wm_base || !M.capture_src_mgr || !M.copy_capture_mgr || !M.dmabuf) {
         fprintf(stderr, "mirage: missing required wayland globals "
-                "(compositor=%p layer_shell=%p capture_src=%p copy_capture=%p dmabuf=%p)\n",
-                (void*)M.compositor, (void*)M.layer_shell,
+                "(compositor=%p xdg_wm_base=%p capture_src=%p copy_capture=%p dmabuf=%p)\n",
+                (void*)M.compositor, (void*)g_wm_base,
                 (void*)M.capture_src_mgr, (void*)M.copy_capture_mgr, (void*)M.dmabuf);
         return 1;
     }
-    if (M.lease) {
-        /* Glasses are a leased non-desktop connector (kernel apple-dcp patch): there
-         * is no Wayland output/surface for them. Lease DP-1 and stand up GBM/EGL
-         * (fills glasses_w/h + makes the context current); render_init then skips the
-         * Wayland-surface EGL bring-up and present goes through lease_out_present.
-         * Content is still captured from the VIRT display(s) over Wayland as usual. */
-        if (!lease_out_init(&M)) { fprintf(stderr, "mirage: lease setup failed\n"); return 1; }
-        if (classify_outputs() != 0) return 1;   /* discover VIRT screens to capture */
-    } else {
     if (classify_outputs() != 0) return 1;
 
+    /* Fullscreen xdg-shell window on the glasses output. Hyprland page-flips this
+     * straight to the panel (direct scanout) once it's opaque + fullscreen. Asking
+     * for fullscreen up front is the deterministic path - far more reliable than a
+     * `fullscreen` windowrule or a post-launch dispatch, which race the window's
+     * first map and can drop scanout into an unpresented surface free-running at
+     * hundreds of fps. M.glasses_out targets the glasses (NULL = compositor picks). */
     M.surface = wl_compositor_create_surface(M.compositor);
-    if (opt_windowed) {
-        /* normal resizable window for tuning the scene without the glasses */
-        if (!g_wm_base) { fprintf(stderr, "mirage: no xdg_wm_base\n"); return 1; }
-        struct xdg_surface *xs = xdg_wm_base_get_xdg_surface(g_wm_base, M.surface);
-        xdg_surface_add_listener(xs, &XSURF_LISTENER, NULL);
-        g_toplevel = xdg_surface_get_toplevel(xs);
-        xdg_toplevel_add_listener(g_toplevel, &XTOP_LISTENER, NULL);
-        xdg_toplevel_set_title(g_toplevel, "mirage (scene setup)");
-        xdg_toplevel_set_app_id(g_toplevel, "mirage");
-        /* Ask the compositor for true fullscreen on the glasses output up front.
-         * This is the deterministic path to the opaque-fullscreen surface direct
-         * scanout needs - far more reliable than a `fullscreen` windowrule or a
-         * post-launch `hyprctl dispatch`, which race the window's first map and
-         * (when they flip windowed->fullscreen mid-flight) can drop scanout into
-         * an unpresented surface that free-runs at hundreds of fps. NULL output =
-         * let the compositor choose (no glasses found). */
-        if (opt_fullscreen)
-            xdg_toplevel_set_fullscreen(g_toplevel, M.glasses_out);
-        wl_surface_commit(M.surface);
-    } else {
-        /* layer-shell fullscreen overlay on the glasses */
-        M.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-            M.layer_shell, M.surface, M.glasses_out,
-            ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "mirage");
-        zwlr_layer_surface_v1_add_listener(M.layer_surface, &LS_LISTENER, NULL);
-        zwlr_layer_surface_v1_set_anchor(M.layer_surface,
-            ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-            ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-        zwlr_layer_surface_v1_set_exclusive_zone(M.layer_surface, -1);
-        zwlr_layer_surface_v1_set_keyboard_interactivity(M.layer_surface, 0);
-        zwlr_layer_surface_v1_set_size(M.layer_surface, 0, 0);
-        wl_surface_commit(M.surface);
-    }
+    struct xdg_surface *xs = xdg_wm_base_get_xdg_surface(g_wm_base, M.surface);
+    xdg_surface_add_listener(xs, &XSURF_LISTENER, NULL);
+    g_toplevel = xdg_surface_get_toplevel(xs);
+    xdg_toplevel_add_listener(g_toplevel, &XTOP_LISTENER, NULL);
+    xdg_toplevel_set_title(g_toplevel, "mirage");
+    xdg_toplevel_set_app_id(g_toplevel, "mirage");
+    xdg_toplevel_set_fullscreen(g_toplevel, M.glasses_out);
+    wl_surface_commit(M.surface);
 
     while (!M.configured && wl_display_dispatch(M.display) >= 0) { /* wait config */ }
-    if (opt_windowed && g_win_cfg_w > 0) { M.glasses_w = g_win_cfg_w; M.glasses_h = g_win_cfg_h; }
+    if (g_win_cfg_w > 0) { M.glasses_w = g_win_cfg_w; M.glasses_h = g_win_cfg_h; }
     if (M.glasses_w <= 0 || M.glasses_h <= 0) {
         fprintf(stderr, "mirage: bad glasses size %dx%d\n", M.glasses_w, M.glasses_h);
         return 1;
     }
-    }   /* end !M.lease (Wayland-surface setup) */
 
     if (!render_init(&M))  { fprintf(stderr, "mirage: render_init failed\n");  return 1; }
     if (!capture_init(&M)) { fprintf(stderr, "mirage: capture_init failed\n"); return 1; }
     if (M.seat) M.pointer = wl_seat_get_pointer(M.seat);
     grab_init(&M);
 
-    /* optional laptop preview: a normal toplevel window mirroring the flat view,
-     * so the virtual screens stay visible/usable without the glasses. Separate
-     * surface, drawn each frame from the same captured textures. */
-    /* Allowed in --windowed/scanout mode too: the preview is a SEPARATE laptop
-     * toplevel, so it mirrors the screens onto eDP-1 without ever touching the
-     * glasses output - DP-1 stays direct-scanned-out at full rate. */
-    if (opt_preview && g_wm_base) {
-        M.pv_surface = wl_compositor_create_surface(M.compositor);
-        M.pv_xsurf = xdg_wm_base_get_xdg_surface(g_wm_base, M.pv_surface);
-        xdg_surface_add_listener(M.pv_xsurf, &PV_XSURF_LISTENER, NULL);
-        M.pv_xtop = xdg_surface_get_toplevel(M.pv_xsurf);
-        xdg_toplevel_add_listener(M.pv_xtop, &PV_XTOP_LISTENER, NULL);
-        xdg_toplevel_set_title(M.pv_xtop, "mirage preview");
-        xdg_toplevel_set_app_id(M.pv_xtop, "mirage-preview");
-        wl_surface_commit(M.pv_surface);
-        while (!g_pv_configured && wl_display_dispatch(M.display) >= 0) { /* wait */ }
-        M.pv_w = M.pv_cfg_w > 0 ? M.pv_cfg_w : opt_pv_w;
-        M.pv_h = M.pv_cfg_h > 0 ? M.pv_cfg_h : opt_pv_h;
-        if (render_preview_init(&M)) M.pv_enabled = true;
-    }
+    /* Head pose over OpenTrack UDP (the RayNeo bridge streams to 127.0.0.1:4242). */
+    pose_config pc = { .backend = POSE_OPENTRACK_UDP, .udp_port = M.cfg.pose_port,
+                       .smoothing = M.cfg.pose_smoothing,
+                       .use_oneeuro = M.cfg.pose_oneeuro,
+                       .oe_mincutoff = M.cfg.pose_mincutoff,
+                       .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
+                       .sign_yaw = 1.0f, .sign_pitch = 1.0f, .sign_roll = 1.0f };
+    if (pose_start(&pc) != 0)
+        fprintf(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
 
-    /* head-tracking is disabled for now (capture-only flat view).
-     * pass --3d to bring back pose input + the 3D arc. */
-    if (opt_3d) {
-        pose_config pc = { .backend = POSE_OPENTRACK_UDP, .udp_port = M.cfg.pose_port,
-                           .smoothing = M.cfg.pose_smoothing,
-                           .use_oneeuro = M.cfg.pose_oneeuro,
-                           .oe_mincutoff = M.cfg.pose_mincutoff,
-                           .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
-                           .sign_yaw = opt_sign_yaw, .sign_pitch = opt_sign_pitch,
-                           .sign_roll = opt_sign_roll };
-        if (pose_start(&pc) != 0)
-            fprintf(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
-    }
-
-    fprintf(stderr, "mirage: running (%s mode). Ctrl-C to quit.\n",
-            opt_3d ? "3D head-tracked" : "flat capture-only");
+    fprintf(stderr, "mirage: running. Ctrl-C to quit.\n");
     M.running = true;
     struct timespec fps_t0; clock_gettime(CLOCK_MONOTONIC, &fps_t0);
     struct timespec frame_prev = fps_t0;   /* for per-frame interval timing */
@@ -469,16 +261,15 @@ int main(int argc, char **argv) {
     /* Capture content at 60Hz to match the scanout, so the desktop + cursor track
      * smoothly (30Hz felt laggy). ext-image-copy-capture only re-copies DAMAGED
      * regions, so a mostly-static desktop is cheap even at 60 - the old full-output
-     * wlr-screencopy blit that forced 30Hz is gone. Override with MIRAGE_CAP_HZ. */
-    double cap_hz = getenv("MIRAGE_CAP_HZ") ? atof(getenv("MIRAGE_CAP_HZ")) : 60.0;
-    const double CAP_PERIOD = cap_hz > 0 ? 1.0 / cap_hz : 1.0 / 60.0;
+     * wlr-screencopy blit that forced 30Hz is gone. */
+    const double CAP_PERIOD = 1.0 / 60.0;
     while (M.running && !g_stop) {
         /* drain pending events first (xdg ping/pong, resizes) so the
          * compositor never flags us as unresponsive */
         wl_display_dispatch_pending(M.display);
 
-        /* windowed mode: follow compositor-driven resizes */
-        if (opt_windowed && g_win_cfg_w > 0 &&
+        /* follow compositor-driven resizes (e.g. the fullscreen configure) */
+        if (g_win_cfg_w > 0 &&
             (g_win_cfg_w != M.glasses_w || g_win_cfg_h != M.glasses_h)) {
             M.glasses_w = g_win_cfg_w; M.glasses_h = g_win_cfg_h;
             wl_egl_window_resize(M.egl_window, M.glasses_w, M.glasses_h, 0, 0);
@@ -517,7 +308,6 @@ int main(int argc, char **argv) {
             break;
         }
 
-        /* grab is always-on (activated in grab_init); no Super+G toggle */
         if (g_smooth_toggle) {
             bool on = pose_toggle_smoothing(); g_smooth_toggle = 0;
             fprintf(stderr, "mirage: pose smoothing %s\n",
@@ -525,25 +315,20 @@ int main(int argc, char **argv) {
         }
         grab_pump(&M);   /* drain trackpad motion/buttons while captured */
 
-        if (opt_3d) {
-            /* first time we get tracking, treat the current look direction as
-             * "straight ahead" so the centre screen lands in front of you. */
-            static bool centered = false;
-            if (!centered && pose_has_signal()) { pose_recenter(); centered = true; }
-            if (g_recenter) { pose_recenter(); g_recenter = 0;
-                              fprintf(stderr, "mirage: recentered\n"); }
-            quat head = pose_has_signal() ? pose_latest() : q_identity();
-            render_frame(&M, head);
-        } else {
-            render_frame_flat(&M);   /* capture-only, no pose */
-        }
-        if (M.pv_enabled) render_preview(&M);   /* laptop mirror window */
+        /* first time we get tracking, treat the current look direction as
+         * "straight ahead" so the centre screen lands in front of you. */
+        static bool centered = false;
+        if (!centered && pose_has_signal()) { pose_recenter(); centered = true; }
+        if (g_recenter) { pose_recenter(); g_recenter = 0;
+                          fprintf(stderr, "mirage: recentered\n"); }
+        quat head = pose_has_signal() ? pose_latest() : q_identity();
+        render_frame(&M, head);
         wl_display_flush(M.display);
 
         /* once-a-second perf readout. fps = throughput (gated by capture +
          * glasses vsync); 'worst' is the slowest single frame in the window —
-         * an average of 120 can still hide a recurring 16 ms hitch. In 3D we
-         * also print head-pose freshness: 'pose Hz' is the inbound sample rate
+         * an average of 120 can still hide a recurring 16 ms hitch. We also
+         * print head-pose freshness: 'pose Hz' is the inbound sample rate
          * (if the source is 60 Hz you render 120 fps but only half carry a new
          * head reading), 'age' is staleness of the newest sample, and the
          * SMOOTHING flag shows whether the filter (a latency source) is on. */
@@ -558,21 +343,12 @@ int main(int argc, char **argv) {
             double dt = (now.tv_sec - fps_t0.tv_sec) + (now.tv_nsec - fps_t0.tv_nsec) * 1e-9;
             if (dt >= 1.0) {
                 M.fps = (float)(fps_frames / dt);   /* publish for the in-scene HUD */
-                if (opt_3d) {
-                    double phz = pose_take_sample_count() / dt;
-                    uint32_t age = pose_age_ms();
-                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | hitches %ld | pose %.0f Hz, "
-                            "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, hitch_count, phz,
-                            age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
-                    hitch_count = 0; hitch_ms_sum = 0; (void)hitch_ms_sum;
-                    if (M.profile)
-                        fprintf(stderr, "  prof: gpu %.1f ms (draw+sampling) | "
-                                "swap %.1f ms (present)\n",
-                                M.prof_gpu_ms, M.prof_swap_ms);
-                } else {
-                    fprintf(stderr, "mirage: %.1f fps | worst %.1f ms\n",
-                            fps_frames / dt, worst_ms * 1000.0);
-                }
+                double phz = pose_take_sample_count() / dt;
+                uint32_t age = pose_age_ms();
+                fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | hitches %ld | pose %.0f Hz, "
+                        "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, hitch_count, phz,
+                        age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
+                hitch_count = 0; hitch_ms_sum = 0; (void)hitch_ms_sum;
                 fps_t0 = now; fps_frames = 0; worst_ms = 0.0;
             }
         }
@@ -583,7 +359,6 @@ int main(int argc, char **argv) {
     capture_finish(&M);
     grab_destroy(&M);
     render_finish(&M);
-    if (M.lease) lease_out_finish(&M);   /* release DP-1 + tear down GBM/KMS */
     wl_display_disconnect(M.display);
     return 0;
 }

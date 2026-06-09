@@ -15,18 +15,14 @@ SYS_PROTO := /usr/share/wayland-protocols
 PROTO_NAMES := \
 	xdg-shell \
 	linux-dmabuf-unstable-v1 \
-	wlr-layer-shell-unstable-v1 \
-	wlr-screencopy-unstable-v1 \
 	wlr-virtual-pointer-unstable-v1 \
 	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \
-	drm-lease-v1 \
 	ext-foreign-toplevel-list-v1 \
 	ext-image-capture-source-v1 \
-	ext-image-copy-capture-v1 \
-	hyprland-global-shortcuts-v1
+	ext-image-copy-capture-v1
 
-vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/drm-lease:$(SYS_PROTO)/staging/ext-foreign-toplevel-list:$(SYS_PROTO)/staging/ext-image-capture-source:$(SYS_PROTO)/staging/ext-image-copy-capture
+vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/ext-foreign-toplevel-list:$(SYS_PROTO)/staging/ext-image-capture-source:$(SYS_PROTO)/staging/ext-image-copy-capture
 
 PROTO_HDR := $(PROTO_NAMES:%=build/proto/%-client-protocol.h)
 PROTO_SRC := $(PROTO_NAMES:%=build/proto/%-protocol.c)
@@ -40,14 +36,11 @@ LDLIBS  := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
 
 # ---- core mirage objects (wayland + GL) ----
 MIRAGE_SRC := src/main.c src/pose.c src/capture.c src/render.c \
-              src/layout.c src/grab.c src/config.c src/lease_out.c
+              src/layout.c src/grab.c src/config.c
 MIRAGE_OBJ := $(MIRAGE_SRC:src/%.c=build/obj/%.o) $(PROTO_OBJ)
 
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o
-
-# RayNeo driver bridge (links the external driver library)
-RAYNEO_DIR ?= ../rayneo-air-pro-4
 
 .PHONY: all posedump protocols bridge clean
 all: mirage mirage-posedump
@@ -55,9 +48,9 @@ posedump: mirage-posedump
 bridge: rayneo-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
 
-rayneo-bridge: src/rayneo_bridge.c $(RAYNEO_DIR)/rayneo.c $(RAYNEO_DIR)/magcal.c
-	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -I$(RAYNEO_DIR) \
-	    -o $@ src/rayneo_bridge.c $(RAYNEO_DIR)/rayneo.c $(RAYNEO_DIR)/magcal.c -lm
+rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
+	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
+	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
 
 mirage: $(MIRAGE_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

@@ -6,29 +6,21 @@
 # interfere with the real desktop or steal the cursor; mirage captures them by
 # name regardless of where they sit in the Hyprland layout.
 #
-# The displays are laid out in the SAME grid mirage draws them in - VCOLS wide,
-# filling left->right then bottom->top (VIRT1..VCOLS on the bottom row). So
-# Hyprland's spatial model matches the arc you see: dragging a window to the
-# neighbour on your right/above lands where you'd expect. (VCOLS must match
-# mirage's --screens column count, default 3.)
-#
-# Env overrides:
-#   VW=5120 VH=1440 VR=60 VSCALE=1   resolution / refresh / scale (32:9 ultrawide)
-#   VCOUNT=1                         how many virtual displays
-#   VCOLS=1                          columns in the grid (match mirage screen_cols)
-#   VORIGIN=8000                     x of the leftmost virtual display
-#   VGAP=200                         gap between adjacent virtual displays
+# The display is laid out in the SAME grid mirage draws it in - VCOLS wide,
+# filling left->right then bottom->top. So Hyprland's spatial model matches the
+# arc you see: dragging a window to the neighbour on your right/above lands
+# where you'd expect. (VCOLS matches mirage's screen_cols.)
 set -euo pipefail
 
-# screenshare variant: ONE 32:9 ultrawide wall, locked at 60Hz (vsync).
-VW=${VW:-5120}; VH=${VH:-1440}; VR=${VR:-60}; VSCALE=${VSCALE:-1}
-# VGAP=0 by default: the virtual displays must ABUT in the compositor's
-# coordinate space. Any gap is dead no-man's-land between outputs, and the
-# cursor can only leap a dead gap with momentum - a slow drag parks at the
-# screen edge and never crosses. Abutting them makes the wall one continuous
-# surface so the cursor flows screen-to-screen at any speed. (Visual spacing in
-# the glasses is mirage's arc rendering, unrelated to this layout gap.)
-VCOUNT=${VCOUNT:-1}; VCOLS=${VCOLS:-1}; VORIGIN=${VORIGIN:-8000}; VGAP=${VGAP:-0}
+# ONE 32:9 ultrawide wall (VIRT1) at 5120x1440@60, scale 1.
+VW=5120; VH=1440; VR=60; VSCALE=1
+# VGAP=0: the virtual displays must ABUT in the compositor's coordinate space.
+# Any gap is dead no-man's-land between outputs, and the cursor can only leap a
+# dead gap with momentum - a slow drag parks at the screen edge and never
+# crosses. Abutting them makes the wall one continuous surface so the cursor
+# flows screen-to-screen at any speed. (Visual spacing in the glasses is mirage's
+# arc rendering, unrelated to this layout gap.)
+VCOUNT=1; VCOLS=1; VORIGIN=8000; VGAP=0
 
 command -v hyprctl >/dev/null || { echo "hyprctl not found (need Hyprland)"; exit 1; }
 
@@ -56,9 +48,12 @@ for i in $(seq 1 "$VCOUNT"); do
     crow=$(( nrows - 1 - vrow ))             # compositor row: 0 = top (smaller y)
     x=$(( VORIGIN + col * (VW + VGAP) ))
     y=$(( crow * (VH + VGAP) ))
-    spec="$name,${VW}x${VH}@${VR},${x}x${y},${VSCALE}"
-    echo "configuring monitor $spec"
-    hyprctl keyword monitor "$spec" >/dev/null
+    echo "configuring monitor $name ${VW}x${VH}@${VR} at ${x},${y} scale ${VSCALE}"
+    # Hyprland 0.55 uses the Lua (non-legacy) config parser, where `hyprctl keyword
+    # monitor` is rejected ("keyword can't work with non-legacy parsers"). Set the
+    # monitor through the Lua API via eval instead, or VIRT1 silently keeps its
+    # 1920x1080 headless default and the wall renders 16:9 instead of 32:9.
+    hyprctl eval "hl.monitor({ output='$name', mode='${VW}x${VH}@${VR}', position='${x}x${y}', scale=${VSCALE} })" >/dev/null
 done
 
 echo

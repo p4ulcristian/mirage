@@ -10,12 +10,7 @@ void mirage_config_defaults(mirage_config *c) {
     c->screen_arc_deg    = 70.0f;  /* the single wall spans 70 deg of arc (glance to edges, no neck-pan) */
     c->screen_cols       = 1;      /* one column: the wall is centred dead-ahead */
     c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
-    c->floor_on          = false;  /* flat grass floor (replaced by terrain)       */
-    c->floor_height_m    = 1.8f;   /* floor sits 1.8 m below eye (standing height) */
-    c->shadows_on        = false;  /* slab drop-shadows (parked for now)           */
-    c->sky_on            = false;  /* OFF by default: cloud-dome fbm is per-frame GPU we don't need (--sky to enable) */
-    c->terrain_on        = false;  /* OFF by default: 219k-vert noise heightfield was the top frame cost (--terrain) */
-    c->gaze_cursor       = true;   /* Cmd-held: cursor follows head gaze (--no-gaze-cursor off) */
+    c->gaze_cursor       = true;   /* Cmd-held: cursor follows head gaze */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
     c->pose_port         = 4242;
     c->pose_smoothing    = 0.08f;  /* legacy fixed nlerp @500Hz (only if --smooth) */
@@ -29,9 +24,6 @@ void mirage_config_defaults(mirage_config *c) {
     c->read_deadband_deg = 0.5f;   /* freeze <0.5deg tremor so held text stays still */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
-    c->lens_max          = 1.8f;   /* Alt-held loupe peak magnification (1.0..2.5) */
-    c->lens_rin          = 0.45f;  /* magnified rect half-height (frac of half-ht) */
-    c->lens_rout         = 0.72f;  /* outer edge of the soft border; eased to 1x   */
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
 }

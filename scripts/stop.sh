@@ -6,17 +6,19 @@
 #   stop.sh --all     quit, CLOSE the demo terminals, remove virtual displays
 #
 # Cleanup is idempotent and serialised with a lock, so it's safe to call from
-# both the Super+Shift+Q keybind AND run.sh's supervisor trap - whichever runs
-# first does the work, the other is a no-op. That's what makes teardown reliable
-# no matter how mirage exits (clean quit, crash, killactive, reload).
+# both the Super+Shift+Q/X keybinds and glasses.sh's restore trap - whichever
+# runs first does the work, the other is a no-op. That's what makes teardown
+# reliable no matter how mirage exits (clean quit, crash, killactive, reload).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIDFILE=/tmp/mirage.pid
 LOCK=/tmp/mirage-cleanup.lock
-RESTORE_MON="${RESTORE_MON:-}"   # target monitor; auto-detected if empty
 
 stop_mirage() {  # harmless if mirage already exited
     local pid=""
     [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE" 2>/dev/null)"
+    # Release input grab first so the cursor is free before the process exits
+    pkill -USR2 -x mirage 2>/dev/null || true
+    sleep 0.05
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill -INT "$pid" 2>/dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -37,20 +39,19 @@ restore_windows() {
     # Preferred: per-window restore from the sweep snapshot (records the current
     # arc layout for next launch, then puts each window back on its original
     # workspace). Falls back to the workspace-level sweep when there's no snapshot.
-    if [ -f "${MIRAGE_SWEEP_STATE:-/tmp/mirage-sweep.json}" ]; then
+    if [ -f /tmp/mirage-sweep.json ]; then
         bash "$HERE/scripts/sweep.sh" restore || true
         return
     fi
 
-    local target="$RESTORE_MON"
-    if [ -z "$target" ]; then
-        target="$(hyprctl monitors -j | python3 -c '
+    # target monitor to move stranded windows back onto: auto-detect (prefer eDP).
+    local target
+    target="$(hyprctl monitors -j | python3 -c '
 import json,sys
 mons=[m["name"] for m in json.load(sys.stdin)]
 real=[n for n in mons if not n.startswith("VIRT")]
 edp=[n for n in real if n.startswith("eDP")]
 print((edp or real or [""])[0])')"
-    fi
     [ -z "$target" ] && { echo "restore: no real monitor found"; return; }
 
     local wss
@@ -69,7 +70,6 @@ for w in json.load(sys.stdin):
 # don't interleave. Every step is independently idempotent, so even if it does
 # run twice the second pass is a harmless no-op.
 cleanup() {  # $1 = restore mode: "restore" | "all" | ""
-    bash "$HERE/scripts/mirror-laptop.sh" off 2>&1 | sed 's/^/  [mirror] /' || true
     case "${1:-}" in
         restore)
             restore_windows
