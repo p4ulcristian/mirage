@@ -1,95 +1,158 @@
-# mirage — head-tracked virtual displays for Hyprland + AR glasses
+# mirage
 
-Turns a headless virtual output into one 32:9 ultrawide screen, curved into a 3D
-wall floating in front of you, captured live and rendered onto your AR glasses
-with the camera driven by your head pose. Built for Hyprland on Wayland; verified
-on RayNeo glasses (DP-1) with an Apple M2 GPU (Asahi).
+**A head-tracked ultrawide monitor for your AR glasses.**
 
-It runs as an ordinary Wayland app: a fullscreen, opaque window on the glasses
-output that Hyprland page-flips straight to the panel (direct scanout) at the
-panel's native 120 Hz — no compositor, lease, or kernel changes.
+mirage takes a headless 32:9 virtual display, curves it into a wall floating two
+metres in front of you, and renders it onto AR glasses with the camera locked to
+your head pose — so the wall stays nailed in space like a real monitor while you
+look around it. Your existing windows are swept onto it automatically, the
+trackpad drives a cursor across it, and a 3-finger swipe flips between workspaces.
 
-There are no command-line flags or environment knobs. The one configuration lives
-in `src/config.c` (curved wall, 1:1 world-fixed tracking, sharpening);
-edit it and rebuild to change the scene.
+Built for **Hyprland** on Wayland; developed on **RayNeo Air** glasses driven by an
+**Apple M2 GPU (Asahi)**.
 
-## Status
+```
+            ┌───────────────────────────────────────────────┐
+            │   your terminals · browser · editor, on a      │   ← 5120×1440 curved wall,
+            │   curved 32:9 wall that holds still in space    │     world-fixed, 120 Hz
+            └───────────────────────────────────────────────┘
+                         ▲ head pose (RayNeo IMU)
+```
 
-| Piece | State |
-|-------|-------|
-| 32:9 virtual display (Hyprland headless) | ✅ working |
-| Live capture → GL textures (zero-copy dmabuf, ext-image-copy-capture) | ✅ working |
-| Curved wall + perspective on the glasses, direct scanout @120 Hz | ✅ working |
-| Head-pose camera (RayNeo IMU → OpenTrack UDP) | ✅ working |
-| Trackpad cursor confined to the wall + Cmd-scroll zoom | ✅ working |
-| Quit / recenter hotkeys | ✅ working |
+It runs as an ordinary Wayland client: one fullscreen, opaque window on the glasses
+output, which Hyprland page-flips straight to the panel (**direct scanout**) at the
+native **120 Hz** — no compositor fork, no DRM leasing, no kernel patches.
+
+---
+
+## Highlights
+
+- **World-fixed ultrawide** — one 5120×1440 curved wall, 1:1 head tracking, so it
+  behaves like a physical monitor hung in the air.
+- **Zero-copy capture** — `ext-image-copy-capture` + dmabuf/EGLImage straight into
+  GLES2 textures; idle windows cost ~nothing (damage-driven).
+- **Smooth & readable** — 120 Hz direct scanout, One-Euro pose filter, a reading
+  deadband that freezes sub-degree tremor, and contrast-adaptive text sharpening.
+- **Real input on the wall** — the trackpad becomes a cursor confined to the wall,
+  with telephoto zoom and a gaze-follow mode.
+- **Workspaces** — your windows sweep onto the wall on launch; a 3-finger swipe
+  switches/creates workspaces, mirrored straight from how you'd do it on the desktop.
+- **One config, no knobs** — no flags, no env vars. Everything lives in
+  `src/config.c`; edit and rebuild.
 
 ## Quick start
 
 ```bash
-make && make bridge            # build mirage, the pose tool, and the RayNeo bridge
-bash scripts/start-mirage.sh   # register hotkeys, then run on the glasses (blocks until quit)
+make && make bridge            # build mirage, mirage-posedump, and the RayNeo bridge
+bash scripts/start-mirage.sh   # run on the glasses (blocks until you quit)
 ```
 
-`start-mirage.sh` is the launcher (also safe from a `.desktop` entry). It registers
-the Hyprland keybinds and hands off to `scripts/glasses.sh`, which enables direct
-scanout, brings up the virtual display + RayNeo bridge + window sweep, runs mirage
-fullscreen, and restores the desktop when you quit.
+`start-mirage.sh` is the launcher (also safe to wire to a `.desktop` entry). It
+registers the keybinds and hands off to `scripts/glasses.sh`, which:
+
+1. enables direct scanout and pins an opaque/fullscreen rule for mirage,
+2. brings up the `VIRT1` virtual display and the RayNeo head-tracking bridge,
+3. sweeps your open windows onto the wall,
+4. runs mirage fullscreen on the glasses, then restores the desktop on quit.
 
 The glasses must be present as the extended `DP-1` SmartGlasses output (not mirrored).
+
+## Controls
+
+**Hotkeys** (Hyprland binds — they fire even while mirage covers the glasses):
+
+| Key | Action |
+|-----|--------|
+| `Super+Shift+Q` | quit mirage, restore windows, remove the virtual display |
+| `Alt+C` | recenter head pose — look straight ahead, then press |
+
+**Trackpad** (capture is on from the first frame):
+
+| Gesture | Action |
+|---------|--------|
+| move / click / two-finger scroll | cursor / click / scroll the focused window |
+| **Cmd + scroll** | telephoto zoom (narrows the field of view) |
+| **double-tap Alt** | toggle the gaze-follow cursor |
+| **3-finger swipe** | switch workspaces on the wall (new one past the end) |
+
+The 3-finger swipe is handled by mirage itself: its exclusive trackpad grab hides
+the gesture from Hyprland, so mirage reads the libinput swipe and dispatches the
+workspace change (monitor-relative, so it never escapes to the real desktop).
+
+> **Note on `keyd`:** if you remap Cmd→Ctrl for app shortcuts (mac-style), Cmd+C
+> never reaches Hyprland — that's why recenter is **Alt+C**. mirage auto-detects the
+> trackpad and *every* Meta-capable keyboard by evdev capability, so it works whether
+> keyd is grabbing the raw keyboard or passing it through.
+
+## How it works
+
+```
+RayNeo IMU ──(rayneo-bridge: Madgwick AHRS)──▶ OpenTrack UDP :4242 ──▶ pose.c ──┐
+                                                                               ▼ head quaternion
+Hyprland VIRT1 ──(ext-image-copy-capture + dmabuf)──▶ capture.c ──▶ GL textures │
+                                                            │                  │
+       layout.c (wall placement) ───────────┐              ▼                  ▼
+                                             └──────▶ render.c ──▶ fullscreen window on the glasses
+                                                            ▲
+       grab.c (trackpad → cursor/zoom/swipe) ───────────────┘
+```
+
+mirage captures the `VIRT1` headless output zero-copy, lays it out as a curved
+equidistant wall, and draws it through a perspective camera rotated by the live
+head pose. The trackpad is grabbed at the evdev level and re-injected as a virtual
+pointer onto the wall.
 
 ## Head pose
 
 The **RayNeo bridge** (`scripts/bridge.sh` → `rayneo-bridge`) reads the glasses' IMU
-over hidraw, runs a Madgwick AHRS, and streams head orientation to mirage as
-OpenTrack UDP on `127.0.0.1:4242` (6 little-endian doubles `{x, y, z, yaw, pitch,
-roll}`, angles in degrees). mirage auto-recenters on the first sample, so "straight
-ahead" = wherever you're looking at launch (or press Alt+C any time).
+over hidraw, runs a Madgwick AHRS, and streams orientation as OpenTrack UDP on
+`127.0.0.1:4242` (6 little-endian doubles `{x, y, z, yaw, pitch, roll}`, degrees) —
+exactly what `pose.c` consumes. mirage auto-recenters on the first sample, so
+"straight ahead" is wherever you're looking at launch (or hit `Alt+C` any time).
 
-It runs **6-axis** (gyro + accel): the bridge's gyro-bias auto-zero makes it
-essentially drift-free at a desk, where the magnetometer's heading is distorted by
-the laptop's local field. hidraw is root-only until a udev rule applies on a glasses
-replug, so the bridge uses `sudo` until then.
+- **6-axis** (gyro + accel) by default: the bridge's gyro-bias auto-zero makes it
+  essentially drift-free at a desk, where the magnetometer's heading is corrupted by
+  the laptop's field. 9-axis is available with a clean-environment mag calibration.
+- **Axis frame:** the RayNeo IMU sits with `Y=up, X=left/right, Z=forward`, but the
+  AHRS/euler convention expects `Z=up`. `rayneo.c` remaps every sensor by the proper
+  rotation `(x,y,z) ← (z,x,y)` so head pitch lands on pitch (not roll).
+- hidraw is root-only until a udev rule applies on a glasses replug, so the bridge
+  uses `sudo` until then.
 
-Verify the pose stream without the renderer:
+Check the stream without the renderer:
 
 ```bash
 ./mirage-posedump              # prints live quat + yaw/pitch/roll
 ```
 
-## Controls (Hyprland keybinds)
+## Configuration
 
-| Key | Action |
-|-----|--------|
-| `SUPER+SHIFT+Q` | quit mirage, restore windows, remove the virtual display |
-| `ALT+C` | recenter head pose (look straight ahead, then press) |
+There are no flags or environment variables — the single blessed configuration is in
+[`src/config.c`](src/config.c): wall size & distance, curvature, FOV, the One-Euro
+filter, reading deadband, sharpening, and the head-tracking gains. Edit and rebuild.
 
-These are compositor-level binds, so they fire even while mirage covers the glasses.
-Re-run `scripts/keybinds.sh` after a Hyprland reload. Trackpad capture is on from the
-first frame; while captured, the trackpad drives a cursor across the wall and Cmd+scroll
-zooms (telephoto). Double-tap Alt toggles the gaze-follow cursor, and a **3-finger swipe**
-switches workspaces on the wall (creating a new one past the end) — mirage detects the
-gesture itself, since its trackpad grab hides it from Hyprland.
+## Repository layout
 
-## Architecture
+| Path | What |
+|------|------|
+| `src/main.c` | Wayland setup, the frame loop, the fullscreen glasses window |
+| `src/pose.c` | head-pose input (OpenTrack UDP), One-Euro smoothing, recenter |
+| `src/capture.c` | `ext-image-copy-capture` → gbm/dmabuf → EGLImage → GLES2 texture |
+| `src/render.c` | EGL/GLES2: curved textured wall, perspective camera, sharpen |
+| `src/layout.c` | where the wall sits on the arc |
+| `src/grab.c` | trackpad capture, arc cursor, zoom, gaze cursor, 3-finger swipe |
+| `src/config.c` | the one hardcoded scene/tracking configuration |
+| `src/math3d.h` | vec / quat / mat4 (no glm dependency) |
+| `src/rayneo*.c`, `src/magcal.c` | the RayNeo IMU bridge (Madgwick AHRS, mag calibration) |
+| `scripts/` | start-mirage, glasses, bridge, setup/teardown-displays, sweep, keybinds, stop |
+| `protocol/` | vendored wlroots/Hyprland protocol XML |
 
-```
-RayNeo IMU ──(rayneo-bridge: AHRS)──▶ OpenTrack UDP :4242 ──▶ pose.c ──▶ head quaternion
-Hyprland VIRT1 ──(ext-image-copy-capture + dmabuf)──▶ capture.c ──▶ GL textures
-                                                            │
-   layout.c (wall placement) ─┐                             ▼
-   pose (camera) ─────────────┴──▶ render.c ──▶ fullscreen window on the glasses
-```
+## Notes
 
-- `src/main.c`     Wayland setup, the frame loop, fullscreen window on the glasses
-- `src/pose.c`     head-pose input (OpenTrack UDP), One-Euro smoothing, recenter
-- `src/capture.c`  ext-image-copy-capture → gbm/dmabuf → EGLImage → GLES2 texture
-- `src/render.c`   EGL/GLES2: curved textured wall, perspective camera, sharpen
-- `src/layout.c`   where the screen sits on the arc
-- `src/grab.c`     trackpad capture, the arc cursor, gaze cursor, zoom
-- `src/config.c`   the one hardcoded scene/tracking configuration
-- `src/math3d.h`   vec/quat/mat4 (no glm dependency)
-- `src/rayneo*.c`, `src/magcal.c`  the RayNeo IMU bridge (Madgwick AHRS, mag calibration)
-- `protocol/`      vendored wlroots/hyprland protocol XML
-- `scripts/`       start-mirage, glasses, bridge, setup/teardown-displays, sweep, keybinds, stop
-```
+- **Hyprland 0.55+** uses the Lua config parser, so the scripts drive it via
+  `hyprctl eval` (`hl.monitor`, `hl.config`, `hl.dispatch`) rather than the legacy
+  `hyprctl keyword`.
+- **Asahi / Apple M2:** the glasses come up as a normal desktop output and are driven
+  by direct scanout — no leasing or per-session DCP reboot.
+- mirage holds an exclusive grab on the trackpad while running; quitting
+  (`Super+Shift+Q`) releases it and restores your windows.
