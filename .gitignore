@@ -11,3 +11,8 @@ rayneo-bridge
 *.tar.gz
 # unrelated tooling cache
 .sass-cache/
+
+# HDRI assets (large binaries; fetch + convert via hdri/exr2hdr.py)
+hdri/*.exr
+hdri/*.hdr
+hdri/*.jpg

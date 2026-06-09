@@ -93,6 +93,14 @@ typedef struct {
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
+    /* HDRI environment dome: an equirectangular image drawn as an infinite,
+     * world-fixed backdrop you look around. On the additive optics it only adds
+     * light (dark = transparent), so a dark/starry HDRI reads best. */
+    bool  hdri_on;              /* draw the environment dome                       */
+    char  hdri_path[256];       /* path to a flat Radiance .hdr (see hdri/exr2hdr.py) */
+    float hdri_exposure;        /* linear gain before tonemap (boosts faint stars) */
+    float hdri_intensity;       /* final additive strength; lower = more see-through */
+
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */
 

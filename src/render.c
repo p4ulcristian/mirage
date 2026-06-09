@@ -50,11 +50,43 @@ static const char *FRAG_SRC =
     "  gl_FragColor = vec4(e, 1.0);\n"
     "}\n";
 
+/* HDRI environment dome: a sphere of world directions around the eye. The vertex
+ * position doubles as the look direction; the fragment samples an equirectangular
+ * HDRI by that direction, applies exposure + an ACES-ish tonemap, and scales by an
+ * intensity. The texture is sqrt-encoded (see load_hdri_rgb8) so it's squared back
+ * to linear here. Drawn additively, so dark sky adds nothing on the see-through
+ * optics and only the stars glow. */
+static const char *DOME_VERT =
+    "attribute vec3 aPos;\n"
+    "uniform mat4 uMVP;\n"
+    "varying highp vec3 vDir;\n"
+    "void main() { gl_Position = uMVP * vec4(aPos, 1.0); vDir = aPos; }\n";
+static const char *DOME_FRAG =
+    "precision highp float;\n"
+    "varying highp vec3 vDir;\n"
+    "uniform sampler2D uTex;\n"
+    "uniform float uExposure;\n"
+    "uniform float uIntensity;\n"
+    "void main() {\n"
+    "  vec3 d = normalize(vDir);\n"
+    "  float u = atan(d.x, -d.z) * 0.159154943 + 0.5;\n"   /* 1/(2pi) */
+    "  float v = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.318309886;\n"  /* 1/pi */
+    "  vec3 c = texture2D(uTex, vec2(u, v)).rgb;\n"
+    "  c = c * c * uExposure;\n"                           /* decode sqrt, then expose */
+    "  c = (c * (2.51*c + 0.03)) / (c * (2.43*c + 0.59) + 0.14);\n"  /* ACES tonemap */
+    "  gl_FragColor = vec4(c * uIntensity, 1.0);\n"
+    "}\n";
+
 static struct {
     GLuint prog;
     GLint  aPos, aUV;
     GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
     GLuint vbo;
+
+    /* HDRI environment dome */
+    GLuint dome_prog, dome_vbo, hdri_tex;
+    int    dome_verts;
+    GLint  dMVP, dExposure, dIntensity;
 
     /* "GAZE: ON/OFF" status plaque below the centre screen (baked text textures,
      * drawn on the unit QUAD via R.prog). */
@@ -321,6 +353,107 @@ static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
     return tex;
 }
 
+/* ---- HDRI environment dome ---------------------------------------------------
+ * Load a FLAT (non-RLE) Radiance .hdr - the format hdri/exr2hdr.py writes - into an
+ * RGB8 buffer. Values are clamped to [0,1] and sqrt-encoded so the 8-bit texture
+ * keeps precision in the dark range (faint stars); the dome shader squares it back
+ * to linear. Returns a malloc'd w*h*3 buffer (caller frees) or NULL on failure. */
+static unsigned char *load_hdri_rgb8(const char *path, int *ow, int *oh) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "hdri: cannot open %s\n", path); return NULL; }
+    char line[256];
+    int w = 0, h = 0;
+    while (fgets(line, sizeof line, f))         /* skip header to the "-Y h +X w" line */
+        if (line[0] == '-' && (line[1] == 'Y' || line[1] == 'y')) {
+            sscanf(line, "-Y %d +X %d", &h, &w); break;
+        }
+    if (w <= 0 || h <= 0) { fprintf(stderr, "hdri: bad/RLE .hdr %s\n", path); fclose(f); return NULL; }
+    size_t n = (size_t)w * h;
+    unsigned char *rgbe = malloc(n * 4), *out = malloc(n * 3);
+    if (!rgbe || !out || fread(rgbe, 4, n, f) != n) {
+        fprintf(stderr, "hdri: short read %s\n", path);
+        free(rgbe); free(out); fclose(f); return NULL;
+    }
+    fclose(f);
+    for (size_t i = 0; i < n; i++) {
+        int e = rgbe[i*4 + 3];
+        float scale = e ? ldexpf(1.0f, e - 136) : 0.0f;   /* RGBE: 2^(e-128)/256 */
+        for (int c = 0; c < 3; c++) {
+            float v = (float)rgbe[i*4 + c] * scale;
+            v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            out[i*3 + c] = (unsigned char)(sqrtf(v) * 255.0f + 0.5f);
+        }
+    }
+    free(rgbe);
+    *ow = w; *oh = h;
+    return out;
+}
+
+/* A full UV sphere of unit directions (radius scaled large), centred on the eye.
+ * Position is reused as the look direction in DOME_FRAG. */
+static void build_dome(void) {
+    const int NLAT = 32, NLON = 64;
+    const float Rr = 50.0f;
+    int verts = NLAT * NLON * 6;
+    GLfloat *buf = malloc((size_t)verts * 3 * sizeof(GLfloat));
+    int k = 0;
+    for (int i = 0; i < NLAT; i++) {
+        float a0 = -(float)M_PI/2 + (float)M_PI * i     / NLAT;
+        float a1 = -(float)M_PI/2 + (float)M_PI * (i+1) / NLAT;
+        for (int j = 0; j < NLON; j++) {
+            float o0 = 2.0f*(float)M_PI * j     / NLON;
+            float o1 = 2.0f*(float)M_PI * (j+1) / NLON;
+            #define DV(LAT,LON) do { \
+                buf[k++] =  Rr*cosf(LAT)*sinf(LON); \
+                buf[k++] =  Rr*sinf(LAT); \
+                buf[k++] = -Rr*cosf(LAT)*cosf(LON); } while (0)
+            DV(a0,o0); DV(a1,o0); DV(a1,o1);
+            DV(a0,o0); DV(a1,o1); DV(a0,o1);
+            #undef DV
+        }
+    }
+    glGenBuffers(1, &R.dome_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, R.dome_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*3*sizeof(GLfloat)), buf, GL_STATIC_DRAW);
+    R.dome_verts = verts;
+    free(buf);
+}
+
+/* Build the dome program, load the HDRI into a texture, and build the sphere.
+ * Disables the dome (R.dome_prog stays 0) if anything fails, so render_frame skips it. */
+static void hdri_init(struct mirage *m) {
+    if (!m->cfg.hdri_on) return;
+    int w, h;
+    unsigned char *px = load_hdri_rgb8(m->cfg.hdri_path, &w, &h);
+    if (!px) { fprintf(stderr, "hdri: disabled (load failed)\n"); return; }
+
+    glGenTextures(1, &R.hdri_tex);
+    glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);          /* equirect wraps in u */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    free(px);
+
+    GLuint vs = compile(GL_VERTEX_SHADER, DOME_VERT);
+    GLuint fs = compile(GL_FRAGMENT_SHADER, DOME_FRAG);
+    if (!vs || !fs) return;
+    R.dome_prog = glCreateProgram();
+    glAttachShader(R.dome_prog, vs);
+    glAttachShader(R.dome_prog, fs);
+    glBindAttribLocation(R.dome_prog, 0, "aPos");
+    glLinkProgram(R.dome_prog);
+    GLint ok = 0; glGetProgramiv(R.dome_prog, GL_LINK_STATUS, &ok);
+    if (!ok) { fprintf(stderr, "hdri: dome link failed\n"); R.dome_prog = 0; return; }
+    glDeleteShader(vs); glDeleteShader(fs);
+    R.dMVP       = glGetUniformLocation(R.dome_prog, "uMVP");
+    R.dExposure  = glGetUniformLocation(R.dome_prog, "uExposure");
+    R.dIntensity = glGetUniformLocation(R.dome_prog, "uIntensity");
+    build_dome();
+    fprintf(stderr, "hdri: dome ready (%dx%d, %s)\n", w, h, m->cfg.hdri_path);
+}
+
 bool render_init(struct mirage *m) {
     EGLint major = 0, minor = 0;   /* EGL version, logged below */
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
@@ -400,6 +533,8 @@ bool render_init(struct mirage *m) {
       R.label_on  = bake_label("GAZE: ON ", on, &R.label_w, &R.label_h);   /* trailing space: same dims */
       R.label_off = bake_label("GAZE: OFF", off, &R.label_w, &R.label_h); }
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
+
+    hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
 
     fprintf(stderr, "render: EGL %d.%d, GL_RENDERER=%s\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
@@ -489,6 +624,33 @@ void render_frame(struct mirage *m, quat head) {
 
     mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
     mat4 vp   = m4_mul(proj, view);
+
+    /* HDRI environment dome: drawn first as an infinite, world-fixed backdrop.
+     * Additive (dark sky adds nothing on the optics), depth test + write off so the
+     * wall and slabs draw cleanly over it. The dome sphere is centred on the eye and
+     * the camera has no translation, so it sits at infinity and the stars stay put
+     * in world space as you look around. */
+    if (R.dome_prog && R.dome_vbo) {
+        glUseProgram(R.dome_prog);
+        glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
+        glUniform1f(R.dExposure,  m->cfg.hdri_exposure);
+        glUniform1f(R.dIntensity, m->cfg.hdri_intensity);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
+        glUniform1i(glGetUniformLocation(R.dome_prog, "uTex"), 0);
+        glBindBuffer(GL_ARRAY_BUFFER, R.dome_vbo);
+        glEnableVertexAttribArray(R.aPos);
+        glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 3*sizeof(GLfloat), (void*)0);
+        glDisableVertexAttribArray(R.aUV);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDrawArrays(GL_TRIANGLES, 0, R.dome_verts);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+    }
 
     int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
