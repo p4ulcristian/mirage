@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start-3d-workspaces.sh - one-shot launcher for the wofi/start-menu app entry.
+# start-mirage.sh - one-shot launcher for the wofi/start-menu app entry.
 # Registers the Hyprland keybinds, then starts mirage via glasses.sh - the
 # DIRECT-SCANOUT path (locked ~120Hz), not the slower layer-shell overlay.
 # glasses.sh is self-contained: it sets render:direct_scanout + fullscreen/opaque
@@ -13,7 +13,7 @@
 # unplugged) rather than dying silently.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG=/tmp/3d-workspaces-launch.log
+LOG=/tmp/mirage-launch.log
 exec >>"$LOG" 2>&1
 echo "=== launch $(cat /proc/uptime | cut -d' ' -f1)s uptime ==="
 
