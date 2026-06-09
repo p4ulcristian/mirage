@@ -22,12 +22,13 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
     c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
-    c->yaw_gain          = 2.5f;   /* amplify head yaw: reach side screens w/ ~16deg turn */
-    c->pitch_gain        = 3.0f;   /* amplify head pitch: reach the top row w/ ~7deg look-up */
-    c->roll_damp         = 0.25f;  /* keep 25% of head roll: mostly horizon-locked  */
+    c->yaw_gain          = 1.0f;   /* 1:1 world-fixed: the wall is nailed in space like a real monitor
+                                    * (2.5 was for the old 6-screen arc; too swimmy for one wall) */
+    c->pitch_gain        = 1.0f;   /* 1:1 world-fixed vertically too */
+    c->roll_damp         = 0.0f;   /* no tilt: fully horizon-locked (head roll ignored) */
     c->read_deadband_deg = 0.5f;   /* freeze <0.5deg tremor so held text stays still */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
-    c->geometry          = GEOM_FLAT;  /* flat panels in the curved arc's layout */
+    c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->lens_max          = 1.8f;   /* Alt-held loupe peak magnification (1.0..2.5) */
     c->lens_rin          = 0.45f;  /* magnified rect half-height (frac of half-ht) */
     c->lens_rout         = 0.72f;  /* outer edge of the soft border; eased to 1x   */

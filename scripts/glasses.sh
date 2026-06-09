@@ -64,12 +64,11 @@ sleep 1
 
 echo "[glasses] enabling direct scanout + fullscreen/opaque rule for mirage..."
 hyprctl keyword render:direct_scanout 1 >/dev/null
-# Lock the glasses to a STABLE 60Hz. The panel can do 120, but profiling showed the
-# loop free-running at ~90-120 with periodic present hitches (eglSwapInterval(2) is
-# NOT honored on Hyprland's direct-scanout path). GPU draw is <1ms, so the limiter
-# is purely present pacing - running the panel at 60 makes vsync HARDWARE-lock to a
-# rock-solid 60 with ~15ms of slack per frame. Set GLASSES_HZ=120 to opt back out.
-GLASSES_HZ="${GLASSES_HZ:-60}"
+# Run the glasses at their native 120Hz. On Hyprland 0.55 (aquamarine 0.12) present
+# pacing is rock-solid - measured 120.0fps, 0.00 hitches/sec, worst-frame ~11ms - so
+# the old ~95Hz present wall is gone and GPU draw is <1ms. (The 60Hz lock was a
+# workaround for 0.51's jitter, no longer needed.) Set GLASSES_HZ=60 to drop back.
+GLASSES_HZ="${GLASSES_HZ:-120}"
 echo "[glasses] locking $GLASSES to ${GLASSES_HZ}Hz for a stable vsync..."
 hyprctl keyword monitor "$GLASSES,1920x1080@${GLASSES_HZ},auto,1" >/dev/null || true
 # fullscreen is requested by mirage itself (--fullscreen, below); these rules just
