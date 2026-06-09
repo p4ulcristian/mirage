@@ -67,7 +67,9 @@ Verify the pose stream without the renderer:
 These are compositor-level binds, so they fire even while mirage covers the glasses.
 Re-run `scripts/keybinds.sh` after a Hyprland reload. Trackpad capture is on from the
 first frame; while captured, the trackpad drives a cursor across the wall and Cmd+scroll
-zooms (telephoto). Double-tap Alt toggles the gaze-follow cursor.
+zooms (telephoto). Double-tap Alt toggles the gaze-follow cursor, and a **3-finger swipe**
+switches workspaces on the wall (creating a new one past the end) — mirage detects the
+gesture itself, since its trackpad grab hides it from Hyprland.
 
 ## Architecture
 

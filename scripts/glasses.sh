@@ -15,6 +15,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 GLASSES=DP-1
 
+# Kill any mirage still running so the shortcut always launches THIS build (an
+# old instance left up would otherwise keep rendering with stale behaviour, and
+# its trackpad grab + scanout would fight this one). Wait for it to actually exit.
+if pgrep -x mirage >/dev/null; then
+    echo "[glasses] stopping the running mirage first..."
+    pkill -x mirage
+    for _ in $(seq 1 20); do pgrep -x mirage >/dev/null || break; sleep 0.2; done
+fi
+
 # mirage auto-detects the trackpad + keyboard event nodes itself (by device name,
 # in grab.c) - including preferring the keyd virtual keyboard - so there's nothing
 # to pass in here.

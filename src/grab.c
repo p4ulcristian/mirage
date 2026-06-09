@@ -62,6 +62,8 @@ typedef struct {
     bool   gaze_prev_valid;    /* false until the first gaze sample is seeded     */
     uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
+    int    swipe_fingers;      /* finger count of the in-progress swipe gesture */
+    double swipe_dx, swipe_dy; /* accumulated swipe travel (3-finger workspace swipe) */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
@@ -224,6 +226,23 @@ static void do_zoom(grab_state *g, double scroll_v) {
     g->m->zoom = z;
 }
 
+/* Change the workspace on the wall via a Hyprland dispatch. We own the trackpad
+ * grab, so Hyprland never sees the 3-finger swipe - we run the switch ourselves.
+ * Hyprland 0.55's Lua API: focus the VIRT output the cursor is on, then step the
+ * workspace with "m+1"/"m-1" - the MONITOR-relative form, so it only ever cycles
+ * the wall's own workspaces and never crosses onto the glasses (which would drop
+ * you out to the real desktop). Backgrounded so it never stalls the render loop. */
+static void workspace_swipe(grab_state *g, int dir) {
+    const char *out = (g->cur >= 0 && g->cur < g->n)
+                      ? g->m->screen[g->cur].name : "VIRT1";
+    char cmd[256];
+    snprintf(cmd, sizeof cmd,
+             "hyprctl eval 'hl.dispatch(hl.dsp.focus({ monitor = \"%s\" })); "
+             "hl.dispatch(hl.dsp.focus({ workspace = \"m%c1\" }))' >/dev/null 2>&1 &",
+             out, dir > 0 ? '+' : '-');
+    if (system(cmd) < 0) { /* best-effort; nothing useful to do on failure */ }
+}
+
 static void handle_event(grab_state *g, struct libinput_event *ev) {
     enum libinput_event_type t = libinput_event_get_type(ev);
     switch (t) {
@@ -301,6 +320,29 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             uinput_wheel(g->uifd, -step);   /* -step: match natural scroll dir */
         }
         if (v == 0.0) g->scroll_acc = 0.0;   /* reset on finger lift */
+        break;
+    }
+    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN: {
+        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
+        g->swipe_fingers = libinput_event_gesture_get_finger_count(gst);
+        g->swipe_dx = g->swipe_dy = 0.0;
+        break;
+    }
+    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
+        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
+        g->swipe_dx += libinput_event_gesture_get_dx(gst);
+        g->swipe_dy += libinput_event_gesture_get_dy(gst);
+        break;
+    }
+    case LIBINPUT_EVENT_GESTURE_SWIPE_END: {
+        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
+        /* 3-finger horizontal swipe -> change workspace on the wall (create a new
+         * one past the end), replicating Hyprland's workspace_swipe - which can't
+         * see the trackpad while we hold the exclusive grab. One switch per swipe. */
+        if (!libinput_event_gesture_get_cancelled(gst) && g->swipe_fingers == 3 &&
+            fabs(g->swipe_dx) > 60.0 && fabs(g->swipe_dx) > fabs(g->swipe_dy))
+            workspace_swipe(g, g->swipe_dx > 0 ? +1 : -1);
+        g->swipe_fingers = 0;
         break;
     }
     default: break;
