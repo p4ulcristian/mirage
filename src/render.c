@@ -67,14 +67,18 @@ static const char *DOME_FRAG =
     "uniform sampler2D uTex;\n"
     "uniform float uExposure;\n"
     "uniform float uIntensity;\n"
+    "uniform float uBlack;\n"       /* black point: floor below this -> 0 (true black) */
+    "uniform float uSaturation;\n"  /* chroma boost around luma */
     "void main() {\n"
     "  vec3 d = normalize(vDir);\n"
     "  float u = atan(d.x, -d.z) * 0.159154943 + 0.5;\n"   /* 1/(2pi) */
     "  float v = 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.318309886;\n"  /* 1/pi */
     "  vec3 c = texture2D(uTex, vec2(u, v)).rgb;\n"
-    "  c = c * c * uExposure;\n"                           /* decode sqrt, then expose */
-    "  c = (c * (2.51*c + 0.03)) / (c * (2.43*c + 0.59) + 0.14);\n"  /* ACES tonemap */
-    "  gl_FragColor = vec4(c * uIntensity, 1.0);\n"
+    "  c = c * c;\n"                                       /* decode sqrt -> linear */
+    "  c = max(c - uBlack, 0.0) * uExposure;\n"            /* crush the haze floor to black, then expose */
+    "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+    "  c = mix(vec3(l), c, uSaturation);\n"                /* punch up star colour */
+    "  gl_FragColor = vec4(clamp(c, 0.0, 1.0) * uIntensity, 1.0);\n"  /* no filmic lift; let bright stars clip white */
     "}\n";
 
 static struct {
@@ -86,7 +90,7 @@ static struct {
     /* HDRI environment dome */
     GLuint dome_prog, dome_vbo, hdri_tex;
     int    dome_verts;
-    GLint  dMVP, dExposure, dIntensity;
+    GLint  dMVP, dExposure, dIntensity, dBlack, dSat, dTex;
 
     /* "GAZE: ON/OFF" status plaque below the centre screen (baked text textures,
      * drawn on the unit QUAD via R.prog). */
@@ -450,6 +454,9 @@ static void hdri_init(struct mirage *m) {
     R.dMVP       = glGetUniformLocation(R.dome_prog, "uMVP");
     R.dExposure  = glGetUniformLocation(R.dome_prog, "uExposure");
     R.dIntensity = glGetUniformLocation(R.dome_prog, "uIntensity");
+    R.dBlack     = glGetUniformLocation(R.dome_prog, "uBlack");
+    R.dSat       = glGetUniformLocation(R.dome_prog, "uSaturation");
+    R.dTex       = glGetUniformLocation(R.dome_prog, "uTex");
     build_dome();
     fprintf(stderr, "hdri: dome ready (%dx%d, %s)\n", w, h, m->cfg.hdri_path);
 }
@@ -635,9 +642,11 @@ void render_frame(struct mirage *m, quat head) {
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
         glUniform1f(R.dExposure,  m->cfg.hdri_exposure);
         glUniform1f(R.dIntensity, m->cfg.hdri_intensity);
+        glUniform1f(R.dBlack,     m->cfg.hdri_black);
+        glUniform1f(R.dSat,       m->cfg.hdri_saturation);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
-        glUniform1i(glGetUniformLocation(R.dome_prog, "uTex"), 0);
+        glUniform1i(R.dTex, 0);
         glBindBuffer(GL_ARRAY_BUFFER, R.dome_vbo);
         glEnableVertexAttribArray(R.aPos);
         glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 3*sizeof(GLfloat), (void*)0);

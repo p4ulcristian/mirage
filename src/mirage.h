@@ -98,8 +98,10 @@ typedef struct {
      * light (dark = transparent), so a dark/starry HDRI reads best. */
     bool  hdri_on;              /* draw the environment dome                       */
     char  hdri_path[256];       /* path to a flat Radiance .hdr (see hdri/exr2hdr.py) */
-    float hdri_exposure;        /* linear gain before tonemap (boosts faint stars) */
+    float hdri_exposure;        /* linear gain (boosts faint stars)                */
     float hdri_intensity;       /* final additive strength; lower = more see-through */
+    float hdri_black;           /* black point: linear floor below this -> 0 (true black) */
+    float hdri_saturation;      /* chroma boost around luma (1 = unchanged)        */
 
     /* identification */
     char  glasses_match[64];    /* substring of glasses output desc/name */

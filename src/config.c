@@ -27,8 +27,10 @@ void mirage_config_defaults(mirage_config *c) {
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
     strcpy(c->hdri_path, "hdri/starmap_2020_4k.hdr");  /* NASA Deep Star Maps 2020, 4K */
-    c->hdri_exposure     = 4.0f;   /* boost the faint stars (they sit ~0.02..0.1 in the map) */
-    c->hdri_intensity    = 0.85f;  /* additive strength; keep <1 so the room still shows through */
+    c->hdri_exposure     = 7.0f;   /* boost the stars hard so they pop after the black point */
+    c->hdri_intensity    = 1.0f;   /* full strength: with blacks crushed, only stars add light */
+    c->hdri_black        = 0.025f; /* kill the faint haze floor -> true black (transparent on optics) */
+    c->hdri_saturation   = 1.7f;   /* punch up star/Milky-Way colour */
     strcpy(c->glasses_match, "SmartGlasses");
-    c->bg[0] = 0.02f; c->bg[1] = 0.02f; c->bg[2] = 0.035f;
+    c->bg[0] = 0.0f; c->bg[1] = 0.0f; c->bg[2] = 0.0f;   /* true black = transparent on the additive optics */
 }

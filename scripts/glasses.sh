@@ -28,11 +28,20 @@ fi
 # in grab.c) - including preferring the keyd virtual keyboard - so there's nothing
 # to pass in here.
 
+# Creating/removing the VIRT output and re-moding DP-1 orphans waybar's surface
+# (the process survives but stops drawing). Note whether it was up so we can give
+# it a clean restart once the desktop layout is back.
+WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
+
 restore() {
     echo "[glasses] restoring desktop..."
     bash "$HERE/scripts/sweep.sh" restore >/dev/null 2>&1 || true
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
     bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
+    if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
+        pkill -x waybar 2>/dev/null || true
+        setsid waybar >/dev/null 2>&1 & disown
+    fi
 }
 trap restore EXIT INT TERM
 
@@ -60,6 +69,15 @@ hyprctl dispatch movecursor 300 300 >/dev/null
 echo "[glasses] virtual screens + head tracking..."
 bash "$HERE/scripts/setup-displays.sh" >/dev/null 2>&1 || true
 bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
+
+# Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
+# captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
+# rides along onto the wall - that's how you get your status bar inside mirage.
+if [ "$WAYBAR_UP" = 1 ]; then
+    pkill -x waybar 2>/dev/null || true
+    setsid waybar >/dev/null 2>&1 & disown
+    sleep 0.5
+fi
 
 echo "[glasses] sweeping your windows onto the virtual screens..."
 bash "$HERE/scripts/sweep.sh" sweep 2>&1 | sed 's/^/  [sweep] /' || true
