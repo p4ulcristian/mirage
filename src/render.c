@@ -159,7 +159,7 @@ static EGLConfig choose_config(EGLDisplay dpy) {
 static void build_curved_mesh(struct mirage *m, screen_t *s) {
     const mirage_config *c = &m->cfg;
     float d   = c->screen_distance_m;
-    float ang = c->screen_arc_deg * (float)M_PI/180.0f;
+    float ang = s->arc_deg * (float)M_PI/180.0f;
     float aspect = (s->width > 0 && s->height > 0)
                    ? (float)s->height / (float)s->width : 9.0f/16.0f;
     float L = d * ang;          /* arc length = on-screen width */
@@ -192,7 +192,7 @@ static void build_curved_mesh(struct mirage *m, screen_t *s) {
 static void build_flat_mesh(struct mirage *m, screen_t *s) {
     const mirage_config *c = &m->cfg;
     float d      = c->screen_distance_m;
-    float ang_w  = c->screen_arc_deg * (float)M_PI/180.0f;
+    float ang_w  = s->arc_deg * (float)M_PI/180.0f;
     float aspect = (s->width > 0 && s->height > 0)
                    ? (float)s->height / (float)s->width : 9.0f/16.0f;
     float hw = d * tanf(ang_w * 0.5f);       /* half width  (subtends ang_w) */
@@ -244,7 +244,7 @@ static void build_slab_mesh(struct mirage *m, screen_t *s) {
     const mirage_config *c = &m->cfg;
     if (c->slab_depth_m <= 0.0f) { s->slab_vbo = 0; s->slab_verts = 0; return; }
     float d      = c->screen_distance_m;
-    float ang_w  = c->screen_arc_deg * (float)M_PI/180.0f;
+    float ang_w  = s->arc_deg * (float)M_PI/180.0f;
     float aspect = (s->width > 0 && s->height > 0)
                    ? (float)s->height / (float)s->width : 9.0f/16.0f;
     float hw, hh;
@@ -525,10 +525,15 @@ bool render_init(struct mirage *m) {
 
     glEnable(GL_DEPTH_TEST);
 
-    /* build one mesh per screen (flat quad or curved strip) + its slab body */
+    /* build one mesh per screen (flat quad or curved strip) + its slab body.
+     * Each screen's angular width is its per-screen override (cfg.screen_arc[i]),
+     * falling back to the default - so the wide wall and the narrower 16:9 above
+     * it each get their own arc. */
     int nbuild = m->n_screen;
     if (nbuild < 0 || nbuild > MIRAGE_MAX_SCREENS) nbuild = 0;
     for (int i = 0; i < nbuild; i++) {
+        m->screen[i].arc_deg = m->cfg.screen_arc[i] > 0.0f
+                               ? m->cfg.screen_arc[i] : m->cfg.screen_arc_deg;
         if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, &m->screen[i]);
         else                              build_curved_mesh(m, &m->screen[i]);
         build_slab_mesh(m, &m->screen[i]);
@@ -727,7 +732,7 @@ void render_frame(struct mirage *m, quat head) {
         if (ci < n && R.label_on) {
             screen_t *cs = &m->screen[ci];
             float d      = m->cfg.screen_distance_m;
-            float ang_w  = m->cfg.screen_arc_deg * (float)M_PI/180.0f;
+            float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
             float aspect = (cs->width > 0 && cs->height > 0)
                            ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
             float hh     = d * tanf(ang_w * 0.5f) * aspect;   /* screen half-height */

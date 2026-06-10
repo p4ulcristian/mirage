@@ -56,6 +56,8 @@ typedef struct {
     bool     have_tex;          /* texture has valid contents            */
     bool     y_invert;          /* compositor reported flipped Y         */
 
+    float    arc_deg;           /* angular width this screen spans (per-screen)  */
+
     /* curved-screen mesh (built once, drawn each frame in 3D mode) */
     GLuint   mesh_vbo;
     int      mesh_verts;
@@ -72,7 +74,8 @@ typedef struct {
     float screen_distance_m;    /* metres from eye to screen centre      */
     float screen_width_m;       /* physical width of each virtual screen */
     float arc_spacing_deg;      /* extra gap between screens (0 = touch)  */
-    float screen_arc_deg;       /* angular width each curved screen spans */
+    float screen_arc_deg;       /* default angular width a screen spans   */
+    float screen_arc[MIRAGE_MAX_SCREENS]; /* per-screen arc override (0 = use default) */
     int   screen_cols;          /* screens per row (rows stack vertically) */
     float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */

@@ -62,7 +62,9 @@ for w in json.load(sys.stdin):
         print(w["id"])')"
     for ws in $wss; do
         echo "restore: workspace $ws -> $target"
-        hyprctl dispatch moveworkspacetomonitor "$ws" "$target" >/dev/null || true
+        # Hyprland 0.55 Lua parser: legacy `hyprctl dispatch moveworkspacetomonitor`
+        # is gone, so move the workspace via the Lua dispatch API.
+        hyprctl eval "hl.dispatch(hl.dsp.workspace.move({ workspace='$ws', monitor='$target' }))" >/dev/null || true
     done
 }
 

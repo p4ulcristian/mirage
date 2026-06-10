@@ -182,8 +182,11 @@ int main(int argc, char **argv) {
         if (verbose) {
             double t = now_sec();
             if (t - last_log >= 0.25) {
-                fprintf(stderr, "\ryaw % 7.1f pitch % 7.1f roll % 7.1f\n",
-                        yaw, pitch, roll);
+                fprintf(stderr, "ypr % 7.1f % 7.1f % 7.1f | acc % 6.2f % 6.2f % 6.2f | "
+                        "gyr % 6.2f % 6.2f % 6.2f\n",
+                        yaw, pitch, roll,
+                        s.accel[0], s.accel[1], s.accel[2],
+                        s.gyro_rad[0], s.gyro_rad[1], s.gyro_rad[2]);
                 last_log = t;
             }
         }

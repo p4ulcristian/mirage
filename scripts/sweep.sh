@@ -102,17 +102,22 @@ for c in cands:
     a = c["address"]
     snap.append({"address": a, "ws": c["workspace"]["id"],
                  "floating": bool(c.get("floating"))})
-    moves.append("dispatch movetoworkspacesilent %d,address:%s" % (slots[assigned[a]], a))
+    # Hyprland 0.55's Lua parser killed `hyprctl dispatch movetoworkspacesilent`
+    # (and the --batch form), so move via the Lua dispatch API instead, exactly
+    # like setup-displays.sh/grab.c do. silent=true keeps the wall's active
+    # workspace from jumping as windows land. Moving preserves floating state.
+    moves.append("hl.dispatch(hl.dsp.window.move({ window='address:%s', workspace='%d', silent=true }))"
+                 % (a, slots[assigned[a]]))
 
 json.dump(snap, open(os.environ["STATE"], "w"))
 print(len(snap))
-print(" ; ".join(moves))
+print(" ".join(moves))
 PY
 )" || { echo "sweep: planning failed"; return 1; }
     n="$(printf '%s\n' "$batch" | sed -n '1p')"
     batch="$(printf '%s\n' "$batch" | sed -n '2p')"
     [ "${n:-0}" -gt 0 ] || { echo "sweep: nothing to move"; return; }
-    [ -n "$batch" ] && hyprctl --batch "$batch" >/dev/null || true
+    [ -n "$batch" ] && hyprctl eval "$batch" >/dev/null || true
     echo "sweep: moved $n window(s) onto the arc (snapshot: $STATE)"
 }
 
@@ -153,15 +158,17 @@ import json, os
 snap = json.load(open(os.environ["STATE"]))
 out = []
 for w in snap:
-    out.append("dispatch movetoworkspacesilent %d,address:%s" % (w["ws"], w["address"]))
-    if w.get("floating"):
-        out.append("dispatch setfloating address:%s" % w["address"])
-print(" ; ".join(out))
+    # Lua dispatch (legacy `hyprctl dispatch movetoworkspacesilent` is dead on
+    # Hyprland 0.55). The move preserves the window's floating state, so the old
+    # explicit setfloating pass is no longer needed.
+    out.append("hl.dispatch(hl.dsp.window.move({ window='address:%s', workspace='%d', silent=true }))"
+               % (w["address"], w["ws"]))
+print(" ".join(out))
 PY
 )"
-    [ -n "$batch" ] && hyprctl --batch "$batch" >/dev/null || true
+    [ -n "$batch" ] && hyprctl eval "$batch" >/dev/null || true
     rm -f "$STATE"
-    echo "sweep: restored $(printf '%s' "$batch" | grep -o movetoworkspacesilent | wc -l) window move(s)"
+    echo "sweep: restored $(printf '%s' "$batch" | grep -o 'hl.dsp.window.move' | wc -l) window move(s)"
 }
 
 case "${1:-sweep}" in

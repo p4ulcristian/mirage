@@ -3,12 +3,14 @@
 
 void mirage_config_defaults(mirage_config *c) {
     memset(c, 0, sizeof *c);
-    c->screen_count     = 1;       /* screenshare: ONE 32:9 ultrawide wall (VIRT1) */
+    c->screen_count     = 2;       /* VIRT1 = 32:9 DFHD wall, VIRT2 = 16:9 monitor above it */
     c->screen_distance_m = 2.0f;   /* screen sits 2 m away              */
     c->screen_width_m    = 2.80f;  /* wide 32:9 wall (height follows capture aspect) */
     c->arc_spacing_deg   = 1.0f;   /* small gap between screens (deg), columns & rows */
-    c->screen_arc_deg    = 70.0f;  /* the single wall spans 70 deg of arc (glance to edges, no neck-pan) */
-    c->screen_cols       = 1;      /* one column: the wall is centred dead-ahead */
+    c->screen_arc_deg    = 70.0f;  /* default arc; the wide wall spans this */
+    c->screen_arc[0]     = 70.0f;  /* VIRT1: the 32:9 wall, glance edge-to-edge */
+    c->screen_arc[1]     = 38.0f;  /* VIRT2: narrower so the 16:9 reads like a monitor above */
+    c->screen_cols       = 1;      /* one column: both centred dead-ahead, stacked vertically */
     c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
     c->gaze_cursor       = true;   /* Cmd-held: cursor follows head gaze */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */

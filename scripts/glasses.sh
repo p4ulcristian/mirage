@@ -64,7 +64,7 @@ hl.window_rule({ match = { class = 'mirage' }, rounding = 0 })
 " >/dev/null
 
 echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
-hyprctl dispatch movecursor 300 300 >/dev/null
+hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
 
 echo "[glasses] virtual screens + head tracking..."
 bash "$HERE/scripts/setup-displays.sh" >/dev/null 2>&1 || true
