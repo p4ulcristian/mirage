@@ -1,5 +1,6 @@
 #include "pose.h"
 #include "diag.h"
+#include "worldvio.h"   /* feed the IMU accel into the world-cam VI fusion */
 
 #include <pthread.h>
 #include <stdio.h>
@@ -30,11 +31,6 @@ static quat recenter_ref(quat q) {
     return q_norm(q);
 }
 
-/* One-Euro filter state for a single scalar (used per position axis). Unlike a fixed
- * EMA, its cutoff rises with signal speed, so it holds steady at rest yet doesn't lag
- * a real lean — the right tool for jittery webcam position at 100+ fps. */
-struct oneeuro_s { bool init; float xhat, dxhat; };
-
 static struct {
     pose_config cfg;
     pthread_t   thread;
@@ -53,41 +49,20 @@ static struct {
     bool smooth_on;       /* runtime A/B toggle; raw passthrough when false  */
     uint64_t last_sample_us;
     uint32_t sample_count; /* raw samples since last pose_take_sample_count() */
+    uint64_t rate_win_us;  /* start of the current sample-rate window (us)    */
+    uint32_t rate_win_n;   /* samples counted in the current rate window      */
     uint32_t recenter_gen; /* bumps on every recenter; lets render reseed its deadband */
     int fd;          /* listening socket / source fd             */
 
-    /* Facecam position channel (independent of the orientation backend above). */
-    pthread_t pos_thread;
-    int   pos_fd;          /* unix-dgram listening socket for {"pos":[x,y,z]}  */
-    bool  pos_have;        /* a position sample has arrived                    */
-    bool  pos_ref_set;     /* reference captured (first sample / recenter)     */
-    vec3  pos_raw;         /* latest decoded position (camera/world frame, m)  */
-    vec3  pos_smoothed;    /* One-Euro-filtered position                       */
-    vec3  pos_ref;         /* reference subtracted on read (rest = origin)     */
-    uint64_t pos_last_us;  /* timestamp of previous position sample (for dt)   */
-    oneeuro_s oe_px, oe_py, oe_pz;  /* per-axis One-Euro filters               */
-
-    /* Visual-inertial complementary filter (the VOR-style fusion): the IMU's linear
-     * acceleration carries the FAST position (low latency), the camera anchors the
-     * ABSOLUTE position (kills the accel's integration drift). fpos/fvel are the fused
-     * world-frame state in metres / m·s⁻¹. */
-    bool  fuse_have;       /* at least one accel sample integrated            */
-    uint64_t accel_last_us;
-    vec3  fvel;            /* fused velocity (mirage world, m/s)              */
-    vec3  fpos;            /* fused position (mirage world, m)                */
-
-    /* diagnostics (jumps-while-still log; see diag.h) */
-    vec3  diag_prev_fpos;   bool diag_fpos_init;
-    vec3  diag_prev_campos; bool diag_campos_init;
+    /* diagnostics (jumps-while-still heartbeat log; see diag.h) */
     uint64_t diag_last_hb_us; uint32_t diag_hb_count;
 } P = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
     .reference = {1,0,0,0},
-    .dvel = {1,0,0,0}, .sample_dt = 0.003f,
+    .dvel = {1,0,0,0}, .sample_dt = 0.008f,   /* ~124 Hz true period; refined from a windowed mean */
     .smooth_on = true,
     .fd = -1,
-    .pos_fd = -1,
 };
 
 /* One-Euro low-pass smoothing factor for a given cutoff (Hz) and timestep (s):
@@ -223,12 +198,22 @@ static void submit_raw(quat raw) {
      * photon horizon with q_scale_angle, so the wall stays nailed to the world while
      * you turn (the difference between readable and smeary text in motion). */
     if (had_signal) {
-        float vdt = (float)(t - P.last_sample_us) / 1000000.0f;
-        if (vdt < 1e-4f) vdt = 1e-4f;
-        if (vdt > 0.1f)  vdt = 0.1f;
         quat dq = q_mul(P.smoothed, q_conj(prev_smoothed));   /* world-frame step */
         P.dvel = q_nlerp(P.dvel, dq, 0.5f);                   /* light smoothing  */
-        P.sample_dt += 0.05f * (vdt - P.sample_dt);
+        /* Sample period for the prediction time base (pose_predicted scales dvel by
+         * horizon/sample_dt). Do NOT derive it from the instantaneous arrival gap: USB
+         * delivery is BURSTY, so the in-burst gaps collapse toward zero and would drag
+         * sample_dt down, making the prediction over-extrapolate and then snap back when
+         * the next burst lands - the "jitters back and forth on a fast turn" artefact.
+         * Measure the TRUE mean period over a ~1 s window (count / elapsed) instead;
+         * bursts average out, so the time base stays steady. */
+        if (P.rate_win_us == 0) P.rate_win_us = t;
+        P.rate_win_n++;
+        if (t - P.rate_win_us >= 1000000ULL) {
+            float per = (float)((double)(t - P.rate_win_us) / 1e6 / (double)P.rate_win_n);
+            if (per > 1e-4f && per < 0.1f) P.sample_dt = per;
+            P.rate_win_us = t; P.rate_win_n = 0;
+        }
     }
 
     /* --- diagnostics: orientation jumps while (nearly) still, plus a heartbeat ---
@@ -252,12 +237,8 @@ static void submit_raw(quat raw) {
         }
         if (t - P.diag_last_hb_us > 3000000ull) {
             float el = P.diag_last_hb_us ? (float)(t - P.diag_last_hb_us) / 1e6f : 1.0f;
-            diag_logf("HB", "imu=%.0fHz spd=%.2fdeg/s fpos=(%.3f,%.3f,%.3f) "
-                      "fvel=(%.3f,%.3f,%.3f) cam=(%.3f,%.3f,%.3f) have_cam=%d fuse=%d",
-                      (float)P.diag_hb_count / el, P.speed_lp * 180.0f / (float)M_PI,
-                      P.fpos.x, P.fpos.y, P.fpos.z, P.fvel.x, P.fvel.y, P.fvel.z,
-                      P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z,
-                      (int)P.pos_have, (int)P.fuse_have);
+            diag_logf("HB", "imu=%.0fHz spd=%.2fdeg/s",
+                      (float)P.diag_hb_count / el, P.speed_lp * 180.0f / (float)M_PI);
             P.diag_last_hb_us = t;
             P.diag_hb_count = 0;
         }
@@ -305,8 +286,6 @@ static quat device_to_mirage(quat dev) {
  * quaternion {w,x,y,z} of 4 little-endian doubles. We use the quaternion (not
  * OpenTrack euler) end-to-end precisely so there is no gimbal lock when reclined.
  * device_to_mirage applies the fixed device->mirage axis change; that is all. */
-static void submit_accel(vec3 a);   /* defined below, after submit_pos */
-
 static void run_opentrack(void) {
     uint8_t buf[256];
     while (P.running) {
@@ -321,10 +300,22 @@ static void run_opentrack(void) {
          * the visual-inertial complementary filter. Remap earth->mirage world with the
          * SAME B as the orientation, then fuse. Old 4-double bridges just skip this and
          * mirage falls back to the camera-only position path. */
-        if (have >= 7 && P.cfg.facecam_enable && P.cfg.facecam_fusion) {
-            const quat B = {0.5f, -0.5f, -0.5f, -0.5f};
+        if (have >= 7) {
             vec3 a_earth = {(float)d[4], (float)d[5], (float)d[6]};
-            submit_accel(q_rotate(B, a_earth));
+            const quat B = {0.5f, -0.5f, -0.5f, -0.5f};   /* earth -> mirage world (== orientation remap) */
+            vec3 a_mir = q_rotate(B, a_earth);
+            /* feed the world-cam VI fusion: IMU position prediction between camera frames */
+            static uint64_t pa = 0; uint64_t nu = now_us();
+            double adt = pa ? (double)(nu - pa) * 1e-6 : 0.0; pa = nu;
+            if (adt > 0) worldvio_feed_accel(a_mir, adt);
+            /* VALIDATION: the bridge's new world-frame linear-accel feed for the VIO fusion.
+             * Should be ~0 at rest and spike (a few m/s^2) on real head motion. Throttled;
+             * remove once verified. */
+            static double alt = 0; double tt = now_us() * 1e-6;
+            if (tt - alt > 0.3) { alt = tt;
+                std::print(stderr, "[accel] earth({:6.2f} {:6.2f} {:6.2f}) |a|={:.2f}\n",
+                           a_earth.x, a_earth.y, a_earth.z,
+                           sqrtf(a_earth.x*a_earth.x + a_earth.y*a_earth.y + a_earth.z*a_earth.z)); }
         }
     }
 }
@@ -370,137 +361,6 @@ static void run_json_socket(void) {
     }
 }
 
-/* ---- Facecam position channel: unix-dgram JSON {"pos":[x,y,z]} ---- */
-static bool parse_pos_json(const char *s, vec3 *out) {
-    const char *p = strstr(s, "\"pos\"");
-    if (!p) return false;
-    p = strchr(p, '[');
-    if (!p) return false;
-    float v[3];
-    if (sscanf(p, "[ %f , %f , %f ]", &v[0], &v[1], &v[2]) != 3) return false;
-    *out = (vec3){v[0], v[1], v[2]};
-    return true;
-}
-
-/* One-Euro step for one scalar: low-pass whose cutoff = mincut + beta*|speed|, so it
- * follows fast motion with little lag but smooths hard when nearly still. */
-static float oneeuro_step(oneeuro_s *s, float x, float dt, float mincut, float beta) {
-    if (!s->init) { s->init = true; s->xhat = x; s->dxhat = 0.0f; return x; }
-    float dx = (x - s->xhat) / dt;
-    float ad = oneeuro_alpha(1.0f, dt);            /* derivative cutoff = 1 Hz */
-    s->dxhat += ad * (dx - s->dxhat);
-    float cutoff = mincut + beta * fabsf(s->dxhat);
-    float a = oneeuro_alpha(cutoff, dt);
-    s->xhat += a * (x - s->xhat);
-    return s->xhat;
-}
-
-/* Fold a freshly decoded head position into shared state. The first sample (and any
- * recenter) seeds the reference, so pose_position() reads zero at rest. One-Euro
- * filtered per axis (face detection is jittery, especially z's apparent-size depth);
- * depth gets a lower rest cutoff than x/y, so it's held steadier at the cost of a
- * touch more lag. facecam_smooth sets the lateral rest cutoff (Hz, lower = steadier). */
-static void submit_pos(vec3 raw) {
-    pthread_mutex_lock(&P.lock);
-    uint64_t t = now_us();
-    if (!P.pos_have) {
-        P.pos_smoothed = raw;          /* seed filters, no lerp from a garbage origin */
-        oneeuro_step(&P.oe_px, raw.x, 0.01f, 1.0f, 0.0f);
-        oneeuro_step(&P.oe_py, raw.y, 0.01f, 1.0f, 0.0f);
-        oneeuro_step(&P.oe_pz, raw.z, 0.01f, 1.0f, 0.0f);
-        P.pos_have = true;
-    } else {
-        float dt = (float)(t - P.pos_last_us) / 1000000.0f;
-        if (dt < 1e-3f) dt = 1e-3f;
-        if (dt > 0.2f)  dt = 0.2f;
-        float mincut = P.cfg.facecam_smooth;       /* lateral rest cutoff (Hz) */
-        if (mincut <= 0.0f) mincut = 1.2f;
-        const float beta = 0.6f;                   /* speed coupling (less lag in motion) */
-        P.pos_smoothed.x = oneeuro_step(&P.oe_px, raw.x, dt, mincut, beta);
-        P.pos_smoothed.y = oneeuro_step(&P.oe_py, raw.y, dt, mincut, beta);
-        P.pos_smoothed.z = oneeuro_step(&P.oe_pz, raw.z, dt, mincut * 0.5f, beta);
-    }
-    P.pos_raw = raw;
-    P.pos_last_us = t;
-    if (!P.pos_ref_set) { P.pos_ref = P.pos_smoothed; P.pos_ref_set = true; }
-    /* diag: a big step in the SMOOTHED camera position = a facecam misdetection that
-     * slipped past the median + spike gate (the prime suspect for a lateral still-jump). */
-    if (diag_enabled() && P.diag_campos_init) {
-        float d = v3_len(v3_sub(P.pos_smoothed, P.diag_prev_campos));
-        if (d > 0.02f)
-            diag_logf("CAM", "jump d=%.4fm cam=(%.3f,%.3f,%.3f) raw=(%.3f,%.3f,%.3f)",
-                      d, P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z,
-                      raw.x, raw.y, raw.z);
-    }
-    P.diag_prev_campos = P.pos_smoothed; P.diag_campos_init = true;
-    pthread_mutex_unlock(&P.lock);
-}
-
-/* One complementary-filter step from a linear-acceleration sample (mirage world frame,
- * gravity already removed by the bridge). PREDICT: integrate accel -> velocity -> position
- * for the fast, low-latency motion, leaking velocity toward zero so a constant accel bias
- * can't run the position away (bias -> bounded velocity instead of unbounded drift).
- * CORRECT: pull the fused position toward the camera's absolute (One-Euro) position over
- * TAU_C, so the slow-but-drift-free camera anchors the fast-but-drifting inertial estimate.
- * The accel and the orientation arrive in the same packet, so they're already time-synced. */
-static void submit_accel(vec3 a) {
-    pthread_mutex_lock(&P.lock);
-    uint64_t t = now_us();
-    float dt;
-    if (!P.fuse_have) {
-        P.fuse_have = true;
-        P.fvel = (vec3){0,0,0};
-        P.fpos = P.pos_have ? P.pos_smoothed : (vec3){0,0,0};  /* start at the camera */
-        dt = 0.002f;
-    } else {
-        dt = (float)(t - P.accel_last_us) / 1000000.0f;
-        if (dt < 1e-4f) dt = 1e-4f;
-        if (dt > 0.05f) dt = 0.05f;        /* a stall shouldn't fling the integrator */
-    }
-    P.accel_last_us = t;
-
-    const float TAU_V = 0.4f;   /* velocity leak (s): bounds accel-bias drift        */
-    const float TAU_C = 0.15f;  /* camera correction time const (s): lower = trust cam */
-    P.fvel = v3_add(P.fvel, v3_scale(a, dt));        /* integrate accel -> velocity   */
-    P.fvel = v3_scale(P.fvel, expf(-dt / TAU_V));    /* leak                          */
-    P.fpos = v3_add(P.fpos, v3_scale(P.fvel, dt));   /* integrate velocity -> position*/
-    if (P.pos_have) {                                /* correct toward the camera     */
-        float kc = dt / TAU_C;
-        if (kc > 1.0f) kc = 1.0f;
-        P.fpos = v3_add(P.fpos, v3_scale(v3_sub(P.pos_smoothed, P.fpos), kc));
-    }
-    /* diag: a big per-sample step in the FUSED position = the accel integration spiked
-     * or the complementary filter overshot (the prime suspect from the new VI fusion).
-     * 6 mm in one ~2 ms sample is physically impossible head motion, so it's a glitch. */
-    if (diag_enabled() && P.diag_fpos_init) {
-        float d = v3_len(v3_sub(P.fpos, P.diag_prev_fpos));
-        if (d > 0.006f)
-            diag_logf("FPOS", "jump d=%.4fm fvel=%.3f accel=%.2f fpos=(%.3f,%.3f,%.3f) cam=(%.3f,%.3f,%.3f)",
-                      d, v3_len(P.fvel), v3_len(a),
-                      P.fpos.x, P.fpos.y, P.fpos.z,
-                      P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z);
-    }
-    P.diag_prev_fpos = P.fpos; P.diag_fpos_init = true;
-    pthread_mutex_unlock(&P.lock);
-}
-
-static void run_position_socket(void) {
-    char buf[512];
-    while (P.running) {
-        ssize_t n = recv(P.pos_fd, buf, sizeof buf - 1, 0);
-        if (n <= 0) continue;       /* 200ms timeout -> re-check P.running */
-        buf[n] = 0;
-        vec3 pos;
-        if (parse_pos_json(buf, &pos)) submit_pos(pos);
-    }
-}
-
-static void *pos_reader_thread(void *arg) {
-    (void)arg;
-    run_position_socket();
-    return NULL;
-}
-
 static void *reader_thread(void *arg) {
     (void)arg;
     switch (P.cfg.backend) {
@@ -534,26 +394,11 @@ int pose_start(const pose_config *cfg) {
     }
     if (cfg->backend != POSE_BREEZY_SHM && P.fd < 0) return -1;
 
-    /* Optional facecam position channel: a second unix-dgram socket that the webcam
-     * bridge sends head position to. Independent of the orientation backend; if it
-     * fails to bind we log and carry on with rotation-only (3DoF). */
-    if (cfg->facecam_enable) {
-        P.pos_fd = open_unix_dgram(cfg->facecam_socket ? cfg->facecam_socket
-                                                       : "/tmp/mirage-facecam.sock");
-        if (P.pos_fd < 0)
-            std::print(stderr, "pose: facecam disabled (socket bind failed)\n");
-    }
-
     P.running = true;
     if (pthread_create(&P.thread, NULL, reader_thread, NULL) != 0) {
         P.running = false;
         if (P.fd >= 0) close(P.fd);
-        if (P.pos_fd >= 0) { close(P.pos_fd); P.pos_fd = -1; }
         return -1;
-    }
-    if (P.pos_fd >= 0 && pthread_create(&P.pos_thread, NULL, pos_reader_thread, NULL) != 0) {
-        std::print(stderr, "pose: facecam thread failed to start\n");
-        close(P.pos_fd); P.pos_fd = -1;
     }
     return 0;
 }
@@ -562,7 +407,6 @@ void pose_stop(void) {
     if (!P.running) return;
     P.running = false;
     pthread_join(P.thread, NULL);
-    if (P.pos_fd >= 0) { pthread_join(P.pos_thread, NULL); close(P.pos_fd); P.pos_fd = -1; }
     if (P.fd >= 0) { close(P.fd); P.fd = -1; }
 }
 
@@ -583,11 +427,23 @@ quat pose_predicted(float horizon_s) {
     quat smoothed = P.smoothed, ref = P.reference, dvel = P.dvel;
     float sdt = P.sample_dt;
     bool have = P.have_signal;
+    uint64_t last_us = P.last_sample_us;
     pthread_mutex_unlock(&P.lock);
     if (!have) return q_identity();
+    /* Render (120 fps) outruns the IMU, and arrival is bursty, so a FIXED-horizon prediction
+     * returns the SAME value between samples -> the view steps (the residual "not smooth while
+     * moving"). Add the wall-time elapsed since the last sample to the horizon so the pose keeps
+     * GLIDING along its angular velocity between updates, then snaps to truth when one lands. */
+    float elapsed = last_us ? (float)(now_us() - last_us) / 1e6f : 0.0f;
+    if (elapsed < 0.0f) elapsed = 0.0f;
+    if (elapsed > 0.05f) elapsed = 0.05f;       /* cap a stale gap so a stall can't fling */
+    horizon_s += elapsed;
     if (horizon_s > 1e-4f && sdt > 1e-5f) {
         float scale = horizon_s / sdt;
-        if (scale > 8.0f) scale = 8.0f;             /* cap forward extrapolation */
+        /* Cap forward extrapolation. With a correct sample_dt (~8ms) and an 18ms horizon
+         * this sits ~2.25, so the cap never bites in normal use; it only bounds a transient
+         * sample_dt dip (e.g. during the 1s rate-window warmup) so the view can't fling. */
+        if (scale > 3.0f) scale = 3.0f;
         quat dq = q_scale_angle(dvel, scale);       /* per-sample step -> horizon */
         smoothed = q_mul(dq, smoothed);             /* world-frame left-multiply  */
     }
@@ -599,62 +455,8 @@ void pose_recenter(void) {
     P.want_recenter = true;
     /* apply immediately against the most recent raw too */
     P.reference = recenter_ref(P.raw);
-    /* zero the facecam lean too: current position becomes the new rest origin */
-    if (P.pos_have) P.pos_ref = P.pos_smoothed;
     P.recenter_gen++;   /* signal render to reseed its reading-deadband (no slew) */
     pthread_mutex_unlock(&P.lock);
-}
-
-static inline float clampf(float v, float lim) {
-    return v > lim ? lim : (v < -lim ? -lim : v);
-}
-
-/* World-axis eye-offset (metres) from the rest reference. x/y already in mirage world
- * convention from the bridge; z is camera->head distance (smaller = leaned in), so
- * (smoothed - ref) goes negative on a lean-in -> eye moves -Z toward the wall. Each axis
- * is forward-predicted along its One-Euro velocity (oe.*.dxhat) to offset the camera's
- * latency, with the lead capped so a noisy velocity can't fling the view. {0,0,0} until a
- * sample arrives. */
-vec3 pose_position(float horizon_s) {
-    pthread_mutex_lock(&P.lock);
-    vec3 out = {0,0,0};
-    float h = horizon_s > 0.0f ? horizon_s : 0.0f;
-    const float PCAP = 0.04f;   /* max predicted lead per axis (m) */
-    const float LIM  = 0.40f;   /* max total offset (anti-fling)   */
-    /* Prefer the fused (visual-inertial) estimate: it carries the camera's absolute
-     * position but with the IMU's low latency. Use it only while accel is actually
-     * arriving (else fall back to the camera-only One-Euro path). fpos shares the
-     * camera's absolute frame (it's continuously corrected toward pos_smoothed), so the
-     * same recenter reference applies to both. */
-    bool fusing = P.fuse_have && P.cfg.facecam_fusion && P.pos_ref_set &&
-                  (now_us() - P.accel_last_us) < 200000ull;
-    if (fusing) {
-        float px = P.fpos.x + clampf(P.fvel.x * h, PCAP);   /* real velocity lead */
-        float py = P.fpos.y + clampf(P.fvel.y * h, PCAP);
-        float pz = P.fpos.z + clampf(P.fvel.z * h, PCAP);
-        out.x = clampf(px - P.pos_ref.x, LIM);
-        out.y = clampf(py - P.pos_ref.y, LIM);
-        out.z = clampf(pz - P.pos_ref.z, LIM);
-    } else if (P.pos_have && P.pos_ref_set) {
-        float px = P.pos_smoothed.x + clampf(P.oe_px.dxhat * h, PCAP);
-        float py = P.pos_smoothed.y + clampf(P.oe_py.dxhat * h, PCAP);
-        float pz = P.pos_smoothed.z + clampf(P.oe_pz.dxhat * h, PCAP);
-        out.x = clampf(px - P.pos_ref.x, LIM);
-        out.y = clampf(py - P.pos_ref.y, LIM);
-        out.z = clampf(pz - P.pos_ref.z, LIM);
-    }
-    pthread_mutex_unlock(&P.lock);
-    return out;
-}
-
-/* Fresh position sample within ~0.5 s? Lets render fall back to the neck model when the
- * webcam drops out (camera busy, head out of frame, bridge down) instead of freezing on
- * a stale lean. */
-bool pose_position_active(void) {
-    pthread_mutex_lock(&P.lock);
-    bool a = P.pos_have && (now_us() - P.pos_last_us) < 500000ull;
-    pthread_mutex_unlock(&P.lock);
-    return a;
 }
 
 uint32_t pose_recenter_gen(void) {

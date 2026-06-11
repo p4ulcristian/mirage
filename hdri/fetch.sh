@@ -13,10 +13,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
 # --- Space (NASA, EXR) ---
-URL="https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_4k.exr"
-[ -f starmap_2020_4k.exr ] || { echo "downloading starmap"; curl -fL -o starmap_2020_4k.exr "$URL"; }
-python3 exr2hdr.py starmap_2020_4k.exr starmap_2020_4k.hdr
-echo "done -> hdri/starmap_2020_4k.hdr"
+# 8K (8192x4096): ~11 px/deg -> ~22 px/deg, matching the glasses better than 4K.
+# The dome uploads as GL_RGB8 so bit depth is moot; resolution is the win. 16K also
+# exists at this path but hits the Apple-GPU GL_MAX_TEXTURE_SIZE ceiling (16384).
+URL="https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_8k.exr"
+[ -f starmap_2020_8k.exr ] || { echo "downloading starmap"; curl -fL -o starmap_2020_8k.exr "$URL"; }
+python3 exr2hdr.py starmap_2020_8k.exr starmap_2020_8k.hdr
+echo "done -> hdri/starmap_2020_8k.hdr"
 
 # --- Nature (Poly Haven, RLE .hdr) ---
 # Cloudflare gates default curl UAs and intermittently 404s heavy GETs, so use a

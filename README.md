@@ -120,6 +120,43 @@ Check the stream without the renderer:
 ./mirage-posedump              # prints live quat + yaw/pitch/roll
 ```
 
+### VITURE Beast
+
+`viture-bridge` drives the **VITURE Beast** (`35ca:1201`). The Beast is a "Gen2"
+device: its control + IMU ride a CDC-ACM USB channel, spoken by VITURE's **v2.0.0
+SDK** (`libglasses.so`). That SDK has a native **aarch64** build (so it runs on the
+M2/Asahi box) but is only distributed as a binary inside
+[wheaney/XRLinuxDriver](https://github.com/wheaney/XRLinuxDriver) — there's no public
+download. The bridge `dlopen()`s it, pulls **raw gyro/accel/mag**, fuses with the
+same Madgwick AHRS as the RayNeo path (`rayneo.c`), and emits the **same** quaternion
+UDP packet `pose.c` reads — so mirage itself is untouched.
+
+Three non-obvious things the bridge handles for you (all need root):
+1. **`cdc_acm` owns the Beast's control interfaces** — it unbinds it so the SDK's
+   libusb can claim them.
+2. The Beast's **native on-glasses 3DOF must be disabled** (`set..native_dof(mode,0)`)
+   or it won't stream raw IMU.
+3. `open_imu(POSE)` is rejected by the Beast; **`RAW`** works, so we fuse ourselves.
+
+```bash
+make viture                                  # builds viture-bridge (no SDK needed to BUILD)
+sudo cp 99-viture.rules /etc/udev/rules.d/   # then REPLUG the glasses
+# get the v2.0.0 aarch64 SDK (lib/aarch64/viture/ from wheaney/XRLinuxDriver:
+#   libglasses.so + libcarina_vio.so) and drop it in ./viture-sdk/ (gitignored)
+bash scripts/viture-bridge.sh                # runs under sudo; streams to :4242
+```
+
+- **Display** works on any VITURE out of the box (USB-C DP monitor). The Beast panel
+  is `1920×1200` per eye @ 120 Hz, so set the `DP-1` mode accordingly in
+  `scripts/glasses.sh` (RayNeo uses `1920x1080`).
+- **Axis tuning:** mirage's device→world remap was tuned to the RayNeo mount, so the
+  Beast's sensor frame may come out swapped. Retune at runtime with `--qmap` (permute/
+  negate the quaternion, e.g. `viture-bridge --qmap w,-y,-z,-x -v`) until head motion
+  maps 1:1, then bake the winner into the default in `src/viture_bridge.c`. `--mag`
+  enables 9-axis (absolute heading); `--gyro-scale`/`--beta` tune the fusion.
+- **One/Pro/Luma** also work through this SDK (Gen1/Gen2); only the Beast needs the
+  native-3DOF-off step.
+
 ## Configuration
 
 There are no flags or environment variables — the single blessed configuration is in
@@ -139,6 +176,7 @@ filter, reading deadband, sharpening, and the head-tracking gains. Edit and rebu
 | `src/config.c` | the one hardcoded scene/tracking configuration |
 | `src/math3d.h` | vec / quat / mat4 (no glm dependency) |
 | `src/rayneo*.c`, `src/magcal.c` | the RayNeo IMU bridge (Madgwick AHRS, mag calibration) |
+| `src/viture_bridge.c` | the VITURE bridge — native hidraw protocol → quat UDP |
 | `scripts/` | start-mirage, glasses, bridge, setup/teardown-displays, sweep, keybinds, stop |
 | `protocol/` | vendored wlroots/Hyprland protocol XML |
 

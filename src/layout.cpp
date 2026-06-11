@@ -163,6 +163,16 @@ static void layout_place_base(const struct mirage *m, int i, float *yaw_out,
  * rotate together; the cursor's own direction stays in fixed world space. */
 void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out,
                   float *arc_out) {
+    /* the follow screen is head-locked: its yaw is m->follow_yaw (lazily eased toward
+     * the gaze in render), it carries its own lift, and it does NOT spin with the wall
+     * (no world_yaw). render, cursor picking and the #N label all route through here, so
+     * they track it together. */
+    if (i == m->cfg.follow_screen) {
+        *yaw_out  = m->follow_yaw;
+        *lift_out = isfinite(m->cfg.screen_lift_m[i]) ? m->cfg.screen_lift_m[i] : 0.8f;
+        *arc_out  = scr_arc(m, i);
+        return;
+    }
     layout_place_base(m, i, yaw_out, lift_out, arc_out);
     *yaw_out += m->world_yaw;
 }
@@ -201,6 +211,9 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
     layout_place(m, i, &yaw, &lift, &arc);
     mat4 R = m4_from_quat(q_from_euler_ypr(yaw, 0, 0));
     mat4 T = m4_translate(v3(0.0f, lift, 0.0f));
+    /* The wall is fixed; vertical look-around is a dolly of the EYE along the cylinder
+     * axis (m->world_lift), applied to eye_world in render.cpp - so nothing happens to
+     * the per-screen placement here. layout_pick mirrors it via the cursor height. */
     return m4_mul(T, R);
 }
 
@@ -210,7 +223,9 @@ void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch
     float y, lift, arc;
     layout_place(m, i, &y, &lift, &arc);
     *yaw   = y;
-    *pitch = atan2f(lift, m->cfg.screen_distance_m);
+    /* eye sits world_lift above the axis, so the pitch to a screen at height `lift` is
+     * measured from the lifted eye - keeps shake-to-gaze centred after a vertical dolly. */
+    *pitch = atan2f(lift - m->world_lift, m->cfg.screen_distance_m);
 }
 
 /* Pointer pick - the input twin of layout_model_matrix. Screens sit on one cylinder
@@ -235,7 +250,10 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
     if (inside_out) *inside_out = false;
     if (n <= 0) return -1;
     float d   = c->screen_distance_m;
-    float hgt = d * tanf(cpitch);
+    /* A look ray from the (vertically dollied) eye at pitch cpitch hits the cylinder of
+     * radius d at world height world_lift + d*tan(cpitch); screens are placed at world
+     * height `lift`, so add the eye lift here to keep clicks under the cursor. */
+    float hgt = m->world_lift + d * tanf(cpitch);
 
     /* 1) direct hit: deepest-inside screen wins (no first-index bias on overlaps). */
     int best = -1; float best_margin = -1e30f, bu = 0, bv = 0;
@@ -269,124 +287,6 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
     return best;
 }
 
-/* Sensitivity slider geometry. Hangs the slider row under the centre screen, BELOW
- * the FPS/help plaque stack (we recompute that stack's metres here so the row
- * lands just under it). The centre screen is the one nearest dead-ahead - smallest
- * |yaw|, lowest lift on a tie - exactly as render picks it for the plaques. The
- * handle's x is the current gain lerped across the track; render draws there and
- * grab maps the clicked cursor back to a gain with the same numbers. */
-bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
-    int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
-    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
-    if (n <= 0) return false;
-
-    /* centre screen: smallest |yaw|, then lowest lift (matches render.cpp) */
-    int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f, yaw_c = 0, lift_c = 0;
-    for (int k = 0; k < n; k++) {
-        float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
-        float ay = fabsf(yw);
-        if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
-            best_yaw = ay; best_lift = lf; ci = k; yaw_c = yw; lift_c = lf;
-        }
-    }
-    if (ci < 0) return false;
-
-    float d  = m->cfg.screen_distance_m;
-    float hh = screen_height(m, ci) * 0.5f;       /* centre screen half-height (m) */
-
-    /* mirror the plaque stack in render.cpp to find where the help block bottoms
-     * out, then drop the slider row a little below it. */
-    const float fullH  = 0.11f;
-    float yc_fps  = -hh - 0.05f - fullH * 0.5f;   /* FPS plaque tops the stack */
-    float fps_bot = yc_fps - fullH * 0.5f;
-    const float blockH = 0.26f;
-    float yc_help  = fps_bot - 0.03f - blockH * 0.5f;
-    float help_bot = yc_help - blockH * 0.5f;
-
-    out->ci      = ci;
-    out->d       = d;
-    out->yaw_c   = yaw_c;
-    out->lift_c  = lift_c;
-    out->handle_h = 0.10f;
-    out->handle_w = 0.03f;
-    out->track_h  = 0.016f;
-    out->row_y    = help_bot - 0.04f - out->handle_h * 0.5f;
-    out->track_x0 = -0.23f;
-    out->track_x1 =  0.23f;
-
-    float g = m->cfg.yaw_gain;                     /* linked: yaw drives the handle */
-    if (g < SENS_GAIN_MIN) g = SENS_GAIN_MIN;
-    if (g > SENS_GAIN_MAX) g = SENS_GAIN_MAX;
-    out->gain = g;
-    float frac = (g - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
-    out->handle_x = out->track_x0 + frac * (out->track_x1 - out->track_x0);
-
-    /* DEFAULT button: a box to the right of the track */
-    float def_cx = out->track_x1 + 0.16f, def_hw = 0.13f, def_hh = 0.06f;
-    out->def_x0 = def_cx - def_hw; out->def_x1 = def_cx + def_hw;
-    out->def_y0 = out->row_y - def_hh; out->def_y1 = out->row_y + def_hh;
-
-    /* layout switcher: one clickable box per named layout, spread across the track
-     * width in a row a little below the slider handle. Same compute-once contract:
-     * render draws these rects and grab hit-tests them. */
-    int nl = m->layouts.n;
-    out->n_layout      = nl;
-    out->active_layout = m->layouts.active;
-    if (nl > 0) {
-        const float bh = 0.07f, bgap = 0.02f;
-        out->lay_y1 = out->row_y - out->handle_h * 0.5f - 0.06f;   /* top edge   */
-        out->lay_y0 = out->lay_y1 - bh;                            /* bottom edge */
-        float span = out->track_x1 - out->track_x0;
-        float bw = (span - bgap * (float)(nl - 1)) / (float)nl;
-        if (bw < 0.04f) bw = 0.04f;
-        out->lay_w = bw;
-        for (int k = 0; k < nl; k++)
-            out->lay_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
-    }
-
-    /* environment switcher: a second box row below the layout row (or directly under
-     * the slider if there are no layouts), same width/spacing contract. */
-    int ne = MIRAGE_ENV_COUNT;
-    if (ne > MIRAGE_MAX_ENVS) ne = MIRAGE_MAX_ENVS;
-    out->n_env      = ne;
-    out->active_env = m->active_env;
-    if (ne > 0) {
-        const float bh = 0.07f, bgap = 0.02f;
-        float top = (nl > 0) ? out->lay_y0
-                             : (out->row_y - out->handle_h * 0.5f - 0.06f);
-        out->env_y1 = top - 0.03f;                  /* gap below the layout row */
-        out->env_y0 = out->env_y1 - bh;
-        float span = out->track_x1 - out->track_x0;
-        float bw = (span - bgap * (float)(ne - 1)) / (float)ne;
-        if (bw < 0.04f) bw = 0.04f;
-        out->env_w = bw;
-        for (int k = 0; k < ne; k++)
-            out->env_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
-    }
-
-    /* environment brightness slider: a thin slider one row below the env tiles, the
-     * handle position set from m->env_brightness. Same track span as the sens slider. */
-    out->bri_track_h  = 0.012f;
-    out->bri_handle_w = 0.026f;
-    out->bri_handle_h = 0.05f;
-    out->bri_x0 = out->track_x0;
-    out->bri_x1 = out->track_x1;
-    float bri_top = (ne > 0) ? out->env_y0
-                  : (nl > 0) ? out->lay_y0
-                             : (out->row_y - out->handle_h * 0.5f - 0.06f);
-    out->bri_row_y = bri_top - 0.04f - out->bri_handle_h * 0.5f;
-    float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
-    bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
-    out->bri_handle_x = out->bri_x0 + bf * (out->bri_x1 - out->bri_x0);
-
-    /* flat/curved toggle: a single button spanning the track, one row below the
-     * brightness slider. Label/highlight reflect the current geometry; a click flips
-     * it (grab.cpp). */
-    const float geo_h = 0.06f;
-    out->geo_x0 = out->track_x0;
-    out->geo_x1 = out->track_x1;
-    out->geo_y1 = out->bri_row_y - out->bri_handle_h * 0.5f - 0.04f;
-    out->geo_y0 = out->geo_y1 - geo_h;
-    out->geo_flat = (m->cfg.geometry == GEOM_FLAT);
-    return true;
-}
+/* sens_panel_compute now lives in render.cpp: it returns the snapshot of the
+ * last Clay HUD layout pass (src/render.cpp, hud_render). grab.c hit-tests it
+ * exactly as before - the geometry is just sourced from Clay now. */

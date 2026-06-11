@@ -5,7 +5,7 @@ build/
 mirage
 mirage-posedump
 rayneo-bridge
-facecam-bridge
+viture-bridge
 # logs / runtime
 *.log
 *.pid
@@ -17,3 +17,12 @@ facecam-bridge
 hdri/*.exr
 hdri/*.hdr
 hdri/*.jpg
+viture-sdk/
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# VIO harness binary + its generated config
+viture-vio
+viture-vio-config/

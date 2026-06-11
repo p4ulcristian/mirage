@@ -1,0 +1,20 @@
+# VITURE XR glasses (Beast and others) - let the head-tracking bridge open the
+# IMU hidraw node without root. Mirrors 99-rayneo.rules.
+#
+# Install:  sudo cp 99-viture.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+# then REPLUG the glasses (the rule applies on the next enumerate).
+#
+# VITURE Beast enumerates as 35ca:1201; the mics are 35ca:1102. Match the whole
+# VITURE vendor so future models work too.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35ca", MODE="0660", GROUP="input", TAG+="uaccess"
+# Beast head tracking goes through VITURE's SDK over libusb, which needs access to
+# the raw USB device node (/dev/bus/usb/...). Grant the logged-in user via uaccess.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="35ca", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# cdc_acm claims the Beast's two control interfaces (1.0/1.1, the ttyACM pair) on
+# every USB enumerate - but the SDK needs them via libusb. The bridge unbinds
+# cdc_acm at startup, yet the Beast RE-ENUMERATES its USB ~20s into a session (the
+# DP display-mode/scanout change cycles the combined DP+USB link), and cdc_acm
+# re-grabs the interfaces AFTER that one-shot detach - which wedges the bridge on
+# "no IMU yet" forever. Kick cdc_acm off the moment it binds, so the order of
+# bridge-start vs (re-)enumerate no longer matters and libusb can always claim.
+ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="cdc_acm", ATTRS{idVendor}=="35ca", ATTRS{idProduct}=="1201", RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/cdc_acm/unbind'"

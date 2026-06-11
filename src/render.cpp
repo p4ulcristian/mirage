@@ -1,7 +1,10 @@
 #include "mirage.h"
 #include "pose.h"
+#include "pet.h"
 #include "handle.hpp"
 #include "entity.hpp"
+#include "camera.h"
+#include "worldvio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,9 +12,17 @@
 #include <ctype.h>
 #include <vector>
 #include <print>
+#include <string>
+#include <unordered_map>
 
 #include "stb_truetype.h"
+#include "clay.h"
 #include <wayland-egl.h>
+
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
 
 /* profiling timing helper: milliseconds between two monotonic samples. */
 static double prof_ms(struct timespec a, struct timespec b) {
@@ -43,8 +54,23 @@ static const char *FRAG_SRC =
     "uniform vec3 uColor;\n"
     "uniform highp vec2 uTexel;\n"
     "uniform float uSharpen;\n"
+    "uniform float uOpacity;\n"                  /* screen fade (1.0 = opaque) */
+    "uniform float uRadius;\n"                   /* corner radius in screen-height fractions; 0 = square */
+    "uniform float uAspect;\n"                   /* screen width/height, so the rounding stays circular */
     "void main() {\n"
-    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, 1.0); return; }\n"
+    "  float a = uOpacity;\n"
+    /* Rounded corners: an SDF rounded-box in a centred space where height = 1 and
+     * width = aspect, so the radius is the same in metres on both axes. Fade (and
+     * discard) the bit outside the box so the dome shows through the cut corners. */
+    "  if (uRadius > 0.0) {\n"
+    "    vec2 p = (vUV - 0.5) * vec2(uAspect, 1.0);\n"
+    "    vec2 b = vec2(0.5 * uAspect, 0.5) - uRadius;\n"
+    "    vec2 q = abs(p) - b;\n"
+    "    float dist = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - uRadius;\n"
+    "    a *= smoothstep(0.004, -0.004, dist);\n"
+    "    if (a <= 0.0) discard;\n"
+    "  }\n"
+    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, a); return; }\n"
     "  vec3 e = texture2D(uTex, vUV).rgb;\n"
     "  if (uSharpen > 0.0) {\n"
     "    vec3 b = texture2D(uTex, vUV + vec2(0.0, -uTexel.y)).rgb;\n"
@@ -54,7 +80,7 @@ static const char *FRAG_SRC =
     "    vec3 s = e + (e - (b + d + f + h) * 0.25) * uSharpen;\n"
     "    e = clamp(s, min(min(b,d), min(f,h)), max(max(b,d), max(f,h)));\n"
     "  }\n"
-    "  gl_FragColor = vec4(e, 1.0);\n"
+    "  gl_FragColor = vec4(e, a);\n"
     "}\n";
 
 /* HDRI environment dome: a sphere of world directions around the eye. The vertex
@@ -91,7 +117,7 @@ static const char *DOME_FRAG =
 static struct {
     own::GlProgram prog;
     GLint  aPos, aUV;
-    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
+    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen, uOpacity, uRadius, uAspect;
     own::GlBuffer vbo;
 
     /* HDRI environment dome */
@@ -101,38 +127,30 @@ static struct {
     int    dome_verts;
     GLint  dMVP, dExposure, dIntensity, dBlack, dSat, dTex;
 
-    /* flat/curved toggle captions (one each, baked once at init; the live one is
-     * shown on the toggle button below the brightness slider). */
-    own::GlTexture label_flat, label_curved;
-    int    flat_w, flat_h, curved_w, curved_h;
-    /* live FPS plaque: re-baked only when the integer value changes */
-    own::GlTexture label_fps;
-    int    fps_w, fps_h, fps_val;
-    /* static multi-line shortcut cheat-sheet, baked once at init */
-    own::GlTexture label_help;
-    int    help_w, help_h;
-    /* sensitivity slider: static "SENS"/"DEFAULT" captions baked once, plus a live
-     * value plaque ("3.0x") re-baked only when the gain changes (like the FPS one). */
-    own::GlTexture label_sens_cap, label_default, label_sens;
-    int    senscap_w, senscap_h, default_w, default_h, sens_w, sens_h, sens_val;
-    own::GlTexture label_bright;            /* "BRIGHT" caption for the env brightness slider */
-    int    bright_w, bright_h;
-    /* layout-switcher button captions (one per named layout), baked once at init */
-    own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
-    int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
-    /* environment-switcher button captions (one per MIRAGE_ENVS entry), baked once */
-    own::GlTexture label_env[MIRAGE_MAX_ENVS];
-    int    env_w[MIRAGE_MAX_ENVS], env_h[MIRAGE_MAX_ENVS];
+    /* The control HUD's captions/plaques (FPS, sliders, switchers, toggles) are
+     * laid out and baked on demand by the Clay path (hud_render -> plaque_for
+     * cache below), so no per-caption GlTexture state lives in R any more. */
     /* 3D pointer: a white arrow on black, drawn additively as a billboard at the
      * cursor's wall direction (m->cursor_yaw/pitch). Black adds nothing on the
      * additive optics, so only the arrow glows - over screens and in the gaps. */
     own::GlTexture cursor_tex;
     int    cursor_w, cursor_h;
+    /* camera passthrough: the decoded camera frame as a texture (re-uploaded only on a
+     * new frame), plus the toggle-button captions. cam_alloc_w/h track the texture's
+     * allocated size so we glTexImage2D once and glTexSubImage2D after. */
+    own::GlTexture cam_tex;
+    int      cam_alloc_w, cam_alloc_h;
+    uint64_t cam_seq;
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
  * space alongside the displays. First slice of the scene; Model/Webapp join later. */
 static std::vector<ent::Banner> g_banners;
+
+/* Per-screen "#N" labels: one Banner centred above each screen. Rebuilt when the
+ * screen count changes (layout switch); repositioned live every frame so they spin
+ * with the wall and hold their place above the screen on a dolly. */
+static std::vector<ent::Banner> g_screen_labels;
 
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
 static const GLfloat QUAD[] = {
@@ -165,24 +183,117 @@ static GLuint compile(GLenum type, const char *src) {
  * back to compositing, capping us below the panel's refresh). The glasses optics
  * are additive, so we never needed per-pixel alpha anyway - black reads as
  * transparent regardless. */
-static EGLConfig choose_config(EGLDisplay dpy) {
+static int g_msaa_samples = 0;   /* samples actually granted (logged at init) */
+
+/* Try for a 0-alpha (true XRGB8888) config at exactly `want` samples. Returns NULL
+ * if none qualifies; at want==0 we relax the 0-alpha requirement as a last resort. */
+static EGLConfig pick_cfg(EGLDisplay dpy, int want, int *got) {
     const EGLint attrs[] = {
         EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0,
+        EGL_SAMPLE_BUFFERS,  want > 0 ? 1 : 0,
+        EGL_SAMPLES,         want,
         EGL_NONE
     };
-    EGLConfig cfgs[32];
+    EGLConfig cfgs[64];
     EGLint n = 0;
-    if (!eglChooseConfig(dpy, attrs, cfgs, 32, &n) || n < 1) return NULL;
-    /* eglChooseConfig's ALPHA_SIZE is a minimum, so it can still hand back an
-     * alpha config; pick one with EXACTLY 0 alpha bits (true XRGB8888). */
+    if (!eglChooseConfig(dpy, attrs, cfgs, 64, &n) || n < 1) return NULL;
+    /* eglChooseConfig's ALPHA_SIZE/SAMPLES are minimums, so it can still hand back
+     * an alpha or under-sampled config; pick one with EXACTLY 0 alpha bits and at
+     * least the samples we asked for. */
     for (EGLint i = 0; i < n; i++) {
-        EGLint a = 8;
+        EGLint a = 8, sm = 0;
         eglGetConfigAttrib(dpy, cfgs[i], EGL_ALPHA_SIZE, &a);
-        if (a == 0) return cfgs[i];
+        eglGetConfigAttrib(dpy, cfgs[i], EGL_SAMPLES,    &sm);
+        if (a == 0 && sm >= want) { if (got) *got = sm; return cfgs[i]; }
     }
-    return cfgs[0];
+    if (want == 0) { if (got) *got = 0; return cfgs[0]; }   /* relax alpha only at 0x */
+    return NULL;
+}
+
+/* A multisampled WINDOW surface: EGL resolves it to a single-sample XRGB8888 buffer
+ * on swap, so the compositor still gets the opaque buffer it direct-scans-out (the
+ * resolve target is presentable) while screen-edge geometry gets MSAA for ~free on
+ * the tiled GPU. Falls back to 0x if the GPU won't give a multisampled 0-alpha config. */
+static EGLConfig choose_config(EGLDisplay dpy, int samples) {
+    EGLConfig c = NULL; int got = 0;
+    if (samples > 1) c = pick_cfg(dpy, samples, &got);
+    if (!c)          c = pick_cfg(dpy, 0, &got);
+    g_msaa_samples = got;
+    return c;
+}
+
+/* ---- screen mip chain --------------------------------------------------------
+ * The captured frame lives in a dmabuf imported as an EGLImage-external texture:
+ * immutable, single level, NO mip chain - so deep minification (the desktop squeezed
+ * onto the arc) can only sample the base level and sparkles. We mirror it into a
+ * normal texture WITH a mip chain and draw that instead: trilinear minification
+ * averages the right footprint, killing the shimmer the base-level taps + aniso
+ * can't fully reach. The mirror is a GPU blit (sample external -> render into the
+ * mip texture via an FBO) + glGenerateMipmap, done only when a new frame lands. */
+static GLuint g_mip_fbo  = 0;       /* shared FBO for the external -> mip blit      */
+static bool   g_npot     = false;   /* GLES2 needs this for mipmapped NPOT textures */
+static float  g_aniso_r  = 1.0f;    /* max anisotropy (re-queried render-side)      */
+
+/* Mirror s->tex (EGLImage external, just refreshed) into s->mip_tex and regenerate
+ * its mip chain. Self-contained: binds/restores its own FBO + viewport + GL state.
+ * No-op (leaving the draw to fall back to s->tex) if mipmapped NPOT isn't supported
+ * or the FBO won't complete. uMVP/uTexel/program are set fresh by the caller's draw,
+ * so we don't bother restoring them. */
+static void screen_update_mip(struct mirage *m, screen_t *s) {
+    if (!g_npot || s->width <= 0 || s->height <= 0) return;
+    if (!s->mip_tex) {
+        glGenTextures(1, &s->mip_tex);
+        glBindTexture(GL_TEXTURE_2D, s->mip_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s->width, s->height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (g_aniso_r > 1.0f)
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, g_aniso_r);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_mip_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->mip_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        /* this GPU won't render into the mirror; drop it and stay on the base level */
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteTextures(1, &s->mip_tex); s->mip_tex = 0;
+        g_npot = false;                 /* don't keep retrying every frame */
+        std::print(stderr, "render: mip FBO incomplete; mipmaps disabled\n");
+        return;
+    }
+
+    glViewport(0, 0, s->width, s->height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s->tex);
+    glUniform1i(R.uTex, 0);
+    glUniform1f(R.uHasTex, 1.0f);
+    glUniform1f(R.uSharpen, 0.0f);                 /* straight copy; sharpen on final draw */
+    glUniform1f(R.uOpacity, 1.0f);
+    /* Render-to-texture is y-flipped vs sampling, so flip here: the mirror then holds
+     * the SAME texel layout as s->tex and the final draw keeps using s->y_invert. */
+    glUniform1f(R.uYFlip, 1.0f);
+    mat4 fill = m4_scale(v3(2.0f, 2.0f, 1.0f));     /* QUAD [-0.5,0.5] -> clip [-1,1] */
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, fill.m);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, s->mip_tex);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glEnable(GL_DEPTH_TEST);
+    (void)m;
 }
 
 /* Build a curved screen: a vertical triangle strip swept along an arc of a
@@ -320,17 +431,25 @@ static int hud_plaque_h(int lines) {
 
 /* Rasterise `str` (may contain '\n') into a fresh RGBA texture: fg glyphs over a
  * dark plaque. Monospace, so stacked lines column-align. Stores dims in *ow,*oh. */
-static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, int *oh) {
+static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, int *oh, float ss = 1.0f) {
     const HudFont &f = hud_font();
+    /* ss>1 supersamples the bake: glyphs rasterise at ss*HUD_PX so a banner hung
+     * large on the wall stays crisp instead of magnifying a 44px cell ~3x. Every
+     * metric scales linearly with pixel height, so ss=1 is byte-identical to before. */
+    int   pad    = (int)(HUD_PAD    * ss + 0.5f);
+    int   lgap   = (int)(HUD_LGAP   * ss + 0.5f);
+    int   adv    = f.ok ? (int)(f.advance_px * ss + 0.5f) : 1;
+    int   line_h = (int)(f.line_h    * ss + 0.5f);
+    int   ascent = (int)(f.ascent_px * ss + 0.5f);
+    float gscale = f.scale * ss;
     int lines = 1, cur = 0, maxlen = 0;
     for (const char *p = str; *p; p++) {
         if (*p == '\n') { if (cur > maxlen) maxlen = cur; cur = 0; lines++; }
         else cur++;
     }
     if (cur > maxlen) maxlen = cur;
-    int adv = f.ok ? f.advance_px : 1;
-    int tw = HUD_PAD*2 + maxlen*adv;
-    int th = hud_plaque_h(lines);
+    int tw = pad*2 + maxlen*adv;
+    int th = pad*2 + lines*line_h + (lines > 1 ? lines-1 : 0)*lgap;
     if (tw < 1) tw = 1;
     if (th < 1) th = 1;
     std::vector<unsigned char> px((size_t)tw*th*4);
@@ -344,10 +463,10 @@ static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, in
         int line = 0, col = 0;
         for (const char *p = str; *p; p++) {
             if (*p == '\n') { line++; col = 0; continue; }
-            int baseline = HUD_PAD + line*(f.line_h + HUD_LGAP) + f.ascent_px;
-            int penx     = HUD_PAD + col*adv;
+            int baseline = pad + line*(line_h + lgap) + ascent;
+            int penx     = pad + col*adv;
             int gw, gh, gx, gy;
-            unsigned char *bmp = stbtt_GetCodepointBitmap(&f.info, f.scale, f.scale,
+            unsigned char *bmp = stbtt_GetCodepointBitmap(&f.info, gscale, gscale,
                                      (unsigned char)*p, &gw, &gh, &gx, &gy);
             if (bmp) {
                 for (int yy = 0; yy < gh; yy++)
@@ -386,7 +505,7 @@ static void banner_refresh(ent::Banner &b, float d) {
     int k = b.key ? b.key() : 0;
     if (k == b.last_key && b.verts > 0) return;          /* content unchanged */
     b.last_key = k;
-    b.tex = bake_label(b.text ? b.text().c_str() : "", b.color, &b.tw, &b.th);
+    b.tex = bake_label(b.text ? b.text().c_str() : "", b.color, &b.tw, &b.th, 4.0f);
 
     float ang = b.arc * (float)M_PI/180.0f;
     float w   = d * ang;                                 /* on-wall width (arc len) */
@@ -432,29 +551,55 @@ static void banner_draw(const ent::Banner &b, const mat4 &vp) {
 /* The clock: the first Banner entity. Two lines (HH:MM:SS over an upper-cased
  * date), centred, warm amber, hung above the wall. Add more banners by pushing
  * more ent::Banner with their own text()/key()/placement. */
-static ent::Banner make_clock_banner(void) {
+/* A "#N" label for screen i: a narrow Banner, calm cyan to set it apart from the
+ * amber clock. Constant text -> baked once; placement is set live each frame. */
+static ent::Banner make_screen_label(int i) {
     ent::Banner b;
-    b.yaw = 0.0f; b.lift = 2.8f; b.arc = 30.0f;
-    b.color[0] = 0.96f; b.color[1] = 0.87f; b.color[2] = 0.62f;
-    b.text = [] {
-        time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
-        char l1[16], l2[16];
-        strftime(l1, sizeof l1, "%H:%M:%S", &lt);
-        strftime(l2, sizeof l2, "%a %b %d", &lt);
-        for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
-        std::string a = l1, c = l2;
-        size_t w = a.size() > c.size() ? a.size() : c.size();
-        auto pad = [&](const std::string &s) {
-            size_t l = (w - s.size()) / 2;
-            return std::string(l, ' ') + s + std::string(w - s.size() - l, ' ');
-        };
-        return pad(a) + "\n" + pad(c);
-    };
-    b.key = [] {
-        time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
-        return ((lt.tm_yday*24 + lt.tm_hour)*60 + lt.tm_min)*60 + lt.tm_sec;
-    };
+    b.arc = 2.6f;          /* on-wall width (deg) — small "#N" tag, not a banner */
+    b.color[0] = 0.55f; b.color[1] = 0.78f; b.color[2] = 0.90f;
+    std::string s = "#" + std::to_string(i + 1);
+    b.text = [s] { return s; };
     return b;
+}
+
+/* The clock: HH:MM:SS over an upper-cased date, centred, warm amber. It used to
+ * be a sky banner; now it's the HUD's top row (the glanceable default; click it to
+ * expand the controls). Text + per-second key shared by the bake below. */
+static const float CLOCK_COL[3] = { 0.96f, 0.87f, 0.62f };
+
+static std::string clock_text(void) {
+    time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
+    char l1[16], l2[16];
+    strftime(l1, sizeof l1, "%H:%M:%S", &lt);
+    strftime(l2, sizeof l2, "%a %b %d", &lt);
+    for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
+    std::string a = l1, c = l2;
+    size_t w = a.size() > c.size() ? a.size() : c.size();
+    auto pad = [&](const std::string &s) {
+        size_t l = (w - s.size()) / 2;
+        return std::string(l, ' ') + s + std::string(w - s.size() - l, ' ');
+    };
+    return pad(a) + "\n" + pad(c);
+}
+
+static int clock_key(void) {
+    time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
+    return ((lt.tm_yday*24 + lt.tm_hour)*60 + lt.tm_min)*60 + lt.tm_sec;
+}
+
+/* The clock plaque: re-baked in place once per second into a SINGLE texture (kept
+ * out of the unbounded plaque_for cache, so ticking seconds don't leak a texture
+ * per second). Returns the texture and its baked pixel size. */
+static GLuint clock_plaque(int *tw, int *th) {
+    static own::GlTexture tex;
+    static int last_key = -1, w = 0, h = 0;
+    int k = clock_key();
+    if (k != last_key || w == 0) {
+        last_key = k;
+        tex = bake_label(clock_text().c_str(), CLOCK_COL, &w, &h, 4.0f);
+    }
+    if (tw) *tw = w; if (th) *th = h;
+    return tex;
 }
 
 /* ---- HDRI environment dome ---------------------------------------------------
@@ -674,7 +819,7 @@ mirage_status render_init(struct mirage *m) {
         return std::unexpected("eglInitialize failed");
     if (!eglBindAPI(EGL_OPENGL_ES_API))
         return std::unexpected("eglBindAPI failed");
-    m->ecfg = choose_config(m->edpy);
+    m->ecfg = choose_config(m->edpy, m->cfg.msaa_samples);
     if (!m->ecfg) return std::unexpected("no matching EGL config");
 
     const EGLint ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
@@ -720,6 +865,12 @@ mirage_status render_init(struct mirage *m) {
     R.uTex    = glGetUniformLocation(R.prog, "uTex");
     R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
     R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
+    R.uOpacity = glGetUniformLocation(R.prog, "uOpacity");
+    R.uRadius  = glGetUniformLocation(R.prog, "uRadius");
+    R.uAspect  = glGetUniformLocation(R.prog, "uAspect");
+    glUseProgram(R.prog);
+    glUniform1f(R.uOpacity, 1.0f);   /* default opaque; only the screen draw lowers it */
+    glUniform1f(R.uRadius, 0.0f);    /* default square; only the screen draw rounds corners */
 
     R.vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
@@ -727,54 +878,36 @@ mirage_status render_init(struct mirage *m) {
 
     glEnable(GL_DEPTH_TEST);
 
+    /* mipmap support: GLES2 only allows a mip chain on non-power-of-two textures
+     * (every desktop resolution) with GL_OES_texture_npot. Without it, leave g_npot
+     * false so screen_update_mip is a no-op and we keep the base-level path. */
+    {
+        const char *ext = (const char*)glGetString(GL_EXTENSIONS);
+        g_npot = m->cfg.mipmap && ext && strstr(ext, "GL_OES_texture_npot");
+        if (ext && strstr(ext, "GL_EXT_texture_filter_anisotropic")) {
+            GLfloat amax = 1.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
+            g_aniso_r = amax;
+        }
+        if (g_npot) glGenFramebuffers(1, &g_mip_fbo);
+        std::print(stderr, "render: MSAA {}x, mipmaps {}\n",
+                g_msaa_samples, g_npot ? "on" : (m->cfg.mipmap ? "unsupported" : "off"));
+    }
+
     render_rebuild_meshes(m);
 
-    /* flat/curved toggle captions (one shown at a time on the toggle button) */
-    { const float gc[3] = {0.66f, 0.72f, 0.82f};
-      R.label_curved = bake_label("CURVED", gc, &R.curved_w, &R.curved_h);
-      R.label_flat   = bake_label("FLAT",   gc, &R.flat_w,   &R.flat_h); }
-    R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
+    worldvio_start(nullptr);   /* 6DoF-lite optical-flow estimator (fed by draw_passthrough) */
+    R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
-    /* static shortcut cheat-sheet, one multi-line plaque baked once */
-    { const float hc[3] = {0.66f, 0.72f, 0.82f};
-      R.label_help = bake_label(
-          "2X CMD: RECENTER\n"
-          "CMD+SCROLL: ZOOM\n"
-          "SUPER+SHIFT+Q: QUIT",
-          hc, &R.help_w, &R.help_h); }
-    /* sensitivity slider captions (static) + force a value bake on the first frame */
-    { const float cap[3] = {0.66f, 0.72f, 0.82f};
-      const float dft[3] = {0.80f, 0.86f, 0.95f};
-      R.label_sens_cap = bake_label("SENS", cap, &R.senscap_w, &R.senscap_h);
-      R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h);
-      const float bc[3] = {0.72f, 0.88f, 0.78f};   /* green, matches the env row */
-      R.label_bright   = bake_label("BRIGHT", bc, &R.bright_w, &R.bright_h); }
-    R.sens_val = -1;
-    /* layout-switcher button captions: one per loaded named layout, upper-cased to
-     * match the rest of the HUD. Layouts are parsed before render init, so the set
-     * is fixed here. */
-    { const float lc[3] = {0.72f, 0.80f, 0.92f};
-      for (int k = 0; k < m->layouts.n; k++) {
-          char nm[32];
-          snprintf(nm, sizeof nm, "%s", m->layouts.l[k].name);
-          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
-          R.label_layout[k] = bake_label(nm, lc, &R.layout_w[k], &R.layout_h[k]);
-      } }
-    /* environment-switcher captions: one per MIRAGE_ENVS entry (Space/Forest/...) */
-    { const float ec[3] = {0.72f, 0.88f, 0.78f};   /* faint green tint vs the layout row */
-      for (int k = 0; k < MIRAGE_ENV_COUNT; k++) {
-          char nm[16];
-          snprintf(nm, sizeof nm, "%s", MIRAGE_ENVS[k].name);
-          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
-          R.label_env[k] = bake_label(nm, ec, &R.env_w[k], &R.env_h[k]);
-      } }
+    /* The control HUD's captions/plaques are baked on demand by the Clay path
+     * (hud_render -> plaque_for cache), so there's nothing to pre-bake here. */
     /* banner entities: register them here; the frame loop (banner_refresh) bakes
-     * and builds each lazily and re-bakes when its key() changes. The clock is the
-     * first; push more ent::Banner for status lines etc. */
+     * and builds each lazily and re-bakes when its key() changes. The clock now
+     * lives in the HUD's top row (hud_build_tree); push ent::Banner for status lines. */
     g_banners.clear();
-    g_banners.push_back(make_clock_banner());
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
+    pet_init(m);    /* mischievous reactive pet (self-contained; pet.cpp) */
 
     std::print(stderr, "render: EGL {}.{}, GL_RENDERER={}\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
@@ -787,18 +920,370 @@ static const float PLACEHOLDER[][3] = {
     {0.10f, 0.18f, 0.30f}, {0.25f, 0.10f, 0.15f},
 };
 
-/* In-view sensitivity slider: a track + fill + draggable handle and a DEFAULT
- * button, hung under the centre screen with the FPS plaque. Geometry comes
- * from sens_panel_compute (the same numbers grab.c hit-tests), drawn in the centre
- * screen's local frame via layout_model_matrix. Additive + depth-off like the
- * cursor arrow, so it glows on the optics without punching a black hole. */
-static void draw_sens_panel(struct mirage *m, mat4 vp) {
-    if (calib_active(m)) return;            /* the wizard owns the view */
-    sens_panel sp;
-    if (!sens_panel_compute(m, &sp)) return;
+/* ============================================================================
+ * In-glasses control HUD - laid out by Clay (src/clay.h), drawn through the same
+ * additive quad/plaque path the rest of the HUD uses.
+ *
+ * Clay owns LAYOUT and TEXT: each frame we declare a flex column (FPS, the
+ * shortcut cheat-sheet, the sensitivity slider + DEFAULT, the layout and
+ * environment switchers, the brightness and transparency sliders, and the
+ * geometry/background/head-tilt toggles); Clay computes every box and we walk
+ * its render-command list - RECTANGLE -> additive fill, BORDER -> glow outline,
+ * TEXT -> baked TTF plaque. Value-driven bits Clay can't know (the slider fills
+ * and handles) are drawn afterwards from the read-back track boxes. Those boxes
+ * are snapshotted into a sens_panel (g_hud) so grab.cpp keeps hit-testing
+ * exactly as before: one layout, two consumers, zero duplicated coordinate math.
+ * Anchored under the centre screen at depth d in its layout_model_matrix frame,
+ * additive + depth-off like the cursor arrow, so it glows on the optics and pans
+ * with the wall.
+ * ========================================================================== */
 
-    mat4 base = layout_model_matrix(m, sp.ci);
+/* 1 Clay layout pixel == 1 mm in the panel plane: sizes below are the old metre
+ * figures x1000, so the panel keeps its familiar proportions. */
+static const float HUD_S = 0.001f;
 
+/* panel placement, refreshed per-frame before the layout pass */
+static mat4  g_hud_base, g_hud_vp;
+static float g_hud_d = 1.0f, g_hud_yTop = 0.0f;
+static const float g_hud_canvasW = 700.0f;   /* centring width (px); track is 460 */
+
+/* idle auto-collapse: after this long with no touch/hover the panel folds down to
+ * just the FPS strip (hovering it wakes it). Clock matches grab.c's now_ms. */
+static const uint32_t HUD_IDLE_MS = 6000;
+static uint32_t hud_now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/* the read-back snapshot grab.cpp hit-tests (filled after each layout pass) */
+static sens_panel g_hud;
+static bool       g_hud_valid = false;
+
+/* Clay px (top-left origin, y-down) -> panel-local metres (centre origin, y-up).
+ * The canvas is centred on x=0 and hangs down from g_hud_yTop. */
+static void clay2panel(float x, float y, float w, float h,
+                       float *cx, float *cy, float *cw, float *ch) {
+    *cw = w * HUD_S;
+    *ch = h * HUD_S;
+    *cx = (x + w * 0.5f - g_hud_canvasW * 0.5f) * HUD_S;
+    *cy = g_hud_yTop - (y + h * 0.5f) * HUD_S;
+}
+
+/* ---- baked-plaque cache: bake_label keyed by colour+text, baked once -------- */
+struct HudPlaque { own::GlTexture tex; int tw = 0, th = 0; };
+static std::unordered_map<std::string, HudPlaque> g_hud_plaques;
+
+static GLuint plaque_for(const char *ptr, int len, const float fg[3],
+                         int *tw, int *th) {
+    if (len < 0) len = 0;
+    std::string key(7, '\0');
+    snprintf(key.data(), 8, "%02x%02x%02x", (int)(fg[0]*255), (int)(fg[1]*255), (int)(fg[2]*255));
+    key.resize(6);
+    key.append(ptr, (size_t)len);
+    auto it = g_hud_plaques.find(key);
+    if (it == g_hud_plaques.end()) {
+        std::string s(ptr, (size_t)len);
+        HudPlaque p;
+        p.tex = bake_label(s.c_str(), fg, &p.tw, &p.th);
+        it = g_hud_plaques.emplace(std::move(key), std::move(p)).first;
+    }
+    *tw = it->second.tw; *th = it->second.th;
+    return it->second.tex;
+}
+
+/* ---- additive draw helpers (mirror the old solid()/outline()/label()) ------- */
+static void hud_solid(float cx, float cy, float w, float h, float r, float g, float b) {
+    mat4 local = m4_mul(m4_translate(v3(cx, cy, -g_hud_d)), m4_scale(v3(w, h, 1.0f)));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(g_hud_vp, m4_mul(g_hud_base, local)).m);
+    glUniform1f(R.uHasTex, 0.0f);
+    glUniform3f(R.uColor, r, g, b);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+static void hud_outline(float cx, float cy, float w, float h, float t,
+                        float r, float g, float b) {
+    hud_solid(cx, cy + h*0.5f, w, t, r, g, b);
+    hud_solid(cx, cy - h*0.5f, w, t, r, g, b);
+    hud_solid(cx - w*0.5f, cy, t, h, r, g, b);
+    hud_solid(cx + w*0.5f, cy, t, h, r, g, b);
+}
+static void hud_plaque(GLuint tex, float cx, float cy, float w, float h) {
+    if (!tex) return;
+    mat4 local = m4_mul(m4_translate(v3(cx, cy, -g_hud_d)), m4_scale(v3(w, h, 1.0f)));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(g_hud_vp, m4_mul(g_hud_base, local)).m);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(R.uTex, 0);
+    glUniform1f(R.uHasTex, 1.0f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/* ---- Clay text-measure callback: report the baked plaque's aspect, scaled so
+ * one text line is fontSize px tall, so the drawn plaque fills its box exactly. */
+static Clay_Dimensions hud_measure(Clay_StringSlice s, Clay_TextElementConfig *cfg, void *) {
+    float fg[3] = { cfg->textColor.r/255.0f, cfg->textColor.g/255.0f, cfg->textColor.b/255.0f };
+    int tw, th; (void)plaque_for(s.chars, s.length, fg, &tw, &th);
+    if (th <= 0) return Clay_Dimensions{ 0.0f, 0.0f };
+    int nlines = 1;
+    for (int i = 0; i < s.length; i++) if (s.chars[i] == '\n') ++nlines;
+    float scale = (float)cfg->fontSize * (float)nlines / (float)th;
+    return Clay_Dimensions{ (float)tw * scale, (float)th * scale };
+}
+
+/* ---- Clay lifecycle (arena + measure fn, once) ----------------------------- */
+static bool g_clay_ready = false;
+static void hud_clay_err(Clay_ErrorData e) {
+    std::print(stderr, "clay: {}\n", std::string(e.errorText.chars, (size_t)e.errorText.length));
+}
+static void hud_clay_init(void) {
+    if (g_clay_ready) return;
+    uint32_t sz = Clay_MinMemorySize();
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(sz, malloc(sz));
+    Clay_ErrorHandler eh{}; eh.errorHandlerFunction = hud_clay_err; eh.userData = nullptr;
+    Clay_Initialize(arena, Clay_Dimensions{ g_hud_canvasW, 2000.0f }, eh);
+    Clay_SetMeasureTextFunction(hud_measure, nullptr);
+    g_clay_ready = true;
+}
+
+/* ---- tiny imperative builders (avoid C++ designated-init ordering traps) ---- */
+static Clay_SizingAxis hud_fixed(float v) {
+    Clay_SizingAxis a{}; a.size.minMax.min = v; a.size.minMax.max = v; a.type = CLAY__SIZING_TYPE_FIXED; return a;
+}
+static Clay_SizingAxis hud_grow(void)  { Clay_SizingAxis a{}; a.type = CLAY__SIZING_TYPE_GROW; return a; }
+static Clay_SizingAxis hud_fit(void)   { Clay_SizingAxis a{}; a.type = CLAY__SIZING_TYPE_FIT;  return a; }
+
+static Clay_ElementId hud_eid(const char *s) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    return Clay_GetElementId(cs);
+}
+static Clay_ElementId hud_eidi(const char *s, uint32_t i) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    return Clay_GetElementIdWithIndex(cs, i);
+}
+
+namespace {
+struct HudEl {
+    HudEl(const Clay_ElementDeclaration &d) { Clay__OpenElement(); Clay__ConfigureOpenElement(d); }
+    HudEl(Clay_ElementId id, const Clay_ElementDeclaration &d) { Clay__OpenElementWithId(id); Clay__ConfigureOpenElement(d); }
+    ~HudEl() { Clay__CloseElement(); }
+};
+}
+
+static void hud_text(const char *s, Clay_Color col, int px,
+                     Clay_TextElementConfigWrapMode wrap = CLAY_TEXT_WRAP_NONE) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    Clay_TextElementConfig t{};
+    t.textColor = col; t.fontSize = (uint16_t)px; t.wrapMode = wrap; t.textAlignment = CLAY_TEXT_ALIGN_CENTER;
+    Clay__OpenTextElement(cs, t);
+}
+
+/* a centred fixed-size box, optionally filled / bordered; caller scopes it + adds a caption */
+static Clay_ElementDeclaration hud_box(float w, float h) {
+    Clay_ElementDeclaration d{};
+    d.layout.sizing.width  = hud_fixed(w);
+    d.layout.sizing.height = hud_fixed(h);
+    d.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    d.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+    return d;
+}
+static void hud_border(Clay_ElementDeclaration *d, Clay_Color c) {
+    d->border.color = c;
+    d->border.width.left = d->border.width.right = d->border.width.top = d->border.width.bottom = 2;
+}
+
+/* a centred vertical stack (fixed width, fits its content height) - used to bind the
+ * three sliders into one grouped block, and each caption tightly to its track. */
+static Clay_ElementDeclaration hud_col(float w, int gap) {
+    Clay_ElementDeclaration d{};
+    d.layout.sizing.width  = hud_fixed(w);
+    d.layout.sizing.height = hud_fit();
+    d.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    d.layout.childGap = (uint16_t)gap;
+    d.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    return d;
+}
+
+/* sizes (px == mm) */
+static const float TRACK_W = 460.0f, BTN_H = 56.0f, TILE_H = 64.0f;
+
+/* Declare the whole HUD tree. Static string buffers persist through the draw
+ * loop (Clay's render commands hold pointers into them, consumed this frame). */
+static void hud_build_tree(struct mirage *m, bool collapsed) {
+    const Clay_Color cFps  { 158, 199, 242, 255 };
+    const Clay_Color cHelp { 168, 184, 209, 255 };
+    const Clay_Color cCap  { 168, 184, 209, 255 };
+
+    Clay_ElementDeclaration root{};
+    root.layout.sizing.width  = hud_fixed(g_hud_canvasW);
+    root.layout.sizing.height = hud_fit();
+    root.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    root.layout.childGap = 20;
+    root.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    HudEl _root(hud_eid("hud_root"), root);
+
+    /* Clock - the glanceable top row, always shown. Reserve a fixed box sized to the
+     * clock plaque's aspect; the dedicated texture is blitted in after layout (it
+     * re-bakes per second, so it can't go through Clay's per-string text path). */
+    {
+        int ctw, cth; clock_plaque(&ctw, &cth);
+        float ch = 120.0f;                                       /* two-line clock height (px == mm) */
+        float cw = (cth > 0) ? ch * (float)ctw / (float)cth : 260.0f;
+        Clay_ElementDeclaration d = hud_box(cw, ch);
+        HudEl e(hud_eid("clock_strip"), d);
+    }
+
+    if (collapsed) return;     /* idle: just the clock - click it to expand */
+
+    /* FPS - comes out under the clock when the panel is expanded */
+    static char fps[24];
+    int fv = (int)(m->fps + 0.5f); if (fv < 0) fv = 0; if (fv > 999) fv = 999;
+    snprintf(fps, sizeof fps, "FPS %d", fv);
+    hud_text(fps, cFps, 60);
+
+    /* shortcut cheat-sheet (one multi-line plaque) */
+    hud_text("2X CMD: RECENTER\nCMD+SCROLL: ZOOM\nSUPER+SHIFT+Q: QUIT", cHelp, 26, CLAY_TEXT_WRAP_NONE);
+
+    /* sensitivity caption (live value); its track lives in the grouped block below */
+    static char sens_cap[24];
+    float gain = m->cfg.yaw_gain;
+    if (gain < SENS_GAIN_MIN) gain = SENS_GAIN_MIN;
+    if (gain > SENS_GAIN_MAX) gain = SENS_GAIN_MAX;
+    snprintf(sens_cap, sizeof sens_cap, "LOOK  %.1fX", (double)gain);
+
+    /* --- the three sliders grouped together: LOOK / BRIGHT / TRANS. Each caption is
+     * bound tight to its track (inner gap 8); the group spaces the sliders (gap 18).
+     * fills+handles are drawn after layout (they track live values Clay can't know). */
+    {
+        HudEl _grp(hud_col(TRACK_W, 18));
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text(sens_cap, cCap, 28);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 16.0f); d.backgroundColor = Clay_Color{ 56, 66, 87, 255 };
+          HudEl e(hud_eid("sens_track"), d); }
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text("BRIGHT", Clay_Color{ 184, 224, 199, 255 }, 24);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 51, 77, 61, 255 };
+          HudEl e(hud_eid("bri_track"), d); }
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text("TRANS", Clay_Color{ 184, 196, 224, 255 }, 24);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 66, 66, 82, 255 };
+          HudEl e(hud_eid("tr_track"), d); }
+    }
+
+    /* DEFAULT button (resets the LOOK gain) */
+    { Clay_ElementDeclaration d = hud_box(200.0f, 52.0f); hud_border(&d, Clay_Color{ 87, 102, 138, 255 });
+      HudEl e(hud_eid("sens_default"), d);
+      hud_text("DEFAULT", Clay_Color{ 204, 219, 242, 255 }, 26); }
+
+    /* environment switcher: one tile per MIRAGE_ENVS entry */
+    {
+        Clay_ElementDeclaration row{};
+        row.layout.sizing.width = hud_fixed(TRACK_W); row.layout.sizing.height = hud_fixed(TILE_H);
+        row.layout.layoutDirection = CLAY_LEFT_TO_RIGHT; row.layout.childGap = 14;
+        HudEl _row(row);
+        int ne = MIRAGE_ENV_COUNT; if (ne > MIRAGE_MAX_ENVS) ne = MIRAGE_MAX_ENVS;
+        for (int k = 0; k < ne; k++) {
+            Clay_ElementDeclaration t{};
+            t.layout.sizing.width = hud_grow(); t.layout.sizing.height = hud_grow();
+            t.layout.childAlignment.x = CLAY_ALIGN_X_CENTER; t.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+            if (k == m->active_env) {
+                t.backgroundColor = Clay_Color{ 41, 77, 56, 255 };
+                hud_border(&t, Clay_Color{ 117, 219, 153, 255 });
+            } else {
+                hud_border(&t, Clay_Color{ 77, 117, 92, 255 });
+            }
+            HudEl te(hud_eidi("env_tile", (uint32_t)k), t);
+            hud_text(MIRAGE_ENVS[k].name, Clay_Color{ 153, 230, 179, 255 }, 24);
+        }
+    }
+
+    /* flat/curved geometry toggle */
+    { Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
+      d.backgroundColor = Clay_Color{ 77, 61, 31, 255 }; hud_border(&d, Clay_Color{ 230, 179, 102, 255 });
+      HudEl e(hud_eid("geo_btn"), d);
+      hud_text(m->cfg.geometry == GEOM_FLAT ? "FLAT" : "CURVED", Clay_Color{ 230, 210, 160, 255 }, 26); }
+
+    /* background-mode button */
+    { int mode = m->bg_mode; if (mode < 0 || mode >= BG_MODE_COUNT) mode = BG_HDRI;
+      static const char *bgn[BG_MODE_COUNT] = { "BG: BLACK", "BG: HDRI", "BG: PASSTHROUGH" };
+      Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
+      if (mode == BG_BLACK) { hud_border(&d, Clay_Color{ 102, 107, 117, 255 }); }
+      else { d.backgroundColor = Clay_Color{ 26, 66, 71, 255 }; hud_border(&d, Clay_Color{ 102, 219, 230, 255 }); }
+      HudEl e(hud_eid("bg_btn"), d);
+      hud_text(bgn[mode], Clay_Color{ 200, 230, 235, 255 }, 24); }
+}
+
+/* read one laid-out element's box back into panel-local metre edges (y-up) */
+static bool hud_box_m(Clay_ElementId id, float *x0, float *x1, float *y0, float *y1) {
+    Clay_ElementData ed = Clay_GetElementData(id);
+    if (!ed.found) return false;
+    float cx, cy, cw, ch;
+    clay2panel(ed.boundingBox.x, ed.boundingBox.y, ed.boundingBox.width, ed.boundingBox.height, &cx, &cy, &cw, &ch);
+    *x0 = cx - cw*0.5f; *x1 = cx + cw*0.5f; *y0 = cy - ch*0.5f; *y1 = cy + ch*0.5f;
+    return true;
+}
+
+/* Render the HUD and refresh the grab.cpp hit-test snapshot. Replaces the old
+ * inline FPS plaque + draw_sens_panel; called once per frame from render_frame. */
+static void hud_render(struct mirage *m, mat4 vp) {
+    if (calib_active(m)) return;             /* the wizard owns the view */
+    int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
+    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
+    if (n <= 0) return;
+
+    /* Anchor screen: centre column, bottom row. Pick it ONCE and re-pick only when the
+     * layout actually changes (screen count / active layout / geometry) - never per
+     * frame. Rank by BASE yaw (layout_place adds world_yaw), so panning the wall can't
+     * flip the |yaw| winner and teleport the panel out from under its screen. */
+    static int s_anchor = -1, s_key = -1;
+    int key = n | (m->layouts.active << 10) | ((int)m->cfg.geometry << 20);
+    if (s_anchor < 0 || s_anchor >= n || key != s_key) {
+        int ci0 = -1; float best_yaw = 1e30f, best_lift = 1e30f;
+        for (int k = 0; k < n; k++) {
+            if (k == m->cfg.follow_screen) continue;           /* head-locked + high: never the HUD anchor */
+            float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
+            float ay = fabsf(yw - m->world_yaw);               /* pan-invariant base yaw */
+            if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
+                best_yaw = ay; best_lift = lf; ci0 = k;
+            }
+        }
+        if (ci0 < 0) return;
+        s_anchor = ci0; s_key = key;
+    }
+    int ci = s_anchor;
+    float yaw_c, lift_c, arc_c;
+    layout_place(m, ci, &yaw_c, &lift_c, &arc_c);   /* anchor's lift drives the vertical placement */
+    (void)arc_c;
+
+    /* Head-lock the clock/HUD yaw to the gaze-follow (m->follow_yaw, eased below) - the
+     * SAME behaviour as the top row's follow screen - so it hovers below-front wherever
+     * you look instead of spinning under the centre screen with the wall. We keep the
+     * anchor screen's lift, so it still sits just under the wall row. */
+    yaw_c = m->follow_yaw;
+
+    /* idle auto-collapse: fold to the clock strip after HUD_IDLE_MS untouched. */
+    uint32_t nowms = hud_now_ms();
+    if (m->hud_active_ms == 0) m->hud_active_ms = nowms;     /* first frame: start awake */
+    bool collapsed = (nowms - m->hud_active_ms) > HUD_IDLE_MS;
+
+    screen_t *cs = &m->screen[ci];
+    float d      = m->cfg.screen_distance_m;
+    float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
+    float aspect = (cs->width > 0 && cs->height > 0) ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
+    float hh     = d * tanf(ang_w * 0.5f) * aspect;     /* centre screen half-height */
+
+    g_hud_base = m4_mul(m4_translate(v3(0.0f, lift_c, 0.0f)),
+                        m4_from_quat(q_from_euler_ypr(yaw_c, 0.0f, 0.0f)));
+    g_hud_vp   = vp;
+    g_hud_d    = d;
+    g_hud_yTop = -hh - 0.05f;                /* canvas top, just below the screen edge */
+
+    /* ---- layout pass ---- */
+    hud_clay_init();
+    Clay_SetLayoutDimensions(Clay_Dimensions{ g_hud_canvasW, 2000.0f });
+    Clay_BeginLayout();
+    hud_build_tree(m, collapsed);
+    Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+
+    /* ---- draw pass (additive, depth-off, like the cursor arrow) ---- */
     glUseProgram(R.prog);
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
     glEnableVertexAttribArray(R.aPos);
@@ -810,138 +1295,264 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
     glBlendFunc(GL_ONE, GL_ONE);
     glUniform1f(R.uYFlip, 0.0f);
     glUniform1f(R.uSharpen, 0.0f);
+    glUniform1f(R.uOpacity, 1.0f);
 
-    auto solid = [&](float cx, float cy, float w, float h, float r, float g, float b) {
-        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
-        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
-        glUniform1f(R.uHasTex, 0.0f);
-        glUniform3f(R.uColor, r, g, b);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    };
-    /* a hollow rectangle from four thin bright bars - on additive optics an outline
-     * reads as an affordance where a dark fill would just be invisible. */
-    auto outline = [&](float cx, float cy, float w, float h, float t,
-                       float r, float g, float b) {
-        solid(cx, cy + h*0.5f, w, t, r, g, b);   /* top    */
-        solid(cx, cy - h*0.5f, w, t, r, g, b);   /* bottom */
-        solid(cx - w*0.5f, cy, t, h, r, g, b);   /* left   */
-        solid(cx + w*0.5f, cy, t, h, r, g, b);   /* right  */
-    };
-    auto label = [&](GLuint tex, float cx, float cy, float h, int tw, int th) {
-        if (!tex || th <= 0) return;
-        float w = h * ((float)tw / (float)th);
-        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
-        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(R.uTex, 0);
-        glUniform1f(R.uHasTex, 1.0f);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    };
-
-    /* All colours are ADDED light (GL_ONE,GL_ONE): there is no "dark" on the optics,
-     * so the rail is a dim-but-present glow, the fill/handle are brighter, and the
-     * track extent is marked by bright end ticks rather than a dark box. */
-    float trackW = sp.track_x1 - sp.track_x0;
-    solid(0.0f, sp.row_y, trackW, sp.track_h, 0.22f, 0.26f, 0.34f);   /* visible rail */
-    float fillW = sp.handle_x - sp.track_x0;
-    if (fillW > 1e-4f)
-        solid(sp.track_x0 + fillW*0.5f, sp.row_y, fillW, sp.track_h, 0.30f, 0.42f, 0.65f);
-    /* bright end ticks so the min/max extent reads at a glance */
-    float tickH = sp.track_h * 3.0f, tickW = 0.008f;
-    solid(sp.track_x0, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
-    solid(sp.track_x1, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
-    /* handle */
-    solid(sp.handle_x, sp.row_y, sp.handle_w, sp.handle_h, 0.60f, 0.76f, 1.00f);
-    /* DEFAULT button: a bright outline (a dark fill would be invisible additively) */
-    float def_cx = 0.5f*(sp.def_x0 + sp.def_x1), def_cy = 0.5f*(sp.def_y0 + sp.def_y1);
-    float def_w  = sp.def_x1 - sp.def_x0,        def_h  = sp.def_y1 - sp.def_y0;
-    outline(def_cx, def_cy, def_w, def_h, 0.006f, 0.34f, 0.40f, 0.54f);
-
-    /* live value plaque ("3.0x"), re-baked only when the gain changes */
-    int sv = (int)(sp.gain * 10.0f + 0.5f);
-    if (sv != R.sens_val) {
-        char buf[16]; snprintf(buf, sizeof buf, "%.1fX", (double)sp.gain);
-        const float vc[3] = {0.62f, 0.78f, 0.95f};
-        R.label_sens = bake_label(buf, vc, &R.sens_w, &R.sens_h);
-        R.sens_val = sv;
-    }
-    label(R.label_sens_cap, sp.track_x0 - 0.13f, sp.row_y,       0.055f, R.senscap_w, R.senscap_h);
-    label(R.label_sens,     0.0f,                sp.row_y + 0.11f, 0.055f, R.sens_w,   R.sens_h);
-    label(R.label_default,  def_cx,              def_cy,         0.045f, R.default_w, R.default_h);
-
-    /* layout switcher: a clickable box per named layout, the active one filled and
-     * bright-bordered, the rest a dim idle outline. Each caption is scaled down to
-     * fit its box so long names ("THEATER") don't spill past the border. */
-    for (int k = 0; k < sp.n_layout; k++) {
-        float cx = sp.lay_cx[k];
-        float cy = 0.5f * (sp.lay_y0 + sp.lay_y1);
-        float w  = sp.lay_w, h = sp.lay_y1 - sp.lay_y0;
-        if (k == sp.active_layout) {
-            solid(cx, cy, w, h, 0.16f, 0.22f, 0.34f);            /* active: filled glow */
-            outline(cx, cy, w, h, 0.006f, 0.50f, 0.66f, 0.95f);  /* bright border       */
-        } else {
-            outline(cx, cy, w, h, 0.006f, 0.30f, 0.36f, 0.48f);  /* idle border         */
+    for (int i = 0; i < cmds.length; i++) {
+        Clay_RenderCommand *c = &cmds.internalArray[i];
+        Clay_BoundingBox b = c->boundingBox;
+        float cx, cy, cw, ch; clay2panel(b.x, b.y, b.width, b.height, &cx, &cy, &cw, &ch);
+        switch (c->commandType) {
+        case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
+            Clay_Color k = c->renderData.rectangle.backgroundColor;
+            if (k.a > 0.5f) hud_solid(cx, cy, cw, ch, k.r/255.0f, k.g/255.0f, k.b/255.0f);
+            break; }
+        case CLAY_RENDER_COMMAND_TYPE_BORDER: {
+            Clay_Color k = c->renderData.border.color;
+            hud_outline(cx, cy, cw, ch, 0.006f, k.r/255.0f, k.g/255.0f, k.b/255.0f);
+            break; }
+        case CLAY_RENDER_COMMAND_TYPE_TEXT: {
+            Clay_TextRenderData *t = &c->renderData.text;
+            float fg[3] = { t->textColor.r/255.0f, t->textColor.g/255.0f, t->textColor.b/255.0f };
+            int tw, th; GLuint tex = plaque_for(t->stringContents.chars, t->stringContents.length, fg, &tw, &th);
+            hud_plaque(tex, cx, cy, cw, ch);
+            break; }
+        default: break;
         }
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (R.layout_h[k] > 0) {
-            float natw = lh * (float)R.layout_w[k] / (float)R.layout_h[k];
-            if (natw > maxw) lh = maxw * (float)R.layout_h[k] / (float)R.layout_w[k];
-        }
-        label(R.label_layout[k], cx, cy, lh, R.layout_w[k], R.layout_h[k]);
     }
 
-    /* environment switcher: same box style as the layout row, one row below, in a
-     * green tint so the two rows read as distinct switchers. Active = filled+bright. */
-    for (int k = 0; k < sp.n_env; k++) {
-        float cx = sp.env_cx[k];
-        float cy = 0.5f * (sp.env_y0 + sp.env_y1);
-        float w  = sp.env_w, h = sp.env_y1 - sp.env_y0;
-        if (k == sp.active_env) {
-            solid(cx, cy, w, h, 0.16f, 0.30f, 0.22f);            /* active: filled glow */
-            outline(cx, cy, w, h, 0.006f, 0.46f, 0.86f, 0.60f);  /* bright green border */
-        } else {
-            outline(cx, cy, w, h, 0.006f, 0.30f, 0.46f, 0.36f);  /* idle border         */
-        }
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (R.env_h[k] > 0) {
-            float natw = lh * (float)R.env_w[k] / (float)R.env_h[k];
-            if (natw > maxw) lh = maxw * (float)R.env_h[k] / (float)R.env_w[k];
-        }
-        label(R.label_env[k], cx, cy, lh, R.env_w[k], R.env_h[k]);
+    /* clock: the dedicated per-second texture, blitted into its reserved top-row box
+     * (present collapsed and expanded). Clay can't own it - it re-bakes every second. */
+    { float bx0, bx1, by0, by1;
+      if (hud_box_m(hud_eid("clock_strip"), &bx0, &bx1, &by0, &by1)) {
+          int ctw, cth; GLuint ct = clock_plaque(&ctw, &cth);
+          hud_plaque(ct, 0.5f*(bx0+bx1), 0.5f*(by0+by1), bx1-bx0, by1-by0);
+      } }
+
+    /* ---- snapshot the boxes grab.cpp hit-tests ---- */
+    sens_panel &o = g_hud;
+    memset(&o, 0, sizeof o);
+    o.ci = ci; o.d = d; o.yaw_c = yaw_c; o.lift_c = lift_c;
+    o.collapsed = collapsed ? 1 : 0;
+
+    float x0, x1, y0, y1;
+    /* whole-panel bounds: grab tests a hover/touch here to wake the collapsed strip */
+    if (hud_box_m(hud_eid("hud_root"), &x0, &x1, &y0, &y1)) {
+        o.panel_x0 = x0; o.panel_x1 = x1; o.panel_y0 = y0; o.panel_y1 = y1;
     }
 
-    /* environment brightness slider: rail + fill + handle (green to match the env row),
-     * with a "BRIGHT" caption to its left. grab.cpp drives the handle. */
-    float briW = sp.bri_x1 - sp.bri_x0;
-    solid(0.0f, sp.bri_row_y, briW, sp.bri_track_h, 0.20f, 0.30f, 0.24f);   /* rail */
-    float briFill = sp.bri_handle_x - sp.bri_x0;
-    if (briFill > 1e-4f)
-        solid(sp.bri_x0 + briFill*0.5f, sp.bri_row_y, briFill, sp.bri_track_h, 0.26f, 0.46f, 0.34f);
-    solid(sp.bri_handle_x, sp.bri_row_y, sp.bri_handle_w, sp.bri_handle_h, 0.52f, 0.86f, 0.64f);
-    label(R.label_bright, sp.bri_x0 - 0.14f, sp.bri_row_y, 0.045f, R.bright_w, R.bright_h);
+    if (!collapsed) {           /* collapsed = clock only: no widgets to map or overlay */
+        o.gain = m->cfg.yaw_gain;
+        if (o.gain < SENS_GAIN_MIN) o.gain = SENS_GAIN_MIN;
+        if (o.gain > SENS_GAIN_MAX) o.gain = SENS_GAIN_MAX;
+        o.handle_w = 0.03f;  o.handle_h = 0.10f;  o.track_h = 0.016f;
+        o.bri_handle_w = 0.026f; o.bri_handle_h = 0.05f; o.bri_track_h = 0.012f;
+        o.tr_handle_w  = 0.026f; o.tr_handle_h  = 0.05f; o.tr_track_h  = 0.012f;
+        o.n_env = MIRAGE_ENV_COUNT; if (o.n_env > MIRAGE_MAX_ENVS) o.n_env = MIRAGE_MAX_ENVS;
+        o.active_env = m->active_env;
+        o.geo_flat = (m->cfg.geometry == GEOM_FLAT);
+        o.pt_mode  = m->bg_mode;
 
-    /* flat/curved toggle: one button spanning the track, filled + bright-bordered
-     * (it always reflects an active choice), captioned with the current geometry.
-     * Amber tint so it reads as distinct from the blue/green switcher rows above. */
-    {
-        float cx = 0.5f * (sp.geo_x0 + sp.geo_x1);
-        float cy = 0.5f * (sp.geo_y0 + sp.geo_y1);
-        float w  = sp.geo_x1 - sp.geo_x0, h = sp.geo_y1 - sp.geo_y0;
-        solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* filled glow         */
-        outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border */
-        GLuint tex = sp.geo_flat ? R.label_flat : R.label_curved;
-        int tw = sp.geo_flat ? R.flat_w : R.curved_w;
-        int th = sp.geo_flat ? R.flat_h : R.curved_h;
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (th > 0) {
-            float natw = lh * (float)tw / (float)th;
-            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+        if (hud_box_m(hud_eid("sens_track"), &x0, &x1, &y0, &y1)) {
+            o.track_x0 = x0; o.track_x1 = x1; o.row_y = 0.5f*(y0+y1);
+            float frac = (o.gain - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
+            o.handle_x = o.track_x0 + frac * (o.track_x1 - o.track_x0);
         }
-        label(tex, cx, cy, lh, tw, th);
+        if (hud_box_m(hud_eid("sens_default"), &x0, &x1, &y0, &y1)) {
+            o.def_x0 = x0; o.def_x1 = x1; o.def_y0 = y0; o.def_y1 = y1;
+        }
+        for (int k = 0; k < o.n_env && k < MIRAGE_MAX_ENVS; k++)
+            if (hud_box_m(hud_eidi("env_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
+                o.env_cx[k] = 0.5f*(x0+x1); o.env_w = x1 - x0; o.env_y0 = y0; o.env_y1 = y1;
+            }
+        if (hud_box_m(hud_eid("bri_track"), &x0, &x1, &y0, &y1)) {
+            o.bri_x0 = x0; o.bri_x1 = x1; o.bri_row_y = 0.5f*(y0+y1);
+            float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
+            bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
+            o.bri_handle_x = o.bri_x0 + bf * (o.bri_x1 - o.bri_x0);
+        }
+        if (hud_box_m(hud_eid("tr_track"), &x0, &x1, &y0, &y1)) {
+            o.tr_x0 = x0; o.tr_x1 = x1; o.tr_row_y = 0.5f*(y0+y1);
+            float tf = (m->screen_opacity - OPAC_MIN) / (OPAC_MAX - OPAC_MIN);
+            tf = tf < 0.0f ? 0.0f : (tf > 1.0f ? 1.0f : tf);
+            o.tr_handle_x = o.tr_x0 + tf * (o.tr_x1 - o.tr_x0);
+        }
+        if (hud_box_m(hud_eid("geo_btn"),  &x0, &x1, &y0, &y1)) { o.geo_x0 = x0; o.geo_x1 = x1; o.geo_y0 = y0; o.geo_y1 = y1; }
+        if (hud_box_m(hud_eid("bg_btn"),   &x0, &x1, &y0, &y1)) { o.pt_x0 = x0; o.pt_x1 = x1; o.pt_y0 = y0; o.pt_y1 = y1; }
+
+        /* ---- value-driven overlays Clay can't know: slider fills + handles ---- */
+        float fillW = o.handle_x - o.track_x0;
+        if (fillW > 1e-4f) hud_solid(o.track_x0 + fillW*0.5f, o.row_y, fillW, o.track_h, 0.30f, 0.42f, 0.65f);
+        hud_solid(o.handle_x, o.row_y, o.handle_w, o.handle_h, 0.60f, 0.76f, 1.00f);
+
+        float briFill = o.bri_handle_x - o.bri_x0;
+        if (briFill > 1e-4f) hud_solid(o.bri_x0 + briFill*0.5f, o.bri_row_y, briFill, o.bri_track_h, 0.26f, 0.46f, 0.34f);
+        hud_solid(o.bri_handle_x, o.bri_row_y, o.bri_handle_w, o.bri_handle_h, 0.52f, 0.86f, 0.64f);
+
+        float trFill = o.tr_handle_x - o.tr_x0;
+        if (trFill > 1e-4f) hud_solid(o.tr_x0 + trFill*0.5f, o.tr_row_y, trFill, o.tr_track_h, 0.40f, 0.44f, 0.60f);
+        hud_solid(o.tr_handle_x, o.tr_row_y, o.tr_handle_w, o.tr_handle_h, 0.66f, 0.72f, 0.92f);
     }
 
     glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    g_hud_valid = true;
+}
+
+/* grab.cpp's geometry source: now just the last layout pass's snapshot. */
+bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
+    (void)m;
+    if (!g_hud_valid) return false;
+    *out = g_hud;
+    return true;
+}
+
+/* Camera passthrough: start/stop the camera off m->passthrough, pull the newest
+ * frame into R.cam_tex, and draw it as a head-locked fullscreen background (the
+ * Beast cam is head-mounted, so screen-space IS the correct world-lock). Drawn
+ * first, depth-test off, so the windows/wall composite on top. Returns true if a
+ * passthrough background was drawn (so the caller can skip the env dome). */
+static bool draw_passthrough(struct mirage *m, quat head) {
+    /* The world cam is wanted for passthrough display AND for 6DoF-lite optical flow,
+     * so keep it open if either needs it (one owner, no double-open). */
+    bool pass = (m->bg_mode == BG_PASSTHROUGH);
+    bool vio  = true;            /* single fused mode: the optical-flow estimator always runs */
+    bool want = pass || vio;
+
+    struct timespec ct; clock_gettime(CLOCK_MONOTONIC, &ct);
+    double t = ct.tv_sec + ct.tv_nsec * 1e-9;
+    static double cam_next_try   = 0.0;   /* throttle (re)open attempts to ~1/s   */
+    static double cam_last_fresh = 0.0;   /* stall->reopen watchdog (0 = no cam)  */
+
+    /* Drop the camera when nobody wants it, when its capture thread died on a device
+     * error (the Beast USB-reset / renumbered out from under the fd), or when it's
+     * gone silent (USB wedged with no poll error - no frame for >1.5s). The old code
+     * opened a hard-coded /dev/video1 once and never re-checked, so any of these left
+     * the passthrough frozen on its last frame forever. Now: stop here, reopen below. */
+    bool dead = m->cam && cam_failed(m->cam);
+    bool stalled = m->cam && cam_last_fresh > 0 && (t - cam_last_fresh > 1.5);
+    if (m->cam && (!want || dead || stalled)) {
+        if (want) std::print(stderr, "camera: lost ({}) - reopening\n",
+                             dead ? "device error" : "no frames >1.5s");
+        cam_stop(m->cam); m->cam = nullptr;
+        R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0; cam_last_fresh = 0;
+    }
+
+    /* (Re)discover + open. cam_find scans for the current MJPEG world-cam node every
+     * attempt, so a renumbered Beast cam is picked up automatically; the ~1/s throttle
+     * keeps a genuinely-absent cam from reopen-spamming every frame. */
+    if (want && !m->cam && t >= cam_next_try) {
+        cam_next_try = t + 1.0;
+        char dev[32];
+        if (cam_find(dev, sizeof dev)) {
+            m->cam = cam_start(dev, 1280, 720);
+            if (m->cam) { worldvio_reset(); cam_last_fresh = t; }
+        }
+        if (!m->cam && pass) m->bg_mode = BG_HDRI;   /* no cam: show the dome, not black */
+    }
+    if (!m->cam) return false;
+
+    const uint8_t *rgb = nullptr; int cw = 0, ch = 0;
+    bool fresh = cam_acquire(m->cam, &rgb, &cw, &ch, &R.cam_seq);
+    if (fresh) cam_last_fresh = t;
+
+    /* 6DoF-lite: feed each fresh frame to the optical-flow estimator (with the head
+     * orientation, so it can subtract rotation and keep the translation parallax). */
+    if (vio && fresh && rgb)
+        worldvio_feed(rgb, cw, ch, head, t, 70.0f /* Beast world-cam HFOV est; tune */);
+
+    if (!pass) return false;   /* 6DoF-only: camera ran for tracking, no passthrough draw */
+
+    if (fresh && rgb) {
+        if (!R.cam_tex) R.cam_tex.gen();
+        glBindTexture(GL_TEXTURE_2D, R.cam_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (cw != R.cam_alloc_w || ch != R.cam_alloc_h) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cw, ch, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            R.cam_alloc_w = cw; R.cam_alloc_h = ch;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cw, ch, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        }
+    }
+    if (!R.cam_tex || R.cam_alloc_w == 0) return false;  /* no frame yet */
+
+    /* fullscreen quad in NDC: the unit QUAD ([-0.5,0.5]) scaled x2, no projection. */
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glUniform1f(R.uYFlip, 0.0f);
+    glUniform1f(R.uSharpen, 0.0f);
+    glUniform1f(R.uHasTex, 1.0f);
+    mat4 ndc = m4_scale(v3(2.0f, 2.0f, 1.0f));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, ndc.m);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, R.cam_tex);
+    glUniform1i(R.uTex, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glEnable(GL_DEPTH_TEST);
+    return true;
+}
+
+/* ---- Anchor-stability test (MIRAGE_ANCHOR_TEST=1) -------------------------
+ * A world-fixed boresight reticle drawn at dead-ahead so you can SEE how fixed
+ * "fixed in space" really is: align the cross to a real-world point, then move
+ * your head and watch it drift. We draw it TWICE from the same eye:
+ *   GREEN = the shipped view (forward-prediction + yaw/pitch gain + read
+ *           deadband baked in) - what your anchored screens actually do.
+ *   RED   = the RAW pose (pose_latest, no prediction/gain/deadband) - pure IMU.
+ * Both additive (dark optics stay clear; overlap reads YELLOW). So:
+ *   overlapped & still   -> anchor solid.
+ *   RED solid, GREEN swims/lags -> the comfort pipeline (gains/deadband/predict,
+ *                                  all cfg-tunable) is the culprit.
+ *   RED itself jitters/drifts    -> upstream AHRS/IMU fusion.
+ * Ticks sit at +-2/5/8 deg so a split is readable in degrees. */
+static void atest_quad(const mat4 &vp, float xc, float yc, float d, float w, float h) {
+    mat4 model = m4_mul(m4_translate(v3(xc, yc, -d)), m4_scale(v3(w, h, 1.0f)));
+    mat4 mvp   = m4_mul(vp, model);
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+static void draw_reticle(const mat4 &vp, float r, float g, float b, float d) {
+    glUseProgram(R.prog);
+    glUniform1f(R.uHasTex, 0.0f);
+    glUniform3f(R.uColor, r, g, b);
+    glUniform1f(R.uOpacity, 1.0f);
+    glUniform1f(R.uRadius, 0.0f);
+    glUniform1f(R.uYFlip, 0.0f);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glDisableVertexAttribArray(R.aUV);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);   /* additive, like the dome/cursor */
+
+    const float DEG = (float)M_PI/180.0f;
+    auto S = [&](float deg){ return d * tanf(deg * DEG); };   /* half-extent (m) for a half-angle */
+    float arm = S(8.0f), thick = S(0.12f), dot = S(0.35f);
+    atest_quad(vp, 0, 0, d, thick*2, arm*2);     /* vertical bar   */
+    atest_quad(vp, 0, 0, d, arm*2,   thick*2);   /* horizontal bar */
+    atest_quad(vp, 0, 0, d, dot*2,   dot*2);     /* centre dot     */
+    const float ticks[] = {2.0f, 5.0f, 8.0f};
+    for (float t : ticks) {
+        float p = S(t), th = S(0.9f);
+        atest_quad(vp,  p, 0, d, thick*2, th*2);   /* +yaw   */
+        atest_quad(vp, -p, 0, d, thick*2, th*2);   /* -yaw   */
+        atest_quad(vp, 0,  p, d, th*2, thick*2);   /* +pitch */
+        atest_quad(vp, 0, -p, d, th*2, thick*2);   /* -pitch */
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -957,25 +1568,33 @@ void render_frame(struct mirage *m, quat head) {
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    /* camera passthrough background (head-locked), drawn when bg_mode == BG_PASSTHROUGH.
+     * Manages the camera lifecycle too; the dome draw below is gated on BG_HDRI. */
+    draw_passthrough(m, head);
+
     float z = m->zoom > 0.0f ? m->zoom : 1.0f;
     float aspect = (float)m->glasses_w / (float)m->glasses_h;
     /* zoom narrows the field of view (zoom in = see less, bigger) */
     mat4 proj = m4_perspective((m->cfg.fov_deg / z) * (float)M_PI/180.0f, aspect, 0.05f, 600.0f);
 
-    /* Reshape the head orientation for comfort, via a swing-twist split instead
-     * of euler yaw/pitch/roll. "Swing" is the look direction (combined yaw+pitch
-     * off the recenter forward); "twist" is roll about that forward. We amplify
-     * the swing so the side screens need less neck turn, and damp the twist so
-     * the wall stays level. This is gimbal-lock-free: the old euler version blew
-     * up when you looked near straight up/down (lying down), spinning the view.
-     * Swing only has a singularity looking dead backwards, which never happens.
-     * NOTE: yaw and pitch share one gain here (swing is isotropic); yaw_gain is
-     * used and should equal pitch_gain. Identity when look_gain=1, roll_damp=1. */
-    quat swing, twist;
-    q_swing_twist(head, v3(0.0f, 0.0f, -1.0f), &swing, &twist);
-    swing = q_scale_angle(swing, m->cfg.yaw_gain);
-    twist = q_scale_angle(twist, m->cfg.roll_damp);
-    head  = q_norm(q_mul(swing, twist));
+    /* Reshape the head orientation for comfort as proper yaw / pitch / roll. Rebuilding from
+     * YPR (yaw about WORLD up, pitch about the resulting right, roll about forward) keeps the
+     * horizon dead level at every yaw. The old swing-twist split sneaked roll back in once you
+     * were BOTH turned and looking up/down (the horizon tilted off-centre - clean dead-ahead,
+     * tilted when already looking to the side). roll_damp gates head roll (0 = locked level,
+     * 1 = tilt with your head). Pitch is clamped just shy of +-90 so the YPR singularity
+     * (looking straight up/down) can never spin the view. Identity when the gains are 1. */
+    {
+        float yaw, pitch, roll;
+        q_to_euler_ypr(head, &yaw, &pitch, &roll);
+        yaw   *= m->cfg.yaw_gain;
+        pitch *= m->cfg.pitch_gain;
+        roll  *= m->cfg.roll_damp;
+        const float PLIM = 1.48f;                  /* ~85 deg: stay off the gimbal singularity */
+        if (pitch >  PLIM) pitch =  PLIM;
+        if (pitch < -PLIM) pitch = -PLIM;
+        head = q_from_euler_ypr(yaw, pitch, roll);
+    }
 
     /* Reading-stability deadband. The comfort gains above amplify head tremor
      * 2.5-3x, so even a still head leaves text shimmering. We hold the last
@@ -1014,10 +1633,23 @@ void render_frame(struct mirage *m, quat head) {
             float db  = m->cfg.read_deadband_deg * (float)M_PI/180.0f * (1.0f - mv);
             float follow = ang > 1e-6f ? (ang - db) / ang : 0.0f;
             if (follow < 0.0f) follow = 0.0f;              /* inside deadband: freeze */
+            /* Keep a light low-pass even while moving. The IMU arrives in BURSTS, so a full
+             * snap (follow=1) lets that burst unevenness through as frame-to-frame velocity
+             * ripple (the residual "not smooth while moving"). Capping follow makes the
+             * presented pose low-pass the bursts; the forward-prediction already leads by
+             * enough to cover the ~1 frame of latency this adds. */
+            const float FOLLOW_MAX = 0.5f;
+            if (follow > FOLLOW_MAX) follow = FOLLOW_MAX;
             presented = q_nlerp(presented, head, follow);
         }
         head = presented;
     }
+
+    /* VIO step 1: apply the camera's visual yaw/pitch DRIFT correction (world-frame
+     * pre-multiply). worldvio measured it against the RAW pose fed in draw_passthrough
+     * (open loop), so this cancels the gyro's accumulated heading walk and the anchor
+     * holds against the real world. Identity unless MIRAGE_VISYAW is on. */
+    head = q_mul(worldvio_ori_correction(), head);
 
     /* Publish the look direction for shake-to-gaze: this is the exact camera
      * orientation we render through (comfort gains + deadband baked
@@ -1030,30 +1662,70 @@ void render_frame(struct mirage *m, quat head) {
         m->gaze_have = true;
     }
 
+    /* Lazy yaw-follow: ease follow_yaw toward the gaze yaw with a time constant, so it
+     * trails a turn and glides back to dead-ahead when you settle - level, never tilting.
+     * Drives BOTH the head-locked follow screen (top row) and the clock/HUD (bottom row),
+     * so it runs unconditionally now (the HUD is always present). Wrapped across +/-pi. */
+    {
+        static struct timespec fy_prev; static bool fy_seed = false;
+        struct timespec ftn; clock_gettime(CLOCK_MONOTONIC, &ftn);
+        float fdt = fy_seed ? (float)((ftn.tv_sec - fy_prev.tv_sec)
+                                    + (ftn.tv_nsec - fy_prev.tv_nsec) * 1e-9) : 0.0f;
+        fy_prev = ftn; fy_seed = true;
+        if (fdt < 0.0f) fdt = 0.0f;
+        if (fdt > 0.1f) fdt = 0.1f;
+        const float FOLLOW_TAU = 0.25f;                  /* trail time constant (s) */
+        float dy = m->gaze_yaw - m->follow_yaw;
+        while (dy >  (float)M_PI) dy -= 2.0f*(float)M_PI;
+        while (dy < -(float)M_PI) dy += 2.0f*(float)M_PI;
+        m->follow_yaw += dy * (1.0f - expf(-fdt / FOLLOW_TAU));
+        while (m->follow_yaw >  (float)M_PI) m->follow_yaw -= 2.0f*(float)M_PI;
+        while (m->follow_yaw < -(float)M_PI) m->follow_yaw += 2.0f*(float)M_PI;
+    }
+
+    /* Per-frame VIEW TRACE (set MIRAGE_VIEW_TRACE=1): logs what actually reaches the eye so
+     * the fast-turn "jump" can be SEEN in the data. raw = pose before prediction/deadband;
+     * final = the rendered view (prediction + deadband + gain baked in); off = parallax. If
+     * `final` overshoots/reverses vs `raw` -> render extras; if `raw` itself wobbles ->
+     * upstream (bridge/fusion). Throttled implicitly by frame rate (~120 Hz). */
+    {
+        static FILE *vtr = (FILE *)-1;
+        if (vtr == (FILE *)-1) { const char *e = getenv("MIRAGE_VIEW_TRACE");
+                                 vtr = (e && *e) ? fopen("/tmp/mirage-view-trace.log", "w") : NULL; }
+        if (vtr) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            double t = ts.tv_sec + ts.tv_nsec / 1e9;
+            float ry, rp, rr, fy, fp, fr;
+            q_to_euler_ypr(pose_latest(),  &ry, &rp, &rr);   /* raw, pre-predict/deadband */
+            q_to_euler_ypr(head,           &fy, &fp, &fr);   /* final rendered view       */
+            vec3 off = worldvio_eye_offset();
+            float sp = pose_speed() * 180.0f / (float)M_PI;  /* physical head speed deg/s */
+            fprintf(vtr, "%.4f raw[% 7.2f % 7.2f % 7.2f] fin[% 7.2f % 7.2f % 7.2f] sp%6.1f off[% .4f % .4f % .4f]\n",
+                    t, ry*57.2958f, rp*57.2958f, rr*57.2958f, fy*57.2958f, fp*57.2958f, fr*57.2958f,
+                    sp, off.x, off.y, off.z);
+            fflush(vtr);
+        }
+    }
+
     /* drive the calibration overlay's state machine off the live head pose
      * (stillness -> recenter, etc.); the panel itself is drawn at the end. */
     calib_update(m, head);
 
     /* Eye translation for motion parallax (near windows shift against far ones and the
-     * fixed star dome). Two sources, picked by whether the webcam is live:
+     * fixed star dome), synthesised from rotation: the eye sits ahead/above a neck pivot,
+     * so a head turn sweeps it through an arc - the translational depth cue the 3DoF
+     * stream gives on its own.
      *
-     *  - REAL position (facecam): the measured head offset already INCLUDES the neck-arc
-     *    translation a head turn produces, so it fully replaces the neck model below -
-     *    running both would double-count that arc. Forward-predicted (pose_predict_ms) to
-     *    offset the camera's latency. Lateral (x/y) and depth (z) keep separate gains, as
-     *    depth is the noisier axis.
-     *  - NECK MODEL (fallback): with no webcam signal, synthesise the arc from rotation -
-     *    the eye sits ahead/above a neck pivot, so a turn sweeps it through an arc. This is
-     *    the only translational depth cue available from the 3DoF stream alone. */
-    vec3 eye_world;
-    if (m->cfg.facecam_enable && pose_position_active()) {
-        vec3 hp = pose_position(m->cfg.pose_predict_ms * 0.001f);
-        eye_world = v3(hp.x * m->cfg.facecam_lateral_gain,
-                       hp.y * m->cfg.facecam_lateral_gain,
-                       hp.z * m->cfg.facecam_depth_gain);
-    } else {
-        eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
-    }
+     * ONE fused tracking mode: IMU orientation (the view rotation, via `head`) + neck-model
+     * rotation arc + confidence-gated world-cam optical-flow parallax. worldvio already
+     * scales its offset by camera confidence and leaks to rest, so when the camera sees
+     * well you get real lean/sway 6DoF, and when it can't (blank wall, dark, blur) it fades
+     * smoothly back to the rock-solid neck model. No mode switch - it always does its best. */
+    vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
+    eye_world = v3_add(eye_world, worldvio_eye_offset());
+    /* 4-finger vertical swipe dollies the eye straight up/down the cylinder axis (the
+     * wall is fixed): a world-space vertical translation, not rotated by the head. */
+    eye_world.y += m->world_lift;
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);
@@ -1071,8 +1743,9 @@ void render_frame(struct mirage *m, quat head) {
      * wall draws cleanly over it. The dome sphere (radius 50 m) dwarfs the
      * neck-model eye shift (~0.1 m), so the stars stay effectively fixed in world
      * space - the far reference the near windows parallax against as you look around.
-     * cfg.hdri_on gates the whole draw so the "Off" environment hides it. */
-    if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on) {
+     * cfg.hdri_on gates the whole draw so the "Off" environment hides it. The dome
+     * only shows in BG_HDRI mode (BG_BLACK = nothing, BG_PASSTHROUGH = the camera). */
+    if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on && m->bg_mode == BG_HDRI) {
         glUseProgram(R.dome_prog);
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
         /* env_brightness is the HUD slider (1.0 = as tuned); guard the zero-init case. */
@@ -1098,13 +1771,55 @@ void render_frame(struct mirage *m, quat head) {
         glEnable(GL_DEPTH_TEST);
     }
 
+    /* Anchor-stability test: draw the world-fixed reticle (shipped view in GREEN,
+     * raw IMU in RED, from the SAME eye) and skip the rest of the scene for a clean
+     * read. The dome above stays as a co-fixed star reference. See draw_reticle. */
+    static int atest = -1;
+    if (atest < 0) { const char *e = getenv("MIRAGE_ANCHOR_TEST"); atest = (e && *e && e[0] != '0') ? 1 : 0; }
+    if (atest) {
+        float d = m->cfg.screen_distance_m > 0.0f ? m->cfg.screen_distance_m : 2.0f;
+        mat4 view_raw = m4_mul(m4_from_quat(q_conj(pose_latest())),
+                               m4_translate(v3_scale(eye_world, -1.0f)));
+        mat4 vp_raw   = m4_mul(proj, view_raw);
+        draw_reticle(vp_raw, 1.0f, 0.0f, 0.0f, d);   /* RAW IMU (no predict/gain/deadband) */
+        draw_reticle(vp,     0.0f, 1.0f, 0.0f, d);   /* SHIPPED view (comfort baked in)    */
+    }
+
+    if (!atest) {
+
     int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
 
+    /* Refresh the mip chain of any screen that captured a new frame (cfg.mipmap).
+     * Done in its own pass so its FBO/viewport churn doesn't interleave with the
+     * wall draw; restore the glasses viewport afterwards. */
+    if (m->cfg.mipmap && g_npot) {
+        bool built = false;
+        for (int i = 0; i < n; i++) {
+            screen_t *s = &m->screen[i];
+            if (s->have_tex && s->tex_dirty && s->mesh_vbo) {
+                screen_update_mip(m, s);
+                s->tex_dirty = false;
+                built = true;
+            }
+        }
+        if (built) glViewport(0, 0, m->glasses_w, m->glasses_h);
+    }
+
     glUseProgram(R.prog);
+    /* window/screen transparency: alpha-blend the screens over the background (env
+     * dome / passthrough / black) at m->screen_opacity. At 1.0 this is a no-op (opaque). */
+    bool fade  = m->screen_opacity < 0.999f;
+    bool round = m->cfg.screen_radius > 0.0f;   /* rounded corners need to composite over the dome */
+    glUniform1f(R.uOpacity, m->screen_opacity);
+    glUniform1f(R.uRadius, round ? m->cfg.screen_radius : 0.0f);
+    if (fade || round) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     for (int i = 0; i < n; i++) {
         screen_t *s = &m->screen[i];
         if (!s->mesh_vbo) continue;
+        if (round)
+            glUniform1f(R.uAspect, (s->width > 0 && s->height > 0)
+                                   ? (float)s->width / (float)s->height : 16.0f/9.0f);
 
         mat4 model = layout_model_matrix(m, i);
         mat4 mvp   = m4_mul(vp, model);
@@ -1118,7 +1833,9 @@ void render_frame(struct mirage *m, quat head) {
 
         if (s->have_tex) {
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, s->tex);
+            /* prefer the mipmapped mirror (trilinear minification); fall back to the
+             * raw EGLImage when mipmaps are off/unsupported for this screen. */
+            glBindTexture(GL_TEXTURE_2D, (m->cfg.mipmap && s->mip_tex) ? s->mip_tex : s->tex);
             glUniform1i(R.uTex, 0);
             glUniform1f(R.uHasTex, 1.0f);
             glUniform1f(R.uYFlip, s->y_invert ? 1.0f : 0.0f);
@@ -1133,83 +1850,14 @@ void render_frame(struct mirage *m, quat head) {
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, s->mesh_verts);
     }
+    if (fade || round) glDisable(GL_BLEND);
+    glUniform1f(R.uOpacity, 1.0f);   /* restore: plaques/HUD/cursor stay opaque */
+    glUniform1f(R.uRadius, 0.0f);    /* restore: plaques/HUD/cursor stay square */
 
-    /* Status plaques under the centre-column screen, pinned to its frame so they
-     * track the wall as you pan: the FPS counter on top, the shortcut cheat-sheet
-     * below it. */
-    {
-        /* centre-column, bottom screen: smallest |yaw|, then lowest lift */
-        int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f;
-        for (int k = 0; k < n; k++) {
-            float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
-            float ay = fabsf(yw);
-            if (ay < best_yaw - 1e-4f ||
-                (ay < best_yaw + 1e-4f && lf < best_lift)) {
-                best_yaw = ay; best_lift = lf; ci = k;
-            }
-        }
-        if (ci >= 0 && ci < n) {
-            screen_t *cs = &m->screen[ci];
-            float d      = m->cfg.screen_distance_m;
-            float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
-            float aspect = (cs->width > 0 && cs->height > 0)
-                           ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
-            float hh     = d * tanf(ang_w * 0.5f) * aspect;   /* screen half-height */
-            float fullH  = 0.11f;
-            float yc     = -hh - 0.05f - fullH * 0.5f;        /* FPS row, just below edge */
-
-            glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
-            glEnableVertexAttribArray(R.aPos);
-            glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
-            glEnableVertexAttribArray(R.aUV);
-            glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
-            glActiveTexture(GL_TEXTURE0);
-
-            /* FPS counter. Re-bake the digits only when the integer value changes
-             * (~once a second); otherwise just swap the texture and the MVP. */
-            int fv = (int)(m->fps + 0.5f);
-            if (fv < 0)   fv = 0;
-            if (fv > 999) fv = 999;
-            if (fv != R.fps_val) {
-                char buf[16]; snprintf(buf, sizeof buf, "FPS %d", fv);
-                const float fc[3] = {0.62f, 0.78f, 0.95f};   /* cool blue */
-                R.label_fps = bake_label(buf, fc, &R.fps_w, &R.fps_h);
-                R.fps_val = fv;
-            }
-            if (R.label_fps) {
-                float fpsW  = fullH * ((float)R.fps_w / (float)R.fps_h);
-                mat4 local  = m4_mul(m4_translate(v3(0.0f, yc, -d)),
-                                     m4_scale(v3(fpsW, fullH, 1.0f)));
-                mat4 model  = m4_mul(layout_model_matrix(m, ci), local);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model).m);
-                glBindTexture(GL_TEXTURE_2D, R.label_fps);
-                glUniform1i(R.uTex, 0);
-                glUniform1f(R.uHasTex, 1.0f);
-                glUniform1f(R.uYFlip, 0.0f);
-                glUniform1f(R.uSharpen, 0.0f);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            }
-
-            /* Shortcut cheat-sheet, stacked below the FPS row. Static texture,
-             * drawn at a smaller scale so the lines don't hang too far down. */
-            if (R.label_help) {
-                float blockH = 0.26f;                            /* whole block height */
-                float blockW = blockH * ((float)R.help_w / (float)R.help_h);
-                float fpsBot = yc - fullH * 0.5f;                /* FPS plaque bottom */
-                float yc2    = fpsBot - 0.03f - blockH * 0.5f;
-                mat4 local2  = m4_mul(m4_translate(v3(0.0f, yc2, -d)),
-                                      m4_scale(v3(blockW, blockH, 1.0f)));
-                mat4 model2  = m4_mul(layout_model_matrix(m, ci), local2);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model2).m);
-                glBindTexture(GL_TEXTURE_2D, R.label_help);
-                glUniform1i(R.uTex, 0);
-                glUniform1f(R.uHasTex, 1.0f);
-                glUniform1f(R.uYFlip, 0.0f);
-                glUniform1f(R.uSharpen, 0.0f);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            }
-        }
-    }
+    /* The mischievous pet: a world-space critter drawn among the screens (depth-
+     * tested, so it occludes / is occluded correctly). Fully self-contained in
+     * pet.cpp; reacts to whether `head` is pointed at it. */
+    pet_draw(m, vp, eye_world, head);
 
     /* Banner entities (clock, status lines, ...): refresh each (re-bakes only when
      * its key changes) and draw it at its place on the cylinder. World-fixed, so
@@ -1220,8 +1868,38 @@ void render_frame(struct mirage *m, quat head) {
         banner_draw(b, vp);
     }
 
-    /* in-view sensitivity slider, hung under the centre screen (grab.c drives it) */
-    draw_sens_panel(m, vp);
+    /* Per-screen "#N" labels, centred above each screen. (Re)build one per screen
+     * when the count changes, then position each from its screen's LIVE placement -
+     * yaw carries world_yaw (spins with the wall), lift is the screen's own height
+     * (so the label holds above the top edge through a 4-finger dolly). */
+    if ((int)g_screen_labels.size() != n) {
+        g_screen_labels.clear();
+        for (int i = 0; i < n; i++) g_screen_labels.push_back(make_screen_label(i));
+    }
+    for (int i = 0; i < n && i < (int)g_screen_labels.size(); i++) {
+        ent::Banner &b = g_screen_labels[i];
+        const float d = m->cfg.screen_distance_m;
+        float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
+        float ang    = arc * (float)M_PI/180.0f;
+        screen_t *s  = &m->screen[i];
+        float aspect = (s->width > 0 && s->height > 0) ? (float)s->height / (float)s->width : 9.0f/16.0f;
+        /* screen half-height, matching the mesh: flat = d*tan(arc/2)*aspect,
+         * curved strip = d*arc*aspect/2 (the formulas build_flat/curved_mesh use). */
+        float hh = (m->cfg.geometry == GEOM_FLAT)
+                 ? d * tanf(ang * 0.5f) * aspect
+                 : d * ang * aspect * 0.5f;
+        banner_refresh(b, d);   /* bake first so b.tw/b.th give the label's own height */
+        float lang = b.arc * (float)M_PI/180.0f;
+        float lh   = (b.tw > 0) ? d * lang * (float)b.th / (float)b.tw : 0.0f;  /* label height (m) */
+        b.yaw  = yaw;
+        b.lift = lift + hh + lh * 0.5f;   /* label's BOTTOM edge sits exactly on the screen's top edge (glued, no gap) */
+        banner_draw(b, vp);
+    }
+
+    /* In-glasses control HUD (Clay): FPS + cheat-sheet + sensitivity/brightness/
+     * transparency sliders + layout/env switchers + geometry/bg/tilt toggles, hung
+     * under the centre screen. Lays out, draws, and refreshes the grab.c snapshot. */
+    hud_render(m, vp);
 
     /* 3D pointer: an arrow billboard at the cursor's wall direction (grab.c). It sits
      * on the same cylinder as the screens - position = yaw rotation of (0,0,-d) plus
@@ -1231,7 +1909,10 @@ void render_frame(struct mirage *m, quat head) {
      * The quad is shifted so the arrow's TIP lands exactly on the cursor point. */
     if (m->cursor_have && m->cursor_in_gap && R.cursor_tex && !calib_active(m)) {
         float d   = m->cfg.screen_distance_m;
-        float hgt = d * tanf(m->cursor_pitch);
+        /* Match layout_pick(): the cursor point sits at world height
+         * world_lift + d*tan(pitch). Omitting world_lift drifts the arrow
+         * vertically from the real 2D cursor after a 4-finger dolly. */
+        float hgt = m->world_lift + d * tanf(m->cursor_pitch);
         float sz  = 0.055f;                       /* arrow size on the wall (m) */
         mat4 place = m4_mul(m4_translate(v3(0.0f, hgt, 0.0f)),
                             m4_from_quat(q_from_euler_ypr(m->cursor_yaw, 0, 0)));
@@ -1264,6 +1945,8 @@ void render_frame(struct mirage *m, quat head) {
     /* calibration overlay last of all, head-locked, on top of the scene. */
     calib_draw(m, proj);
 
+    }   /* end if (!atest): the anchor test draws only the reticle + dome */
+
     if (m->profile) {
         /* glFinish drains the GPU so rt0->tg is pure draw cost (texture sampling
          * included); tg->ts is the present wait. High gpu = render/sampling bound;
@@ -1289,9 +1972,13 @@ void render_finish(struct mirage *m) {
      * (built here, not by capture). */
     R.prog.reset();   R.vbo.reset();
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
-    R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
-    R.label_help.reset();
+    R.cam_tex.reset();
+    pet_finish();            /* free the pet's GL program/buffer while the context is live */
+    g_hud_plaques.clear();   /* free the Clay HUD's baked plaques while the GL context is live */
+    worldvio_stop();
+    if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
+    g_screen_labels.clear();
     for (int i = 0; i < m->n_screen; i++) {
         if (m->screen[i].mesh_vbo) { glDeleteBuffers(1, &m->screen[i].mesh_vbo); m->screen[i].mesh_vbo = 0; }
     }

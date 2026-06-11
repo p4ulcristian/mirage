@@ -56,9 +56,7 @@ typedef struct {
     bool sens_drag;             /* left-press on the sensitivity handle: drag sets gain */
     bool sens_click;            /* consumed a left-press on the widget: swallow its release */
     bool bri_drag;              /* left-press on the brightness handle: drag sets env_brightness */
-    double shake_pdx, shake_pdy;  /* previous motion vector (shake-to-gaze detector) */
-    int      shake_count;         /* recent direction reversals                      */
-    uint32_t shake_last_ms;       /* time of the last reversal                       */
+    bool tr_drag;               /* left-press on the transparency handle: drag sets screen_opacity */
 
     int   n;                    /* screen count                          */
 
@@ -201,7 +199,12 @@ static void push_cursor(grab_state *g) {
  * places the panel, so a click lands where the picture shows it. */
 static void sens_cursor_local(grab_state *g, const sens_panel *sp, float *lx, float *ly) {
     *lx = sp->d * tanf(sp->yaw_c - (float)g->cyaw);
-    *ly = sp->d * tanf((float)g->cpitch) - sp->lift_c;
+    /* The cursor's world height is world_lift + d*tan(pitch) - the same height
+     * layout_pick() and the 3D arrow use. The panel sits at lift_c with NO
+     * world_lift baked in (layout_place), so the dolly offset must be added here
+     * too, or every HUD click drifts vertically by world_lift after a 4-finger
+     * dolly (the exact bug 3a6d733 fixed for the arrow, missed here). */
+    *ly = (float)g->m->world_lift + sp->d * tanf((float)g->cpitch) - sp->lift_c;
 }
 
 /* Persist the linked yaw/pitch gain into profile.toml, same path calib.cpp uses, so
@@ -240,6 +243,17 @@ static void bri_set_from_local(struct mirage *m, const sens_panel *sp, float lx)
     if (frac > 1.0f) frac = 1.0f;
     m->env_brightness = BRI_MIN + frac * (BRI_MAX - BRI_MIN);
 }
+
+/* Map the transparency handle's x (clamped to its track) to screen_opacity. */
+static void tr_set_from_local(struct mirage *m, const sens_panel *sp, float lx) {
+    float frac = (lx - sp->tr_x0) / (sp->tr_x1 - sp->tr_x0);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    m->screen_opacity = OPAC_MIN + frac * (OPAC_MAX - OPAC_MIN);
+}
+
+/* radians of world spin per unit of 3-finger horizontal swipe (tune to taste) */
+static const float WORLD_SPIN_SCALE = 0.004f;
 
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
@@ -295,31 +309,6 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         double rdx = libinput_event_pointer_get_dx_unaccelerated(p);
         double rdy = libinput_event_pointer_get_dy_unaccelerated(p);
 
-        /* Shake-to-gaze ("find my cursor"): shake the cursor back and forth and it
-         * warps to where you're LOOKING (head gaze). We count rapid direction
-         * REVERSALS - the dot product of consecutive motion vectors going negative -
-         * so an ordinary fast move never triggers it; only a deliberate there-and-
-         * back-and-there shake does. Needs SHAKE_N reversals, each within GAP ms. */
-        const double MIN2 = 6.0*6.0;     /* ignore tiny jitter moves (raw units^2) */
-        const uint32_t GAP = 400;        /* max ms between reversals to keep counting */
-        const int SHAKE_N = 3;           /* reversals needed to fire */
-        if ((rdx*rdx + rdy*rdy) > MIN2) {
-            bool had_prev = (g->shake_pdx*g->shake_pdx + g->shake_pdy*g->shake_pdy) > MIN2;
-            if (had_prev && (rdx*g->shake_pdx + rdy*g->shake_pdy) < 0.0) {   /* reversed */
-                uint32_t t = now_ms();
-                g->shake_count = (t - g->shake_last_ms > GAP) ? 1 : g->shake_count + 1;
-                g->shake_last_ms = t;
-                if (g->shake_count >= SHAKE_N && !g->world_drag && g->m->gaze_have) {
-                    g->cyaw = g->m->gaze_yaw; g->cpitch = g->m->gaze_pitch;
-                    g->shake_count = 0;
-                    g->shake_pdx = rdx; g->shake_pdy = rdy;
-                    push_cursor(g);
-                    break;
-                }
-            }
-            g->shake_pdx = rdx; g->shake_pdy = rdy;
-        }
-
         /* RAW (unaccelerated) deltas: libinput's accelerated get_dx() shrinks
          * slow motion toward zero, so a slow drag stalls at a screen edge and
          * can't cross the 1920px cell into the next screen - you had to flick.
@@ -329,12 +318,9 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         double dx = rdx * g->sens;
         double dy = rdy * g->sens;
         if (g->world_drag) {
-            /* Grabbed empty space: horizontal drag spins the whole world about the
-             * eye (yaw only - vertical is ignored, so the wall stays level). The
-             * cursor itself holds still while the screens sweep past under it. */
-            g->m->world_yaw -= (float)dx;
-            while (g->m->world_yaw >  (float)M_PI) g->m->world_yaw -= 2.0f*(float)M_PI;
-            while (g->m->world_yaw < -(float)M_PI) g->m->world_yaw += 2.0f*(float)M_PI;
+            /* Grabbed empty space: drag no longer spins the world (that moved to the
+             * 3-finger horizontal swipe). A press on the gap just parks the cursor -
+             * we swallow the drag so it neither rotates nor jumps the cursor. */
         } else {
             /* +yaw = viewer's left (see layout.c), so finger-right (dx>0) lowers yaw;
              * finger-down (dy>0) lowers pitch. Equal finger travel = equal angle
@@ -345,14 +331,24 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             if (g->cpitch < -1.4) g->cpitch = -1.4;
         }
         push_cursor(g);
+        /* idle auto-collapse: a hover over the panel keeps it awake (and re-expands
+         * the collapsed clock strip on the next frame). */
+        { sens_panel hp;
+          if (sens_panel_compute(g->m, &hp)) {
+              float hx, hy; sens_cursor_local(g, &hp, &hx, &hy);
+              if (hx >= hp.panel_x0 - 0.05f && hx <= hp.panel_x1 + 0.05f &&
+                  hy >= hp.panel_y0 - 0.05f && hy <= hp.panel_y1 + 0.05f)
+                  g->m->hud_active_ms = now_ms();
+          } }
         /* dragging the sensitivity handle: the cursor moved above, so slide the
          * gain to wherever it now sits along the track (handle follows the cursor). */
-        if (g->sens_drag || g->bri_drag) {
+        if (g->sens_drag || g->bri_drag || g->tr_drag) {
             sens_panel sp;
             if (sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
-                if (g->sens_drag) sens_set_from_local(g->m, &sp, lx);
-                else              bri_set_from_local(g->m, &sp, lx);
+                if (g->sens_drag)     sens_set_from_local(g->m, &sp, lx);
+                else if (g->bri_drag) bri_set_from_local(g->m, &sp, lx);
+                else                  tr_set_from_local(g->m, &sp, lx);
             }
         }
         break;
@@ -374,6 +370,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             sens_panel sp;
             if (st && sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
+                /* idle auto-collapse: any touch on the panel wakes it. While collapsed
+                 * the strip shows only the clock, so swallow the press and skip the widgets. */
+                bool inpanel = (lx >= sp.panel_x0 - 0.05f && lx <= sp.panel_x1 + 0.05f &&
+                                ly >= sp.panel_y0 - 0.05f && ly <= sp.panel_y1 + 0.05f);
+                if (inpanel) g->m->hud_active_ms = now_ms();
+                if (sp.collapsed) {
+                    if (inpanel) { g->sens_click = true; break; }   /* wake, eat the click */
+                } else {
                 if (lx >= sp.def_x0 && lx <= sp.def_x1 && ly >= sp.def_y0 && ly <= sp.def_y1) {
                     g->m->cfg.yaw_gain = g->m->cfg.pitch_gain = SENS_GAIN_DEF;
                     sens_persist(g->m);
@@ -413,12 +417,29 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
+                /* background-mode button: cycle black -> hdri -> passthrough. The render
+                 * thread starts/stops the camera off m->bg_mode (GL + V4L2 stay one thread). */
+                if (lx >= sp.pt_x0 && lx <= sp.pt_x1 &&
+                    ly >= sp.pt_y0 && ly <= sp.pt_y1) {
+                    g->m->bg_mode = (g->m->bg_mode + 1) % BG_MODE_COUNT;
+                    ui_persist(g->m);                /* remember background mode across restarts */
+                    g->sens_click = true;            /* swallow the matching release  */
+                    break;
+                }
                 /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
                 float bri_band = fmaxf(sp.bri_handle_h, sp.bri_track_h) * 0.5f + 0.03f;
                 if (lx >= sp.bri_x0 - 0.05f && lx <= sp.bri_x1 + 0.05f &&
                     ly >= sp.bri_row_y - bri_band && ly <= sp.bri_row_y + bri_band) {
                     g->bri_drag = g->sens_click = true;
                     bri_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
+                    break;
+                }
+                /* transparency slider: a press on its track/handle grabs it (MOTION drags). */
+                float tr_band = fmaxf(sp.tr_handle_h, sp.tr_track_h) * 0.5f + 0.03f;
+                if (lx >= sp.tr_x0 - 0.05f && lx <= sp.tr_x1 + 0.05f &&
+                    ly >= sp.tr_row_y - tr_band && ly <= sp.tr_row_y + tr_band) {
+                    g->tr_drag = g->sens_click = true;
+                    tr_set_from_local(g->m, &sp, lx);    /* jump the handle to the click */
                     break;
                 }
                 float band = fmaxf(sp.handle_h, sp.track_h) * 0.5f + 0.03f;
@@ -428,16 +449,20 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     sens_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
                     break;
                 }
+                }   /* end !collapsed widget hit-tests */
             }
             if (!st && g->sens_click) {
-                bool was_sens = g->sens_drag, was_bri = g->bri_drag;
-                g->sens_drag = g->sens_click = g->bri_drag = false;
+                bool was_sens = g->sens_drag, was_bri = g->bri_drag, was_tr = g->tr_drag;
+                g->sens_drag = g->sens_click = g->bri_drag = g->tr_drag = false;
                 if (was_sens) {
                     sens_persist(g->m);
                     std::print(stderr, "grab: sensitivity {}x\n", g->m->cfg.yaw_gain);
                 } else if (was_bri) {
                     ui_persist(g->m);                /* remember the brightness        */
                     std::print(stderr, "grab: env brightness {:.2f}\n", g->m->env_brightness);
+                } else if (was_tr) {
+                    ui_persist(g->m);                /* remember the opacity           */
+                    std::print(stderr, "grab: screen opacity {:.2f}\n", g->m->screen_opacity);
                 }
                 break;
             }
@@ -486,6 +511,39 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         if (v == 0.0) g->scroll_acc = 0.0;   /* reset on finger lift */
         break;
     }
+    /* Three-finger vertical swipe -> telephoto zoom (no Cmd needed). libinput
+     * delivers 3/4-finger swipes as gesture events through the same grabbed-
+     * trackpad queue, so the compositor never sees them (no workspace-swipe
+     * clash). Two-finger scroll is already spoken for, so three fingers is the
+     * free gesture. dy>0 (swipe down) zooms in, dy<0 (swipe up) zooms out. */
+    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
+        if (calib_active(g->m)) break;
+        struct libinput_event_gesture *gz = libinput_event_get_gesture_event(ev);
+        int nf = libinput_event_gesture_get_finger_count(gz);
+        double gdx = libinput_event_gesture_get_dx(gz);
+        double gdy = libinput_event_gesture_get_dy(gz);
+        if (nf == 3) {
+            /* 3-finger, routed by dominant axis: HORIZONTAL = spin the wall (yaw),
+             * VERTICAL = telephoto zoom. */
+            if (fabs(gdx) > fabs(gdy)) {
+                g->m->world_yaw -= (float)(gdx * WORLD_SPIN_SCALE);
+                while (g->m->world_yaw >  (float)M_PI) g->m->world_yaw -= 2.0f*(float)M_PI;
+                while (g->m->world_yaw < -(float)M_PI) g->m->world_yaw += 2.0f*(float)M_PI;
+            } else {
+                do_zoom(g, -gdy);
+            }
+        } else if (nf == 4) {
+            /* 4-finger VERTICAL = dolly the eye up/down the cylinder axis (we're inside a
+             * cylinder, so this beats swinging the wall). swipe up -> rise. Scale tracks the
+             * wall radius so the on-screen travel matches the old swing's feel at the wall. */
+            float lscale = g->m->cfg.screen_distance_m * WORLD_SPIN_SCALE;
+            g->m->world_lift += (float)(gdy * lscale);                  /* swipe up -> eye down */
+            const float WL_LIM = 1.50f;                                 /* +/-1.5 m of travel */
+            if (g->m->world_lift >  WL_LIM) g->m->world_lift =  WL_LIM;
+            if (g->m->world_lift < -WL_LIM) g->m->world_lift = -WL_LIM;
+        }
+        break;
+    }
     default: break;
     }
 }
@@ -502,6 +560,15 @@ void grab_pump(struct mirage *m) {
     }
 
     wl_display_flush(m->display);
+}
+
+/* The libinput fd, so the main loop can poll() it during idle waits and wake the
+ * instant the trackpad moves (rather than at the next throttled tick). -1 when
+ * capture mode is off — no device is grabbed, so there's nothing to watch. */
+int grab_fd(struct mirage *m) {
+    grab_state *g = GS(m);
+    if (!g || !g->active || !g->li) return -1;
+    return libinput_get_fd(g->li);
 }
 
 /* True if evdev device `fd` advertises capability `code` of `type` (EV_KEY /

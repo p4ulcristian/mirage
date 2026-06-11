@@ -46,24 +46,6 @@ typedef struct {
      * orientation with this tau, cancelling the creep while leaving real head
      * motion (well above the stillness gate) untouched. ~1 s is a good default. */
     float drift_comp_tau;
-
-    /* Facecam 6DoF: an OPTIONAL second input supplying head POSITION (the IMU above
-     * gives orientation only — it physically cannot sense translation). When enabled,
-     * a separate thread listens on facecam_socket for unix-dgram JSON
-     *   {"pos":[x,y,z]}   x,y in metres (mirage world axes, +x right/+y up),
-     *                     z = camera->head distance in metres (smaller = leaned in)
-     * sent by facecam_bridge (webcam + face detector). It runs independently of the
-     * orientation backend, so the RayNeo IMU keeps driving rotation untouched.
-     * facecam_enable=false (or socket=NULL) disables it; pose_position() then is 0. */
-    bool  facecam_enable;
-    const char *facecam_socket;  /* unix dgram path (default /tmp/mirage-facecam.sock) */
-    float facecam_smooth;        /* One-Euro rest cutoff (Hz); lower = steadier/laggier (~1.2) */
-    /* Visual-inertial fusion: integrate the IMU's linear acceleration (sent by the
-     * rayneo bridge alongside orientation) for low-latency position, corrected by the
-     * camera's absolute position. Falls back to camera-only if the bridge sends no
-     * accel or this is off. Mirrors the vestibulo-ocular reflex: fast inertial, slow
-     * visual correction. */
-    bool  facecam_fusion;
 } pose_config;
 
 /* Start the reader thread. Returns 0 on success, -1 on error. */
@@ -81,20 +63,7 @@ quat pose_latest(void);
  * while you turn). horizon_s <= 0 == pose_latest(). */
 quat pose_predicted(float horizon_s);
 
-/* Head POSITION as a world-axis eye offset (metres) relative to the reference captured
- * at the last recenter — rest = {0,0,0}, +x = lean right, +y = lean up, -z = lean toward
- * the wall. horizon_s forward-predicts along the filtered position velocity to offset the
- * webcam's latency (hard-capped so noise can't fling; <=0 = present). {0,0,0} when facecam
- * is disabled or has no signal yet. render uses this as the eye translation for parallax. */
-vec3 pose_position(float horizon_s);
-
-/* True when a fresh facecam position sample arrived recently (~0.5 s). render switches on
- * this between the real measured position and the neck-model fallback, so losing the camera
- * (busy, out of frame, bridge down) degrades gracefully to 3DoF instead of freezing. */
-bool pose_position_active(void);
-
-/* Set the current raw orientation as the new "looking straight ahead" zero. Also
- * snaps the facecam position reference to here, so a recenter zeroes lean too. */
+/* Set the current raw orientation as the new "looking straight ahead" zero. */
 void pose_recenter(void);
 
 /* Counter that bumps on every recenter. render watches it to reseed the reading-

@@ -162,8 +162,28 @@ static int classify_outputs(void) {
         M.glasses_w = M.pending[glasses].w;
         M.glasses_h = M.pending[glasses].h;
     } else {
-        M.glasses_name = "windowed";
-        M.glasses_w = WIN_W; M.glasses_h = WIN_H;
+        /* Windowed (no glasses): target the laptop's OWN output explicitly. Passing NULL to
+         * set_fullscreen below lets the compositor choose, and with the headless VIRT outputs
+         * present it picks one of those about half the time - mirage then maps invisibly on a
+         * VIRT while it grabs the trackpad ("every second start I don't see mirage, mouse
+         * stuck"). Pin fullscreen to the real (non-VIRT) output - prefer the built-in panel -
+         * so it lands on a monitor that's actually being shown. Same deterministic path the
+         * glasses branch uses; no post-launch workspace juggling needed. */
+        int lap = -1;
+        for (int i = 0; i < M.n_pending; i++) {
+            if (M.pending[i].name.rfind("VIRT", 0) == 0) continue;   /* skip virtual screens */
+            if (lap < 0) lap = i;                                    /* first real output     */
+            if (M.pending[i].name.rfind("eDP", 0) == 0) { lap = i; break; }  /* prefer laptop panel */
+        }
+        if (lap >= 0) {
+            M.glasses_out  = M.pending[lap].wl;
+            M.glasses_name = M.pending[lap].name;     /* e.g. eDP-1 */
+            M.glasses_w    = M.pending[lap].w;
+            M.glasses_h    = M.pending[lap].h;
+        } else {
+            M.glasses_name = "windowed";
+            M.glasses_w = WIN_W; M.glasses_h = WIN_H;
+        }
     }
 
     /* virtual screens: outputs named VIRT*, in name order */
@@ -195,6 +215,8 @@ int main(void) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
     M.env_brightness = BRI_DEF;   /* HUD brightness slider starts centred (1.0 = as tuned) */
+    M.screen_opacity = OPAC_DEF;  /* windows fully opaque until the transparency slider moves */
+    M.bg_mode = BG_HDRI;          /* default background = the environment dome */
 
     /* device/tracking/optics calibration: overlay profile.toml on the defaults and
      * stash the result, so it can be re-stamped after every layout switch (layouts
@@ -243,6 +265,14 @@ int main(void) {
     if (ui.has_geometry)   M.cfg.geometry  = ui.geometry;
     if (ui.has_brightness) M.env_brightness = ui.brightness;
     if (ui.has_env)        env_switch(&M, ui.env);
+    if (ui.has_bg_mode)    M.bg_mode       = ui.bg_mode;     /* render starts the cam on frame 1 if PASSTHROUGH */
+    if (ui.has_opacity)    M.screen_opacity = ui.opacity;
+    /* Live A/B for the forward-prediction horizon (0 = off). Lets you feel the
+     * fast-turn overshoot with/without prediction without a rebuild per value. */
+    if (const char *pe = getenv("MIRAGE_PREDICT_MS")) {
+        M.cfg.pose_predict_ms = (float)atof(pe);
+        std::print(stderr, "mirage: pose_predict_ms override = {} ms\n", M.cfg.pose_predict_ms);
+    }
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
@@ -300,11 +330,7 @@ int main(void) {
                        .use_oneeuro = M.cfg.pose_oneeuro,
                        .oe_mincutoff = M.cfg.pose_mincutoff,
                        .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
-                       .drift_comp_tau = M.cfg.pose_drift_tau,
-                       .facecam_enable = M.cfg.facecam_enable,
-                       .facecam_socket = "/tmp/mirage-facecam.sock",
-                       .facecam_smooth = M.cfg.facecam_smooth,
-                       .facecam_fusion = M.cfg.facecam_fusion };
+                       .drift_comp_tau = M.cfg.pose_drift_tau };
     if (pose_start(&pc) != 0)
         std::print(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
 
@@ -320,7 +346,22 @@ int main(void) {
      * regions, so a mostly-static desktop is cheap even at 60 - the old full-output
      * wlr-screencopy blit that forced 30Hz is gone. */
     const double CAP_PERIOD = 1.0 / 60.0;
+
+    /* Idle frame throttle. When the glasses aren't streaming pose (windowed on the
+     * laptop, or glasses unplugged) AND nothing has changed for IDLE_GRACE — no
+     * trackpad input, no desktop damage, no overlay or one-shot — drop the render
+     * cadence from panel vsync to IDLE_FPS. The clock and pet keep ticking, just
+     * slower; a static screen stops burning a whole core. It NEVER engages while
+     * pose is live: that path must stay at full rate so head tracking gains no
+     * latency. We resume full rate the instant anything happens (poll wakes on the
+     * wayland or libinput fd, so input/desktop damage has no extra lag). */
+    const double IDLE_GRACE  = 0.5;          /* seconds of calm before throttling   */
+    const double IDLE_PERIOD = 1.0 / 12.0;   /* idle cadence: clock/pet still move   */
+    struct timespec last_active = fps_t0;    /* last frame something actually changed */
+    struct timespec last_render = fps_t0;    /* last frame we drew (paces idle ticks) */
+    quat last_head = q_identity();
     while (M.running && !g_stop) {
+        bool evt = false;   /* a one-shot (resize/recenter/overlay) forced a render */
         /* drain pending events first (xdg ping/pong, resizes) so the
          * compositor never flags us as unresponsive */
         wl_display_dispatch_pending(M.display);
@@ -330,6 +371,7 @@ int main(void) {
             (g_win_cfg_w != M.glasses_w || g_win_cfg_h != M.glasses_h)) {
             M.glasses_w = g_win_cfg_w; M.glasses_h = g_win_cfg_h;
             wl_egl_window_resize(M.egl_window, M.glasses_w, M.glasses_h, 0, 0);
+            evt = true;
         }
         /* Decoupled capture: fire a screencopy for any idle screen, then pump
          * the Wayland socket NON-blocking and consume whatever has landed. We
@@ -343,14 +385,31 @@ int main(void) {
             double since = (ct.tv_sec - cap_t.tv_sec) + (ct.tv_nsec - cap_t.tv_nsec) * 1e-9;
             if (since >= CAP_PERIOD) { capture_begin_frame(&M); cap_t = ct; }
         }
+        /* How long we're willing to sleep in poll() below. Normally 0 (non-blocking:
+         * eglSwapBuffers is the pacer). When throttling, block until the next idle
+         * tick is due — but wake early on any wayland or libinput activity. */
+        int poll_to = 0;
+        {
+            struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+            double calm = (tn.tv_sec - last_active.tv_sec) + (tn.tv_nsec - last_active.tv_nsec) * 1e-9;
+            if (!pose_has_signal() && calm > IDLE_GRACE) {
+                double since_r = (tn.tv_sec - last_render.tv_sec) + (tn.tv_nsec - last_render.tv_nsec) * 1e-9;
+                double wait = IDLE_PERIOD - since_r;
+                poll_to = wait <= 0.0 ? 0 : (int)(wait * 1000.0);
+            }
+        }
         while (wl_display_prepare_read(M.display) != 0)
             wl_display_dispatch_pending(M.display);
         wl_display_flush(M.display);
-        struct pollfd pfd = { .fd = wl_display_get_fd(M.display), .events = POLLIN };
-        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))
+        struct pollfd pfd[2];
+        pfd[0] = (struct pollfd){ .fd = wl_display_get_fd(M.display), .events = POLLIN, .revents = 0 };
+        int nfd = 1, gfd = grab_fd(&M);
+        if (gfd >= 0) { pfd[1] = (struct pollfd){ .fd = gfd, .events = POLLIN, .revents = 0 }; nfd = 2; }
+        if (poll(pfd, nfd, poll_to) > 0 && (pfd[0].revents & POLLIN))
             wl_display_read_events(M.display);
         else
             wl_display_cancel_read(M.display);
+        bool grab_woke = nfd == 2 && (pfd[1].revents & POLLIN);   /* trackpad input pending */
         wl_display_dispatch_pending(M.display);
         capture_poll(&M);   /* bind any ready frames into textures; never blocks */
 
@@ -369,17 +428,45 @@ int main(void) {
             bool on = pose_toggle_smoothing(); g_smooth_toggle = 0;
             std::print(stderr, "mirage: pose smoothing {}\n",
                     on ? "ON (filtered)" : "OFF (raw passthrough)");
+            evt = true;
         }
         grab_pump(&M);   /* drain trackpad motion/buttons while captured */
 
         /* Centring is owned by the calibration overlay (calib.c): it waits for you
          * to look forward and hold still, then recenters - the guided version of
          * the old "recenter on first sample". SIGUSR2 re-opens the full wizard. */
-        if (g_calib) { calib_start_wizard(&M); g_calib = 0; }
-        if (g_recenter) { pose_recenter(); g_recenter = 0;
+        if (g_calib) { calib_start_wizard(&M); g_calib = 0; evt = true; }
+        if (g_recenter) { pose_recenter(); g_recenter = 0; evt = true;
                           std::print(stderr, "mirage: recentered\n"); }
         quat head = pose_has_signal()
                   ? pose_predicted(M.cfg.pose_predict_ms * 0.001f) : q_identity();
+
+        /* Decide whether this frame needs drawing. Anything that changes the picture
+         * counts as activity and refreshes the idle timer: desktop damage, trackpad
+         * input, head motion, a layout/env switch, or a one-shot above. When pose is
+         * live we always render (the throttle below can't engage). */
+        bool active = evt || grab_woke || M.content_changed
+                   || M.layout_dirty || M.env_dirty;
+        M.content_changed = false;
+        {   /* head motion: dot = cos(angle/2); ~1 means still. Identity vs identity
+             * in windowed mode reads exactly still, so this never falsely wakes. */
+            float dot = head.w*last_head.w + head.x*last_head.x
+                      + head.y*last_head.y + head.z*last_head.z;
+            if (dot < 0.0f) dot = -dot;
+            if (dot < 0.9999995f) active = true;   /* >~0.1 deg since last frame */
+            last_head = head;
+        }
+        struct timespec t_dec; clock_gettime(CLOCK_MONOTONIC, &t_dec);
+        if (active) last_active = t_dec;
+        double calm = (t_dec.tv_sec - last_active.tv_sec) + (t_dec.tv_nsec - last_active.tv_nsec) * 1e-9;
+        bool throttling = !pose_has_signal() && calm > IDLE_GRACE;
+        bool do_render = true;
+        if (throttling) {
+            double since_r = (t_dec.tv_sec - last_render.tv_sec) + (t_dec.tv_nsec - last_render.tv_nsec) * 1e-9;
+            do_render = since_r >= IDLE_PERIOD;   /* idle tick keeps clock/pet alive */
+        }
+        if (!do_render) continue;   /* nothing changed: skip the draw + buffer swap */
+        last_render = t_dec;
         render_frame(&M, head);
         wl_display_flush(M.display);
 

@@ -51,37 +51,78 @@ LDLIBS   := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
 # ---- core mirage objects (wayland + GL), now C++ ----
 MIRAGE_SRC := src/main.cpp src/pose.cpp src/capture.cpp src/render.cpp \
               src/layout.cpp src/grab.cpp src/config.cpp src/layouts.cpp \
-              src/profile.cpp src/calib.cpp src/stb_truetype_impl.cpp src/diag.cpp
+              src/profile.cpp src/calib.cpp src/stb_truetype_impl.cpp src/diag.cpp \
+              src/camera.cpp src/worldvio.cpp src/clay_impl.cpp src/pet.cpp \
+              src/gltf_impl.cpp
 MIRAGE_OBJ := $(MIRAGE_SRC:src/%.cpp=build/obj/%.o) $(PROTO_OBJ)
+# camera passthrough decodes MJPEG with libturbojpeg
+MIRAGE_LIBS := -lturbojpeg
 
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o build/obj/diag.o
 
-# facecam 6DoF bridge (webcam head-position tracker) - separate target so OpenCV is
-# only required when you actually build it, like the rayneo bridge.
 OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
-# Link only the modules we use - pkg-config --libs opencv4 pulls in viz/hdf (VTK,
-# HDF5) which over-link and fail. FaceDetectorYN lives in objdetect over dnn.
-OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
-                 -lopencv_objdetect -lopencv_dnn
 
-.PHONY: all posedump protocols bridge facecam clean
+# mirage's worldvio (6DoF-lite) optional OpenCV LK backend: needs core/imgproc/video.
+# Headers go to every TU (just -I, harmless); only worldvio.o uses the symbols.
+CXXFLAGS    += $(OPENCV_CFLAGS)
+MIRAGE_LIBS += -lopencv_core -lopencv_imgproc -lopencv_video -lopencv_calib3d
+
+.PHONY: all posedump protocols bridge viture viture-vio camcal clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
-facecam: facecam-bridge
+viture: viture-bridge
+viture-vio: viture-vio-bin
+camcal: viture-camcal
 protocols: $(PROTO_HDR) $(PROTO_SRC)
+
+# Self-calibration of the world camera's intrinsics (the Beast won't share its factory
+# calibration). Reuses camera.cpp; needs OpenCV calib3d + turbojpeg. Headless.
+viture-camcal: src/tool_camcal.cpp src/camera.cpp src/camera.h
+	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra -Isrc $(OPENCV_CFLAGS) -o $@ \
+	    src/tool_camcal.cpp src/camera.cpp \
+	    -lturbojpeg -lopencv_core -lopencv_imgproc -lopencv_calib3d -pthread
+
+# VITURE Carina VIO (OpenVINS) bring-up harness. Links libcarina_vio.so directly
+# (the carina_vio_* exports are C-linkage but take libstdc++ types by ref, matching
+# our g++ __cxx11 ABI). rpath so it finds the .so next to the repo at runtime.
+SDK_DIR ?= viture-sdk
+viture-vio-bin: src/viture_vio.cpp src/camera.cpp src/camera.h
+	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra -Isrc -o viture-vio \
+	    src/viture_vio.cpp src/camera.cpp \
+	    -L$(SDK_DIR) -lcarina_vio -Wl,-rpath,'$$ORIGIN/$(SDK_DIR)' \
+	    -lturbojpeg -ldl -pthread
 
 rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
 	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
 	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
 
-facecam-bridge: src/facecam_bridge.cpp
-	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra $(OPENCV_CFLAGS) \
-	    -o $@ $< $(OPENCV_LIBS)
+# VITURE (Beast) head-tracking bridge. dlopen()s VITURE's v2.0.0 aarch64 SDK
+# (libglasses.so) at runtime (so it builds with no SDK present, only -ldl) and fuses
+# the Beast's raw IMU with VQF (src/vqf, C++) - with the RayNeo Madgwick kept as an
+# A/B fallback. C sources compiled with $(CC), VQF + shim with $(CXX); linked with $(CXX).
+VB_C_OBJ   := build/obj/vb_bridge.o build/obj/vb_rayneo.o build/obj/vb_magcal.o
+VB_CPP_OBJ := build/obj/vb_vqf.o build/obj/vb_vqf_shim.o
+VB_CFLAGS  := -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc
+VB_CXXFLAGS:= -O2 -g -std=gnu++17 -Wall -Wextra -Isrc
+
+build/obj/vb_bridge.o: src/viture_bridge.c src/rayneo.h src/magcal.h src/vqf_shim.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_rayneo.o: src/rayneo.c src/rayneo.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_magcal.o: src/magcal.c src/magcal.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_vqf.o: src/vqf/vqf.cpp src/vqf/vqf.hpp | build/obj
+	$(CXX) $(VB_CXXFLAGS) -c -o $@ $<
+build/obj/vb_vqf_shim.o: src/vqf_shim.cpp src/vqf_shim.h src/vqf/vqf.hpp | build/obj
+	$(CXX) $(VB_CXXFLAGS) -c -o $@ $<
+
+viture-bridge: $(VB_C_OBJ) $(VB_CPP_OBJ)
+	$(CXX) -O2 -g -o $@ $^ -ldl -lm
 
 mirage: $(MIRAGE_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS) $(MIRAGE_LIBS)
 
 mirage-posedump: $(POSEDUMP_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lm -pthread
@@ -107,4 +148,4 @@ build/proto build/obj:
 	mkdir -p $@
 
 clean:
-	rm -rf build mirage mirage-posedump rayneo-bridge facecam-bridge
+	rm -rf build mirage mirage-posedump rayneo-bridge viture-bridge

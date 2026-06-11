@@ -62,33 +62,25 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
     c->pose_drift_tau    = 1.0f;   /* cancel 6-axis heading creep when still (s); 0 = off */
     c->pose_predict_ms   = 18.0f;  /* forward-predict head ~18 ms so the wall stays nailed mid-turn (0 = off) */
-    c->yaw_gain          = 8.0f;   /* >1 amplifies head yaw: the scene swings faster than the head, so the
-                                    * side screens need less neck turn. 1.0 = 1:1 world-fixed (nailed in
-                                    * space like a real monitor). (Verified direction empirically via the
-                                    * gaze readout: yaw_gain=-1 tracked inverted, so + is correct after the
-                                    * IMU axis remap.) */
-    c->pitch_gain        = 8.0f;   /* amplify up/down look too, so top/bottom rows need less neck tilt */
+    c->yaw_gain          = 1.0f;   /* 1.0 = 1:1 world-fixed: the scene is nailed in space like a real
+                                    * monitor and your head moves naturally through it (the honest anchored
+                                    * feel, and it doesn't amplify IMU jitter). Slide >1 to swing the scene
+                                    * faster than the head so wide layouts need less neck turn. (Direction
+                                    * verified via the gaze readout: yaw_gain=-1 tracked inverted, so + is
+                                    * correct after the IMU axis remap.) */
+    c->pitch_gain        = 1.0f;   /* up/down look: keep equal to yaw_gain (swing is isotropic) */
     c->roll_damp         = 0.0f;   /* no tilt: fully horizon-locked (head roll ignored) */
-    c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
+    c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still */
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
-    c->facecam_enable        = true;  /* ON for desk use: lateral lean parallax from the webcam. Needs a
-                                       * STABLE, world-fixed camera (a moving laptop -> jumps). Fusion stays
-                                       * off (below) and depth off, so it's the clean camera-only position. */
-    c->facecam_lateral_gain  = 1.0f;  /* 1:1 lean/slide -> eye shift; flip sign if left/right is inverted */
-    c->facecam_depth_gain    = 0.0f;  /* lean in/out (depth) OFF: barely used at a desk and the
-                                       * noisiest single-camera axis. Lateral (x) + vertical (y)
-                                       * parallax stay on. Set >0 (e.g. 0.5) to re-enable lean-in. */
-    c->facecam_smooth        = 0.8f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier. Lowered
-                                       * from 1.2 to damp residual camera misdetections at rest. */
-    c->facecam_fusion        = false; /* OFF: the accel fusion's z (distance vs world-coord) never
-                                       * settles and yanks lateral position during corrections -
-                                       * the diag log showed it causing the still-jumps. Depth is
-                                       * disabled and lean is slow, so camera-only position is better. */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
+    c->screen_radius     = 0.025f; /* gently rounded display corners (fraction of screen height; 0 = square) */
+    c->msaa_samples      = 4;      /* 4x MSAA on the screen-edge geometry (0 = off); cheap on the tiled GPU */
+    c->mipmap            = true;   /* trilinear minification kills deep-minified sparkle the base level can't */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
+    c->follow_screen     = -1;     /* no head-locked follow screen unless a layout flags one */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
-    strcpy(c->hdri_path, "hdri/starmap_2020_4k.hdr");  /* NASA Deep Star Maps 2020, 4K */
+    strcpy(c->hdri_path, "hdri/starmap_2020_8k.hdr");  /* NASA Deep Star Maps 2020, 8K */
     c->hdri_exposure     = 7.0f;   /* boost the stars hard so they pop after the black point */
     c->hdri_intensity    = 1.0f;   /* full strength: with blacks crushed, only stars add light */
     c->hdri_black        = 0.025f; /* kill the faint haze floor -> true black (transparent on optics) */
@@ -104,7 +96,7 @@ void mirage_config_defaults(mirage_config *c) {
  * numbers are starting points; tune on-glasses. Add a row by adding an entry (<= MAX). */
 const mirage_env MIRAGE_ENVS[] = {
     /* name        hdri_path (flat .hdr; fetch.sh)      exp    inten  black   sat   on   */
-    { "Space",    "hdri/starmap_2020_4k.hdr",           7.0f,  1.0f,  0.025f, 1.7f,  true  },
+    { "Space",    "hdri/starmap_2020_8k.hdr",           7.0f,  1.0f,  0.025f, 1.7f,  true  },
     /* Nature scenes measure far brighter than the starfield (mean luminance ~0.5-0.7
      * vs 0.016), so they lean DARK here - high black point crushes the midtones to
      * transparent, leaving only highlights (moon, sky band, water sheen) glowing, with

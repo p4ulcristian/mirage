@@ -17,8 +17,9 @@
 #include <ctime>
 #include <string>
 
-static const float CENTER_S = 1.2f;    /* fixed centring countdown (s)            */
-static const float DONE_S   = 0.9f;    /* how long the "Ready" flash lingers      */
+static const float CENTER_S  = 1.2f;   /* fixed centring countdown (s)            */
+static const float DONE_S    = 0.9f;   /* how long the "Ready" flash lingers      */
+static const float NOSIGNAL_S = 3.0f;  /* no IMU signal this long -> skip calib    */
 
 static double mono_s(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -30,6 +31,7 @@ void calib_init(struct mirage *m, bool had_profile) {
     m->calib.wizard    = !had_profile;     /* no profile yet -> full first-run wizard */
     m->calib.still_t   = 0.0f;
     m->calib.done_t    = 0.0f;
+    m->calib.wait_t    = 0.0f;
     m->calib.have_prev = false;
 }
 
@@ -62,8 +64,18 @@ void calib_update(struct mirage *m, quat head) {
 
     switch (c->step) {
     case CALIB_CENTER: {
-        /* need a live head signal; until then, sit and wait (no false centre). */
-        if (!pose_has_signal()) { c->still_t = 0.0f; return; }
+        /* need a live head signal; until then, sit and wait (no false centre) - but
+         * not forever. Running on the laptop without glasses there is no IMU, so the
+         * signal never comes; after a short grace period give up on tracking
+         * calibration entirely (you can't centre a head sensor that isn't there) and
+         * drop the overlay, so the desktop look-around (3/4-finger swipes) is usable. */
+        if (!pose_has_signal()) {
+            c->still_t = 0.0f;
+            c->wait_t += dt;
+            if (c->wait_t >= NOSIGNAL_S) { c->wait_t = 0.0f; c->step = CALIB_OFF; }
+            return;
+        }
+        c->wait_t = 0.0f;
         /* Fixed countdown, NOT a stillness gate: a 6-axis IMU's heading drifts, so
          * the orientation never reads "still" even with your head dead-still - a
          * stillness gate could never finish. Instead we pin the view to centre

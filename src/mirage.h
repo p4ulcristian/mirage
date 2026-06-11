@@ -26,11 +26,14 @@
 
 #include "math3d.h"
 
-#define MIRAGE_MAX_SCREENS 8
+#define MIRAGE_MAX_SCREENS 10
 
 /* screen surface: curved cylinder strips, or flat quads in the same column-yaw
  * / straight-up-row layout (no bend, but same orientation). */
 enum mirage_geometry { GEOM_CYLINDER = 0, GEOM_FLAT = 1 };
+
+/* what sits behind the windows; cycled by the HUD background-mode button. */
+enum mirage_bg_mode { BG_BLACK = 0, BG_HDRI = 1, BG_PASSTHROUGH = 2, BG_MODE_COUNT = 3 };
 
 struct mirage; /* fwd */
 
@@ -49,7 +52,9 @@ typedef struct {
     uint32_t              stride;
     struct wl_buffer     *buffer;
     EGLImageKHR           image;
-    GLuint                tex;
+    GLuint                tex;        /* dmabuf EGLImage, level 0 only (no mip chain) */
+    GLuint                mip_tex;    /* mirror of tex with a full mip chain (cfg.mipmap) */
+    bool                  tex_dirty;  /* a new frame landed; rebuild the mip chain next draw */
 
     /* per-frame capture state (ext-image-copy-capture-v1) */
     struct ext_image_copy_capture_session_v1 *session;  /* persistent per output */
@@ -101,21 +106,17 @@ typedef struct {
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
-    float neck_fwd_m;           /* FALLBACK parallax when facecam is off/silent: eye distance
-                                 * ahead of the neck pivot (synthesised from rotation; 0 = off) */
-    float neck_up_m;            /* fallback parallax: eye height above the neck pivot */
-
-    /* facecam 6DoF: webcam-measured head POSITION on top of the 3DoF IMU rotation
-     * (see src/facecam_bridge.cpp). The bridge sends position to the pose layer;
-     * these gains map measured head movement to eye translation in the render. */
-    bool  facecam_enable;       /* listen for webcam head position (lean/slide parallax) */
-    float facecam_lateral_gain; /* eye shift per metre of measured x/y head move; <0 flips axis */
-    float facecam_depth_gain;   /* same for lean in/out (z); depth is noisier, keep modest */
-    float facecam_smooth;       /* One-Euro rest cutoff (Hz) in the pose thread; lower = steadier */
-    bool  facecam_fusion;       /* fuse IMU linear-accel for low-latency position (VOR-style);
-                                 * needs the rayneo bridge to emit accel. Off = camera-only */
+    float neck_fwd_m;           /* parallax: eye distance ahead of the neck pivot (synthesised
+                                 * from rotation; the near windows shift against the far dome; 0 = off) */
+    float neck_up_m;            /* parallax: eye height above the neck pivot */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
+    float screen_radius;        /* corner radius as a fraction of screen height (0 = square) */
+    int   msaa_samples;         /* MSAA sample count for the window surface (0/1 = off); init-time only */
+    bool  mipmap;               /* trilinear minification: mirror each screen into a mipmapped texture */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
+    int   follow_screen;        /* index of the head-locked "follow" screen (-1 = none):
+                                 * rendered at m->follow_yaw + its own lift, hovering
+                                 * above-front instead of pinned to the wall. */
 
     /* HDRI environment dome: an equirectangular image drawn as an infinite,
      * world-fixed backdrop you look around. On the additive optics it only adds
@@ -182,6 +183,7 @@ typedef struct {
     bool   wizard;     /* true = full first-run wizard; false = quick centre only */
     float  still_t;    /* seconds the head has held still (CENTER step)           */
     float  done_t;     /* DONE-flash countdown (s)                               */
+    float  wait_t;     /* seconds spent waiting for a pose signal (CENTER step)  */
     quat   prev;       /* previous head sample, for the stillness speed          */
     bool   have_prev;
 } calib_state;
@@ -262,9 +264,20 @@ struct mirage {
                             * cursor reaches the gaps); over a screen it stays hidden
                             * so it doesn't duplicate the painted desktop pointer. */
     float world_yaw;       /* horizontal rotation of the whole wall about the eye,
-                            * driven by drag-on-empty-space (grab.c). Added to every
+                            * driven by 3-finger horizontal swipe (grab.c). Added to every
                             * screen's placement, so render + cursor picking spin as
                             * one; the cursor's own direction stays in fixed space. */
+    float world_lift;      /* vertical TRANSLATION of the eye along the cylinder axis (metres,
+                            * +up), driven by 4-finger vertical swipe. We're inside a cylinder, so
+                            * dollying the eye up/down feels right where swinging the wall did not.
+                            * Added to eye_world.y in render; layout_pick offsets the cursor height
+                            * by it so clicks stay aligned. */
+
+    /* head-locked "follow" screen (cfg.follow_screen): its yaw isn't on the fixed
+     * wall - it lazily eases toward where you're looking so it hovers above-front.
+     * render updates this each frame from the head yaw; layout_place reads it for
+     * that one screen (no world_yaw), so render + cursor picking stay in sync. */
+    float follow_yaw;
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */
@@ -276,7 +289,28 @@ struct mirage {
     int   active_env;
     bool  env_dirty;
     float env_brightness;   /* HUD slider: multiplies the dome intensity (1.0 = as tuned) */
+
+    /* HUD idle auto-collapse: monotonic ms (matches grab.c now_ms) of the last touch/
+     * hover on the panel. After HUD_IDLE_MS with no interaction the panel collapses to
+     * just the FPS strip; hovering it wakes it. 0 = uninitialised (starts awake). */
+    uint32_t hud_active_ms;
+
+    /* background mode (HUD cycle button): what sits behind the windows.
+     *   BG_BLACK       - nothing (true black -> see-through on the additive optics)
+     *   BG_HDRI        - the environment dome (default)
+     *   BG_PASSTHROUGH - the world-facing camera, head-locked fullscreen
+     * render.cpp owns the camera's lifecycle off this (lazy start / release). */
+    int         bg_mode;        /* mirage_bg_mode */
+    struct cam *cam;
+
+    /* window/screen opacity (HUD transparency slider): screens alpha-blend over the
+     * background at this alpha, so you can fade the wall to see the real world (or the
+     * passthrough) through it. 1.0 = fully opaque (as before). */
+    float       screen_opacity;
     bool running;
+    /* idle throttle: capture_poll sets this when a fresh frame binds (real desktop
+     * damage), so the main loop knows the picture changed and stays at full rate. */
+    bool content_changed;
 };
 
 #define MIRAGE_ZOOM_MIN 0.5f
@@ -308,6 +342,8 @@ typedef struct {
     bool  has_env;       int   env;            /* active_env index          */
     bool  has_brightness; float brightness;    /* env_brightness            */
     bool  has_layout;    char  layout[64];     /* active layout NAME        */
+    bool  has_bg_mode;   int   bg_mode;        /* mirage_bg_mode            */
+    bool  has_opacity;   float opacity;        /* screen_opacity            */
 } mirage_ui_state;
 std::string ui_state_default_path();                      /* $MIRAGE_UI_STATE / XDG path */
 int  ui_state_load(const char *path, mirage_ui_state *s); /* present keys; count          */
@@ -412,19 +448,41 @@ typedef struct {
     float bri_track_h;                     /* track thickness (m)                 */
     float bri_handle_x;                    /* handle centre for current brightness */
     float bri_handle_w, bri_handle_h;      /* handle size (m)                     */
-    /* flat/curved geometry toggle: one button row below the brightness slider */
+    /* window/screen transparency slider: one row below the brightness slider */
+    float tr_row_y;                        /* slider y centre (m)                 */
+    float tr_x0, tr_x1;                    /* track ends (m)                      */
+    float tr_track_h;                      /* track thickness (m)                 */
+    float tr_handle_x;                     /* handle centre for current opacity   */
+    float tr_handle_w, tr_handle_h;        /* handle size (m)                     */
+    /* flat/curved geometry toggle: one button row below the transparency slider */
     float geo_x0, geo_x1;                  /* button horizontal extent (m)        */
     float geo_y0, geo_y1;                  /* button vertical extent (m)          */
     int   geo_flat;                        /* 1 = currently flat (else curved)    */
+    /* background-mode button (black / hdri / passthrough): below the flat/curved toggle */
+    float pt_x0, pt_x1;                    /* button horizontal extent (m)        */
+    float pt_y0, pt_y1;                    /* button vertical extent (m)          */
+    int   pt_mode;                         /* current mirage_bg_mode              */
+    /* head-tilt (roll) toggle: below the background-mode button */
+    float tl_x0, tl_x1;                    /* button horizontal extent (m)        */
+    float tl_y0, tl_y1;                    /* button vertical extent (m)          */
+    int   tl_on;                           /* 1 = head roll tracked, 0 = horizon-locked */
+    /* idle auto-collapse: the whole laid-out panel's bounds (m) so grab can tell a
+     * hover/touch is on the HUD (wakes it); collapsed = only the FPS strip is shown. */
+    float panel_x0, panel_x1, panel_y0, panel_y1;
+    int   collapsed;                       /* 1 = idle-collapsed (FPS only, no widgets) */
 } sens_panel;
 
 #define BRI_MIN 0.20f
 #define BRI_MAX 3.00f
 #define BRI_DEF 1.00f
 
+#define OPAC_MIN 0.15f   /* don't let windows vanish entirely */
+#define OPAC_MAX 1.00f
+#define OPAC_DEF 1.00f
+
 #define SENS_GAIN_MIN 1.0f
 #define SENS_GAIN_MAX 16.0f
-#define SENS_GAIN_DEF 8.0f    /* matches config.cpp yaw_gain/pitch_gain default */
+#define SENS_GAIN_DEF 1.0f    /* matches config.cpp yaw_gain/pitch_gain default (1:1, natural) */
 
 /* Fill *out with the slider geometry for the current frame; false if there's no
  * screen to hang it under. Shared by render (draw) and grab (hit-test). */
@@ -435,6 +493,7 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out);
 bool grab_init(struct mirage *m);
 void grab_toggle(struct mirage *m);   /* enter/leave capture mode (Super+G)    */
 void grab_pump(struct mirage *m);     /* drain trackpad events (every frame)   */
+int  grab_fd(struct mirage *m);       /* libinput fd (poll it to wake on input), -1 if inactive */
 bool grab_active(struct mirage *m);
 int  grab_cursor_screen(struct mirage *m);  /* focused screen idx, -1 if none   */
 void grab_destroy(struct mirage *m);

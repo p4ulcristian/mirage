@@ -384,6 +384,8 @@ bool capture_poll(struct mirage *m) {
             bool ready = s->frame_state == 2;
             if (ready) {
                 s->have_tex = true;
+                s->tex_dirty = true;   /* render rebuilds the mip chain from the new frame */
+                m->content_changed = true;   /* real desktop damage — keep the idle throttle awake */
                 if (s->image != EGL_NO_IMAGE_KHR) {
                     glBindTexture(GL_TEXTURE_2D, s->tex);
                     p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, s->image);
@@ -408,6 +410,7 @@ void capture_finish(struct mirage *m) {
         if (s->session) ext_image_copy_capture_session_v1_destroy(s->session);
         if (s->image && p_eglDestroyImageKHR) p_eglDestroyImageKHR(m->edpy, s->image);
         if (s->tex)     glDeleteTextures(1, &s->tex);
+        if (s->mip_tex) glDeleteTextures(1, &s->mip_tex);
         if (s->buffer)  wl_buffer_destroy(s->buffer);
         if (s->bo)      gbm_bo_destroy(s->bo);
         if (s->dmabuf_fd > 0) close(s->dmabuf_fd);
