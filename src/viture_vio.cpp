@@ -161,11 +161,16 @@ static const char *CONFIG_YAML =
     /* T_imu_cam must be a FLAT 16-element sequence (VISLAM::getSequence<double> reads it
      * flat then reshapes 4x4; nested rows make it try list->double -> throw). Identity. */
     "  T_imu_cam: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
-    "  camera_model: pinhole\n"
+    /* Beast uses a FISHEYE world camera - must use equidistant model, not pinhole!
+     * Pinhole projection fails on fisheye optics -> CameraUndistort crashes.
+     * Intrinsics are estimated; calibrate with checkerboard for accuracy. */
+    "  camera_model: equidistant\n"
     "  distortion_model: equidistant\n"
     "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n"
-    "  intrinsics: [760.0, 760.0, 640.0, 360.0]\n"
-    "  resolution: [1280, 720]\n"
+    /* Fisheye intrinsics: lower focal length than pinhole due to wide FOV.
+     * [fx, fy, cx, cy] - adjust resolution to match v4l2-ctl output. */
+    "  intrinsics: [285.0, 285.0, 320.0, 240.0]\n"
+    "  resolution: [640, 480]\n"
     "  cam_overlaps: []\n";
 
 static std::string slurp(const char *path){
