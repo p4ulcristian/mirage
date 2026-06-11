@@ -287,15 +287,29 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
     }
 }
 
-/* PROBE: the SDK's onboard fused-pose callback. We don't know the field count, so we
- * log the first 7 floats - if it's a 3DoF quaternion only, [0..3] move and [4..6] are
- * static/garbage; if it's 6DoF, [4..6] track lateral/forward translation as you lean.
- * Harmless if the Beast never emits pose (this just never fires). */
+/* SDK's onboard fused-pose callback - delivers factory-calibrated orientation.
+ * The pose format is: [0..3] = quaternion (w,x,y,z), [4..6] = possibly position/velocity.
+ * This is the SAME fusion SpaceWalker uses - should give identical tracking quality. */
+static int g_native_mode = 0;  /* set by --native to enable pose forwarding */
 static void on_pose(float *pse, unsigned long ts){
     (void)ts; g_pose_n++;
     double t = now_sec();
-    if (t - g_pose_log >= 0.5){
-        fprintf(stderr,"POSE n %ld | [0..6] % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+
+    /* In native mode, forward the firmware-fused quaternion to mirage */
+    if (g_native_mode) {
+        /* Pose is [w,x,y,z] quaternion - apply qmap and send */
+        double src[4] = { pse[0], pse[1], pse[2], pse[3] };
+        double out[4];
+        for (int k = 0; k < 4; k++) out[k] = g_qs[k] * src[g_qi[k]];
+        double nm = sqrt(out[0]*out[0] + out[1]*out[1] + out[2]*out[2] + out[3]*out[3]);
+        if (nm > 1e-9) for (int k = 0; k < 4; k++) out[k] /= nm;
+
+        double pkt[7] = { out[0], out[1], out[2], out[3], 0, 0, 0 };
+        sendto(g_sock, pkt, sizeof pkt, 0, (struct sockaddr*)&g_dst, sizeof g_dst);
+    }
+
+    if (g_verbose && t - g_pose_log >= 0.25){
+        fprintf(stderr,"POSE n %ld | quat % .4f % .4f % .4f % .4f | pos % .4f % .4f % .4f\n",
                 g_pose_n, pse[0],pse[1],pse[2],pse[3], pse[4],pse[5],pse[6]);
         g_pose_log = t;
     }
@@ -607,6 +621,7 @@ int main(int argc,char**argv){
          * and don't touch the display mode - safer too), start, THEN open_imu(POSE).
          * The earlier "open_imu(POSE)=-2" was because we'd called set_dof(OFF) first. */
         (void)dofval;
+        g_native_mode = 1;  /* enable pose forwarding in on_pose callback */
         fprintf(stderr,"viture-bridge: native: sleep(1) -> start -> open_imu(POSE)...\n");
         sleep(1);
         xr_start(p);
