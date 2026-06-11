@@ -41,6 +41,8 @@ void mirage_config_defaults(mirage_config *c) {
     c->pitch_gain        = 8.0f;   /* amplify up/down look too, so top/bottom rows need less neck tilt */
     c->roll_damp         = 0.0f;   /* no tilt: fully horizon-locked (head roll ignored) */
     c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
+    c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
+    c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */

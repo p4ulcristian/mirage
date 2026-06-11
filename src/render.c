@@ -634,14 +634,22 @@ void render_frame(struct mirage *m, quat head) {
         m->gaze_have = true;
     }
 
-    mat4 view = m4_from_quat(q_conj(head));   /* world -> head space */
+    /* Neck model: the eye sits ahead of and above the neck pivot, so a head turn
+     * sweeps the eye through an arc -> real translation -> motion parallax (near
+     * windows shift against far ones and the fixed star dome). With the camera
+     * pinned at the origin this is the only translational depth cue we get from
+     * the 3DoF stream. eye_world rotates the fixed local offset by the presented
+     * head, so the parallax stays consistent with the orientation we render. */
+    vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
+    mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
+                       m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);
 
     /* HDRI environment dome: drawn first as an infinite, world-fixed backdrop.
      * Additive (dark sky adds nothing on the optics), depth test + write off so the
-     * wall and slabs draw cleanly over it. The dome sphere is centred on the eye and
-     * the camera has no translation, so it sits at infinity and the stars stay put
-     * in world space as you look around. */
+     * wall and slabs draw cleanly over it. The dome sphere (radius 50 m) dwarfs the
+     * neck-model eye shift (~0.1 m), so the stars stay effectively fixed in world
+     * space - the far reference the near windows parallax against as you look around. */
     if (R.dome_prog && R.dome_vbo) {
         glUseProgram(R.dome_prog);
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);

@@ -97,6 +97,8 @@ typedef struct {
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
+    float neck_fwd_m;           /* eye distance ahead of the neck pivot (parallax; 0 = off) */
+    float neck_up_m;            /* eye height above the neck pivot (parallax)      */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
