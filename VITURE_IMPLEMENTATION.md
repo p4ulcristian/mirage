@@ -6,6 +6,60 @@ This documents how to implement Viture XR glasses (One, Pro, N6, N6P, P6, R6) su
 
 ---
 
+## TEST THIS ON LINUX (VIO Anchor Fix)
+
+The VIO was crashing because it used `pinhole` camera model, but the Beast has a **fisheye** camera.
+Fixed in commit `36eb644` - now uses `equidistant` (Kannala-Brandt fisheye).
+
+### Step 1: Pull and check camera resolution
+
+```bash
+git pull
+v4l2-ctl --list-formats-ext -d /dev/video1
+```
+
+### Step 2: If resolution differs from 640x480
+
+Edit `src/viture_vio.cpp` around line 168:
+```yaml
+intrinsics: [285.0, 285.0, WIDTH/2, HEIGHT/2]
+resolution: [WIDTH, HEIGHT]
+```
+
+Example for 1280x720:
+```yaml
+intrinsics: [350.0, 350.0, 640.0, 360.0]
+resolution: [1280, 720]
+```
+
+### Step 3: Build and run
+
+```bash
+make viture-vio
+sudo -E LD_LIBRARY_PATH=viture-sdk ./viture-vio --run -v
+```
+
+### Step 4: If it still fails
+
+Tell me:
+1. The exact error message
+2. Output of `v4l2-ctl --list-formats-ext -d /dev/video1`
+
+We'll adjust intrinsics or distortion coefficients.
+
+---
+
+## Why We Couldn't Extract Exact Intrinsics from Mac
+
+**macOS SIP (System Integrity Protection)** blocks:
+- Attaching lldb to signed apps (SpaceWalker)
+- DYLD_INSERT_LIBRARIES injection
+- dtrace on protected processes
+
+Disabling SIP requires booting to Recovery Mode (hold Cmd+R at startup) and running `csrutil disable`. Not worth it - the estimated fisheye intrinsics should work, and we can calibrate properly with a checkerboard if needed.
+
+---
+
 ## Quick Summary
 
 **The easy path**: Use the existing reverse-engineered code from `viture_virtual_display`:
