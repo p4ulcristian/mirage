@@ -41,7 +41,7 @@ fi
 bash "$HERE/scripts/keybinds.sh"
 # notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
 # until you quit, then restores the desktop.
-notify "Started — Alt+C recenter · Super+Shift+Q quit (trackpad capture is always on)"
+notify "Started — double-Cmd recenter · Super+Shift+Q quit (trackpad capture is always on)"
 # Capture is always-on (mirage grabs the trackpad from the first frame); quit with
 # Super+Shift+Q.
 bash "$HERE/scripts/glasses.sh"

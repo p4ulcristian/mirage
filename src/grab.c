@@ -24,6 +24,7 @@
  * We never grab the keyboard, so Super+G / Super+SHIFT+Q keep firing.
  */
 #include "mirage.h"
+#include "pose.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,7 @@ typedef struct {
     double gaze_prev_gx, gaze_prev_gy;  /* last frame's gaze strip point          */
     bool   gaze_prev_valid;    /* false until the first gaze sample is seeded     */
     uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
+    uint32_t last_super_ms;    /* last Cmd press (for double-tap recenter)    */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
     int    swipe_fingers;      /* finger count of the in-progress swipe gesture */
     double swipe_dx, swipe_dy; /* accumulated swipe travel (3-finger workspace swipe) */
@@ -150,6 +152,23 @@ static void uinput_wheel(int fd, int notches) {
     if (write(fd, ev, 3 * sizeof ev[0]) < 0) { /* device may have vanished */ }
 }
 
+/* The screen whose pixel rect is nearest the canvas point (0 distance if the
+ * point is inside it). Lets the cursor roam an uneven, multi-column canvas: gaps
+ * between panels snap to the closest screen instead of dropping the cursor. */
+static int screen_at(grab_state *g, double x, double y) {
+    int best = 0; double bd = 1e30;
+    for (int i = 0; i < g->n; i++) {
+        double cx = x, cy = y;
+        if (cx < g->x0[i])               cx = g->x0[i];
+        else if (cx > g->x0[i] + g->w[i] - 1) cx = g->x0[i] + g->w[i] - 1;
+        if (cy < g->y0[i])               cy = g->y0[i];
+        else if (cy > g->y0[i] + g->h[i] - 1) cy = g->y0[i] + g->h[i] - 1;
+        double dx = x - cx, dy = y - cy, d = dx*dx + dy*dy;
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
 /* Map the strip cursor to a screen + output-local pixel and inject it. */
 static void push_cursor(grab_state *g) {
     if (g->gx < 0) g->gx = 0;
@@ -157,22 +176,18 @@ static void push_cursor(grab_state *g) {
     if (g->gx > g->strip_w - 1) g->gx = g->strip_w - 1;
     if (g->gy > g->strip_h - 1) g->gy = g->strip_h - 1;
 
-    /* which grid cell -> which screen. Top canvas band = top visual row. */
-    int col  = (int)(g->gx / g->cellw);  if (col  >= g->cols) col  = g->cols - 1;
-    int band = (int)(g->gy / g->cellh);  if (band >= g->rows) band = g->rows - 1;
-    int lay_row = (g->rows - 1) - band;
-    int s = lay_row * g->cols + col;
-    if (s >= g->n) return;               /* empty cell in a partial last row */
-
+    int s = screen_at(g, g->gx, g->gy);
     g->cur = s;
     if (!g->vp[s]) return;
 
-    uint32_t lx = (uint32_t)(g->gx - g->x0[s]);
-    uint32_t ly = (uint32_t)(g->gy - g->y0[s]);
-    if (lx > (uint32_t)g->w[s] - 1) lx = g->w[s] - 1;
-    if (ly > (uint32_t)g->h[s] - 1) ly = g->h[s] - 1;
+    double lxd = g->gx - g->x0[s], lyd = g->gy - g->y0[s];
+    if (lxd < 0) lxd = 0;
+    if (lxd > g->w[s] - 1) lxd = g->w[s] - 1;
+    if (lyd < 0) lyd = 0;
+    if (lyd > g->h[s] - 1) lyd = g->h[s] - 1;
 
-    zwlr_virtual_pointer_v1_motion_absolute(g->vp[s], now_ms(), lx, ly,
+    zwlr_virtual_pointer_v1_motion_absolute(g->vp[s], now_ms(),
+                                            (uint32_t)lxd, (uint32_t)lyd,
                                             (uint32_t)g->w[s], (uint32_t)g->h[s]);
     zwlr_virtual_pointer_v1_frame(g->vp[s]);
 }
@@ -198,7 +213,10 @@ static void gaze_target(grab_state *g, double *out_gx, double *out_gy) {
     }
     if (best < 0) { *out_gx = g->gx; *out_gy = g->gy; return; }
 
-    float ang_w = c->screen_arc_deg * (float)M_PI/180.0f;     /* horizontal span */
+    float arc_deg = m->screen[best].arc_deg;                  /* this screen's own arc */
+    if (arc_deg <= 0.0f)
+        arc_deg = c->screen_arc[best] > 0.0f ? c->screen_arc[best] : c->screen_arc_deg;
+    float ang_w = arc_deg * (float)M_PI/180.0f;               /* horizontal span */
     float aspect = (g->w[best] > 0 && g->h[best] > 0)
                    ? (float)g->h[best] / (float)g->w[best] : 9.0f/16.0f;
     float h_m = (c->geometry == GEOM_FLAT)
@@ -251,8 +269,22 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t key = libinput_event_keyboard_get_key(k);
         bool down = libinput_event_keyboard_get_key_state(k)
                     == LIBINPUT_KEY_STATE_PRESSED;
-        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA)
+        if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
             g->super = down;               /* Cmd gates scroll zoom */
+            /* Double-tap Cmd recenters the head pose (current look = straight
+             * ahead). Two presses within 350 ms; a single Cmd press/hold (zoom,
+             * gaze) is unaffected. */
+            if (down) {
+                uint32_t t = now_ms();
+                if (t - g->last_super_ms < 350u) {
+                    pose_recenter();
+                    g->last_super_ms = 0;  /* consume, so a third tap re-arms */
+                    fprintf(stderr, "grab: recentered\n");
+                } else {
+                    g->last_super_ms = t;
+                }
+            }
+        }
         if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
             /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
              * 350 ms flips it; a single Alt tap (e.g. the Alt+C recenter bind)
@@ -474,32 +506,40 @@ bool grab_init(struct mirage *m) {
 
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
 
-    /* Lay the cursor canvas out as the SAME grid as the visual wall: screen_cols
-     * columns wide, ceil(n/cols) rows tall. So the cursor moves right across the
-     * columns and up/down between the rows, instead of a single 1xN row where it
-     * could only ever travel right. Uniform cell = the largest screen. */
-    g->cols = m->cfg.screen_cols > 0 ? m->cfg.screen_cols : 3;
-    g->rows = (g->n + g->cols - 1) / g->cols;
+    /* Lay the cursor canvas out to MIRROR the visual wall (layout.c): columns side
+     * by side (each as wide as its widest screen), every column's screens stacked
+     * vertically and the stack centred in the canvas height - so tall side panels
+     * sit alongside a shorter stacked centre and still line up. Each screen owns a
+     * pixel rect; push_cursor hit-tests the rects, so the cursor roams the uneven
+     * grid in any direction. */
+    int ncols = layout_num_cols(m);
+    int colw[GRAB_MAX], colh[GRAB_MAX], colx[GRAB_MAX], coly[GRAB_MAX];
+    for (int k = 0; k < ncols && k < GRAB_MAX; k++) { colw[k] = 0; colh[k] = 0; }
     for (int i = 0; i < g->n; i++) {
-        if (m->screen[i].width  > g->cellw) g->cellw = m->screen[i].width;
+        int cc = layout_screen_col(m, i); if (cc < 0) cc = 0; if (cc >= ncols) cc = ncols - 1;
+        if (m->screen[i].width > colw[cc]) colw[cc] = m->screen[i].width;
+        colh[cc] += m->screen[i].height;
+        if (m->screen[i].width  > g->cellw) g->cellw = m->screen[i].width;  /* motion cap */
         if (m->screen[i].height > g->cellh) g->cellh = m->screen[i].height;
     }
+    int canvasH = 0, xrun = 0;
+    for (int k = 0; k < ncols; k++) if (colh[k] > canvasH) canvasH = colh[k];
+    for (int k = 0; k < ncols; k++) { colx[k] = xrun; xrun += colw[k]; coly[k] = (canvasH - colh[k]) / 2; }
     for (int i = 0; i < g->n; i++) {
         screen_t *s = &m->screen[i];
-        int col       = i % g->cols;
-        int lay_row   = i / g->cols;            /* layout row: 0 = bottom (eye level) */
-        int band      = (g->rows - 1) - lay_row; /* canvas band: 0 = top (small y) */
+        int cc = layout_screen_col(m, i); if (cc < 0) cc = 0; if (cc >= ncols) cc = ncols - 1;
         g->w[i]  = s->width;  g->h[i] = s->height;
-        g->x0[i] = col  * g->cellw;
-        g->y0[i] = band * g->cellh;
+        g->x0[i] = colx[cc] + (colw[cc] - s->width) / 2;   /* centre in its column */
+        g->y0[i] = coly[cc];
+        coly[cc] += s->height;                              /* next screen below it */
         g->vp[i] = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
                        m->vpointer_mgr, m->seat, s->wl);
     }
-    g->strip_w = g->cols * g->cellw;
-    g->strip_h = g->rows * g->cellh;
+    g->cols = ncols; g->rows = 1;          /* retained only for the motion cap */
+    g->strip_w = xrun; g->strip_h = canvasH;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    fprintf(stderr, "grab: ready (%d screens, %dx%d grid, strip %dx%d, trackpad %s, %d keyboard(s):",
-            g->n, g->cols, g->rows, g->strip_w, g->strip_h, g->dev, g->n_kbd);
+    fprintf(stderr, "grab: ready (%d screens in %d cols, canvas %dx%d, trackpad %s, %d keyboard(s):",
+            g->n, ncols, g->strip_w, g->strip_h, g->dev, g->n_kbd);
     for (int i = 0; i < g->n_kbd; i++) fprintf(stderr, " %s", g->kbd[i]);
     fprintf(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms

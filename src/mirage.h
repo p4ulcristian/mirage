@@ -76,7 +76,11 @@ typedef struct {
     float arc_spacing_deg;      /* extra gap between screens (0 = touch)  */
     float screen_arc_deg;       /* default angular width a screen spans   */
     float screen_arc[MIRAGE_MAX_SCREENS]; /* per-screen arc override (0 = use default) */
-    int   screen_cols;          /* screens per row (rows stack vertically) */
+    int   screen_cols;          /* legacy uniform grid: screens per row (rows stack vertically) */
+    bool  explicit_layout;      /* true: place by screen_col[] + per-column vertical centring,
+                                 * so columns can hold different screen counts (uneven grid) */
+    int   screen_col[MIRAGE_MAX_SCREENS]; /* yaw-column index per screen (left->right), explicit_layout */
+    int   default_focus;        /* initial Cmd+H pan target (screen index)        */
     float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
@@ -201,6 +205,12 @@ mat4 layout_model_matrix(const struct mirage *m, int screen_index);
 /* Camera yaw/pitch (rad) that centres display `i` in view - used to pan the
  * wall to a focused screen. Mirrors the yaw + lift placement in the model. */
 void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch);
+/* Single source of truth for placement: screen i's column-centre yaw (rad), the
+ * vertical lift of its centre (m), and its arc width (deg). Shared by render +
+ * the cursor grid so both agree on an uneven, multi-column wall. */
+void layout_place(const struct mirage *m, int i, float *yaw, float *lift, float *arc_deg);
+int  layout_num_cols(const struct mirage *m);          /* distinct yaw columns       */
+int  layout_screen_col(const struct mirage *m, int i); /* column index of screen i   */
 
 /* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
  * drive a cursor across the virtual screens as one continuous strip. */

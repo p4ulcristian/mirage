@@ -4,12 +4,10 @@
 # These are compositor-level binds so they fire even while mirage covers the glasses.
 #
 #   SUPER + SHIFT + Q   quit mirage + restore windows + remove virtual displays
-#   ALT + C             recenter head pose
 #
-# NB: recenter is ALT+C, not SUPER+SHIFT+C. A mac-style keyd config remaps the cmd
-# (Meta) layer's c/x/v/a/... to Ctrl equivalents, so SUPER+SHIFT+C arrives as
-# Ctrl+Shift+C and never reaches Hyprland. keyd has no Alt layer, so ALT+C passes
-# through untouched.
+# Recenter is handled inside mirage itself: double-tap Cmd (Super) while the
+# glasses view is active. It reads libinput directly, so it survives restarts
+# without needing a compositor bind re-registered here.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

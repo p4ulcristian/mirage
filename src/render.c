@@ -727,9 +727,17 @@ void render_frame(struct mirage *m, quat head) {
      * pinned to its frame (so it tracks the wall as you pan). Picks the ON/OFF
      * texture from the live gaze_cursor flag (toggled by double-Cmd in grab.c). */
     {
-        int cols = m->cfg.screen_cols > 0 ? m->cfg.screen_cols : 3;
-        int ci   = (cols - 1) / 2;               /* centre column, bottom row */
-        if (ci < n && R.label_on) {
+        /* centre-column, bottom screen: smallest |yaw|, then lowest lift */
+        int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f;
+        for (int k = 0; k < n; k++) {
+            float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
+            float ay = fabsf(yw);
+            if (ay < best_yaw - 1e-4f ||
+                (ay < best_yaw + 1e-4f && lf < best_lift)) {
+                best_yaw = ay; best_lift = lf; ci = k;
+            }
+        }
+        if (ci >= 0 && ci < n && R.label_on) {
             screen_t *cs = &m->screen[ci];
             float d      = m->cfg.screen_distance_m;
             float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
