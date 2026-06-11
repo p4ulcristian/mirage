@@ -2,6 +2,38 @@
 # Date: 2026-06-11
 # Device: VITURE Beast XR Glasses (R6PMCC61301YG)
 
+## CRITICAL FIX FOR VIO
+
+The VIO config in `viture_vio.cpp` has the WRONG camera model:
+- Current: `camera_model: pinhole` ❌
+- Correct: `camera_model: equidistant` ✓ (fisheye camera)
+
+The Beast uses a fisheye world-facing camera. The Carina VIO engine
+has these camera models (from strings in libcarina_vio.dylib):
+- `pinhole` - standard rectilinear projection
+- `equidistant` - Kannala-Brandt fisheye (r = f*theta)
+
+SpaceWalker's strings confirm fisheye usage:
+- `fisheye_cam0`, `cam_use_fisheye`, `init_equidistant_with_fisheye_stereo_rectify`
+
+## Estimated Beast Camera Parameters (NEEDS CALIBRATION)
+
+Based on typical AR glasses fisheye cameras:
+```yaml
+cam0:
+  camera_model: equidistant
+  distortion_model: equidistant
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]  # Start with zero, calibrate later
+  intrinsics: [280.0, 280.0, 320.0, 240.0]  # [fx, fy, cx, cy] for 640x480
+  resolution: [640, 480]
+  T_imu_cam: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]  # Identity, adjust for mounting
+```
+
+To find exact values:
+1. Print a checkerboard (9x6), measure square size
+2. Run OpenCV camera calibration with fisheye model
+3. Or: trial-and-error with VIO - wrong intrinsics = bad tracking
+
 ## Files Copied
 - custom_config.yaml - basic settings (mapping_mode, pose_callback_frequency)
 - slam_config_N6_N6P.yaml - IMU/orientation tracker params (240Hz, Kalman filter)
