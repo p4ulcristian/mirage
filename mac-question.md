@@ -1,5 +1,84 @@
 # mac-question.md — stuff to grab from the Mac (for the Beast anchor fix)
 
+---
+
+## ANSWERS (2025-06-12)
+
+### Critical Finding: Beast (R6) Does NOT Use Host-Side VIO
+
+**SpaceWalker for Beast only uses 3DOF (on-device IMU fusion), NOT the Carina VIO engine.**
+
+Evidence:
+- No `slam_config_R6.yaml` exists - only N6/N6P and P6 have slam configs
+- Log shows `dofMode: dof3` (rotation only, no 6DOF)
+- No camera frames are exposed via USB (no UVC device)
+- VIO functions (`carina_vio_init`, etc.) are never called for Beast
+
+### Q1: Config YAMLs
+```
+custom_config.yaml           (301 bytes)
+slam_config_N6_N6P.yaml      (3385 bytes) - IMU params only, NO camera intrinsics
+slam_config_P6.yaml          (3387 bytes) - IMU params only, NO camera intrinsics
+viture_override_config_N6.yaml   (26KB) - Display lens distortion, NOT camera intrinsics
+viture_override_config_N6P.yaml  (26KB) - Display lens distortion, NOT camera intrinsics
+```
+**NO config file for R6/Beast.**
+
+### Q2: Runtime Logs
+Log shows HID commands only - no VIO initialization for Beast:
+- `R6 App 0x1201 attached`
+- `dofMode: dof3` (3DOF = rotation only)
+- No `carina_vio_init` or camera calibration messages
+
+### Q3: Per-device Calibration
+```
+database.bin (44MB) - ORB vocabulary for loop closure
+R6_FW_LSI_*.bin    - Firmware update files
+R6_info_*.json     - Firmware metadata
+```
+No camera calibration files for R6.
+
+### Q4: Camera Model Strings
+Supported: `equidistant`, `pinhole`, `radtan`
+The engine DOES support fisheye (equidistant) cameras.
+
+### Q5-6: ORB Vocabulary
+`database.bin` (44MB) is the ORB vocabulary. Copy to Linux if needed.
+Path for config: `orb_database_path: "/path/to/database.bin"`
+
+### Q7: Mono/Stereo
+Log shows display resolutions (1920x1080), but **no camera resolution** for Beast.
+The N6/P6 configs don't specify camera resolution either - it comes from device.
+
+### Q8: Engine Config Schema
+Keys the engine expects:
+- `T_imu_cam:` / `T_cam_imu:` - IMU-camera transform
+- `intrinsics:` - [fx, fy, cx, cy]
+- `distortion_coeffs:` - [k1, k2, k3, k4]
+- `resolution:` - [width, height]
+- `orb_database_path:` - path to ORB vocab
+
+### CONCLUSION
+
+**The "unstable" tracking on Linux is NOT about VIO/camera intrinsics.**
+
+SpaceWalker's rock-solid tracking for Beast comes from the **on-device firmware fusion** (factory calibrated), not host-side VIO.
+
+**Solution:** Use `--native` mode which reads the firmware's pre-fused pose instead of doing our own Madgwick/VQF fusion.
+
+**Bug fixed:** `on_pose()` callback wasn't sending data to mirage. Now it does.
+
+Test on Linux:
+```bash
+git pull
+make viture-bridge
+sudo -E VITURE_SDK=viture-sdk ./viture-bridge --native -v
+```
+
+If `--native` still fails on Linux, the issue is in the SDK's `open_imu(POSE)` call or the firmware not streaming pose data. We'd need to debug the Linux SDK path.
+
+---
+
 Hey — read this on the Mac. Context first, then the exact commands. Should take ~5 min.
 
 ## Why I need this
