@@ -56,7 +56,38 @@ We'll adjust intrinsics or distortion coefficients.
 - DYLD_INSERT_LIBRARIES injection
 - dtrace on protected processes
 
-Disabling SIP requires booting to Recovery Mode (hold Cmd+R at startup) and running `csrutil disable`. Not worth it - the estimated fisheye intrinsics should work, and we can calibrate properly with a checkerboard if needed.
+### Option: Disable SIP Temporarily (if you want exact intrinsics)
+
+**Step 1: Boot to Recovery Mode**
+- Shut down Mac completely
+- **Apple Silicon (M1/M2):** Hold power button until "Loading startup options" appears → click Options → Continue
+- **Intel Mac:** Hold Cmd+R while booting
+
+**Step 2: Disable SIP**
+```bash
+# In Recovery Mode, open Terminal from Utilities menu
+csrutil disable
+# Reboot
+reboot
+```
+
+**Step 3: Capture the config**
+```bash
+cd /Users/paul/mirage/tools
+bash capture_carina_config.sh
+# Config saved to /tmp/carina_config_captured.yaml
+```
+
+**Step 4: Re-enable SIP (important!)**
+```bash
+# Boot to Recovery Mode again
+csrutil enable
+reboot
+```
+
+**Is it worth it?** Probably not for now - try the estimated fisheye intrinsics first. If tracking is wobbly/drifty, then either:
+1. Disable SIP and capture exact config, OR
+2. Calibrate with a checkerboard (more accurate anyway)
 
 ---
 
