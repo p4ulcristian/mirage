@@ -99,6 +99,9 @@ static struct {
     /* live FPS plaque: re-baked only when the integer value changes */
     GLuint label_fps;
     int    fps_w, fps_h, fps_val;
+    /* static multi-line shortcut cheat-sheet, baked once at init */
+    GLuint label_help;
+    int    help_w, help_h;
 } R;
 
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
@@ -282,16 +285,35 @@ static void build_slab_mesh(struct mirage *m, screen_t *s) {
 #define GLYPH_W 5
 #define GLYPH_H 7
 static const unsigned char *glyph_rows(char ch) {
-    static const unsigned char G[] = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
     static const unsigned char A[] = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
-    static const unsigned char Z[] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+    static const unsigned char B[] = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
+    static const unsigned char C[] = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
+    static const unsigned char D[] = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
     static const unsigned char E[] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
-    static const unsigned char O[] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
-    static const unsigned char N[] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
     static const unsigned char F[] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+    static const unsigned char G[] = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
+    static const unsigned char H[] = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const unsigned char I[] = {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E};
+    static const unsigned char J[] = {0x07,0x02,0x02,0x02,0x02,0x12,0x0C};
+    static const unsigned char K[] = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+    static const unsigned char L[] = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
+    static const unsigned char M[] = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
+    static const unsigned char N[] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+    static const unsigned char O[] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
     static const unsigned char P[] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+    static const unsigned char Q[] = {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
+    static const unsigned char R[] = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
     static const unsigned char S[] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
-    static const unsigned char C[] = {0x00,0x04,0x04,0x00,0x04,0x04,0x00}; /* colon */
+    static const unsigned char T[] = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
+    static const unsigned char U[] = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const unsigned char V[] = {0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
+    static const unsigned char W[] = {0x11,0x11,0x11,0x15,0x15,0x15,0x0A};
+    static const unsigned char X[] = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+    static const unsigned char Y[] = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
+    static const unsigned char Z[] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+    static const unsigned char CO[] = {0x00,0x04,0x04,0x00,0x04,0x04,0x00}; /* colon */
+    static const unsigned char PL[] = {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}; /* plus  */
+    static const unsigned char MI[] = {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}; /* minus */
     static const unsigned char SP[] = {0,0,0,0,0,0,0};                    /* space */
     static const unsigned char D0[] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
     static const unsigned char D1[] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
@@ -304,10 +326,16 @@ static const unsigned char *glyph_rows(char ch) {
     static const unsigned char D8[] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
     static const unsigned char D9[] = {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C};
     switch (ch) {
-    case 'G': return G; case 'A': return A; case 'Z': return Z;
-    case 'E': return E; case 'O': return O; case 'N': return N;
-    case 'F': return F; case 'P': return P; case 'S': return S;
-    case ':': return C;
+    case 'A': return A; case 'B': return B; case 'C': return C;
+    case 'D': return D; case 'E': return E; case 'F': return F;
+    case 'G': return G; case 'H': return H; case 'I': return I;
+    case 'J': return J; case 'K': return K; case 'L': return L;
+    case 'M': return M; case 'N': return N; case 'O': return O;
+    case 'P': return P; case 'Q': return Q; case 'R': return R;
+    case 'S': return S; case 'T': return T; case 'U': return U;
+    case 'V': return V; case 'W': return W; case 'X': return X;
+    case 'Y': return Y; case 'Z': return Z;
+    case ':': return CO; case '+': return PL; case '-': return MI;
     case '0': return D0; case '1': return D1; case '2': return D2;
     case '3': return D3; case '4': return D4; case '5': return D5;
     case '6': return D6; case '7': return D7; case '8': return D8;
@@ -319,10 +347,16 @@ static const unsigned char *glyph_rows(char ch) {
 /* Rasterise `str` into a fresh RGBA texture. PX = pixels per font cell; text in
  * fg over a dark plaque background. Stores the (shared) pixel dims in R. */
 static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
-    const int PX = 5, PAD = 6, GAP = 1;
-    int n = (int)strlen(str);
-    int tw = PAD*2 + n*GLYPH_W*PX + (n-1)*GAP*PX;
-    int th = PAD*2 + GLYPH_H*PX;
+    const int PX = 5, PAD = 6, GAP = 1, LGAP = 3;   /* LGAP: blank font rows between lines */
+    /* Measure: tallest is the line count, widest is the longest line (chars). */
+    int lines = 1, cur = 0, maxlen = 0;
+    for (const char *p = str; *p; p++) {
+        if (*p == '\n') { if (cur > maxlen) maxlen = cur; cur = 0; lines++; }
+        else cur++;
+    }
+    if (cur > maxlen) maxlen = cur;
+    int tw = PAD*2 + maxlen*GLYPH_W*PX + (maxlen > 0 ? maxlen-1 : 0)*GAP*PX;
+    int th = PAD*2 + lines*GLYPH_H*PX + (lines-1)*LGAP*PX;
     unsigned char *px = malloc((size_t)tw*th*4);
     const unsigned char bg[3] = {14, 18, 34};
     unsigned char fc[3] = { (unsigned char)(fg[0]*255), (unsigned char)(fg[1]*255),
@@ -330,19 +364,23 @@ static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
     for (int i = 0; i < tw*th; i++) {
         px[i*4+0] = bg[0]; px[i*4+1] = bg[1]; px[i*4+2] = bg[2]; px[i*4+3] = 255;
     }
-    for (int c = 0; c < n; c++) {
-        const unsigned char *g = glyph_rows(str[c]);
-        int ox = PAD + c*(GLYPH_W+GAP)*PX;
+    int line = 0, col = 0;
+    for (const char *p = str; *p; p++) {
+        if (*p == '\n') { line++; col = 0; continue; }
+        const unsigned char *g = glyph_rows(*p);
+        int ox = PAD + col*(GLYPH_W+GAP)*PX;
+        int oy = PAD + line*(GLYPH_H+LGAP)*PX;
         for (int gy = 0; gy < GLYPH_H; gy++)
             for (int gx = 0; gx < GLYPH_W; gx++) {
                 if (!(g[gy] & (1 << (GLYPH_W-1-gx)))) continue;
                 for (int yy = 0; yy < PX; yy++)
                     for (int xx = 0; xx < PX; xx++) {
-                        int x = ox + gx*PX + xx, y = PAD + gy*PX + yy;
-                        unsigned char *p = &px[(y*tw + x)*4];
-                        p[0] = fc[0]; p[1] = fc[1]; p[2] = fc[2]; p[3] = 255;
+                        int x = ox + gx*PX + xx, y = oy + gy*PX + yy;
+                        unsigned char *p2 = &px[(y*tw + x)*4];
+                        p2[0] = fc[0]; p2[1] = fc[1]; p2[2] = fc[2]; p2[3] = 255;
                     }
             }
+        col++;
     }
     GLuint tex; glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -545,6 +583,15 @@ bool render_init(struct mirage *m) {
       R.label_on  = bake_label("GAZE: ON ", on, &R.label_w, &R.label_h);   /* trailing space: same dims */
       R.label_off = bake_label("GAZE: OFF", off, &R.label_w, &R.label_h); }
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
+    /* static shortcut cheat-sheet, one multi-line plaque baked once */
+    { const float hc[3] = {0.66f, 0.72f, 0.82f};
+      R.label_help = bake_label(
+          "2X CMD: RECENTER\n"
+          "2X ALT: GAZE\n"
+          "CMD+SCROLL: ZOOM\n"
+          "3-SWIPE: WORKSPACE\n"
+          "SUPER+SHIFT+Q: QUIT",
+          hc, &R.help_w, &R.help_h); }
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
 
@@ -779,6 +826,26 @@ void render_frame(struct mirage *m, quat head) {
                 mat4 mvp2   = m4_mul(vp, model2);
                 glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp2.m);
                 glBindTexture(GL_TEXTURE_2D, R.label_fps);
+                glUniform1i(R.uTex, 0);
+                glUniform1f(R.uHasTex, 1.0f);
+                glUniform1f(R.uYFlip, 0.0f);
+                glUniform1f(R.uSharpen, 0.0f);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            }
+
+            /* Shortcut cheat-sheet, stacked below the FPS row. Static texture,
+             * drawn at a smaller scale so the five lines don't hang too far down. */
+            if (R.label_help) {
+                float blockH = 0.26f;                            /* whole block height */
+                float blockW = blockH * ((float)R.help_w / (float)R.help_h);
+                float fpsBot = (yc - fullH - 0.02f) - fullH * 0.5f;  /* FPS plaque bottom */
+                float yc3    = fpsBot - 0.03f - blockH * 0.5f;
+                mat4 local3  = m4_mul(m4_translate(v3(0.0f, yc3, -d)),
+                                      m4_scale(v3(blockW, blockH, 1.0f)));
+                mat4 model3  = m4_mul(layout_model_matrix(m, ci), local3);
+                mat4 mvp3    = m4_mul(vp, model3);
+                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp3.m);
+                glBindTexture(GL_TEXTURE_2D, R.label_help);
                 glUniform1i(R.uTex, 0);
                 glUniform1f(R.uHasTex, 1.0f);
                 glUniform1f(R.uYFlip, 0.0f);
