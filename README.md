@@ -5,8 +5,8 @@
 mirage takes a headless 32:9 virtual display, curves it into a wall floating two
 metres in front of you, and renders it onto AR glasses with the camera locked to
 your head pose — so the wall stays nailed in space like a real monitor while you
-look around it. Your existing windows are swept onto it automatically, the
-trackpad drives a cursor across it, and a 3-finger swipe flips between workspaces.
+look around it. Your existing windows are swept onto it automatically, and the
+trackpad drives a cursor across it.
 
 Built for **Hyprland** on Wayland; developed on **RayNeo Air** glasses driven by an
 **Apple M2 GPU (Asahi)**.
@@ -35,8 +35,8 @@ native **120 Hz** — no compositor fork, no DRM leasing, no kernel patches.
   deadband that freezes sub-degree tremor, and contrast-adaptive text sharpening.
 - **Real input on the wall** — the trackpad becomes a cursor confined to the wall,
   with telephoto zoom and a gaze-follow mode.
-- **Workspaces** — your windows sweep onto the wall on launch; a 3-finger swipe
-  switches/creates workspaces, mirrored straight from how you'd do it on the desktop.
+- **Workspaces** — your windows sweep onto the wall on launch, laid out across
+  the virtual displays exactly as you'd arrange them on the desktop.
 - **One config, no knobs** — no flags, no env vars. Everything lives in
   `src/config.c`; edit and rebuild.
 
@@ -73,11 +73,6 @@ The glasses must be present as the extended `DP-1` SmartGlasses output (not mirr
 | **Cmd + scroll** | telephoto zoom (narrows the field of view) |
 | **double-tap Cmd** | recenter head pose — look straight ahead, then double-tap |
 | **double-tap Alt** | toggle the gaze-follow cursor |
-| **3-finger swipe** | switch workspaces on the wall (new one past the end) |
-
-The 3-finger swipe is handled by mirage itself: its exclusive trackpad grab hides
-the gesture from Hyprland, so mirage reads the libinput swipe and dispatches the
-workspace change (monitor-relative, so it never escapes to the real desktop).
 
 > **Note on `keyd`:** recenter is **double-tap Cmd**, read straight off libinput by
 > mirage's trackpad grab, so it never depends on Hyprland seeing the keystroke. mirage
@@ -94,7 +89,7 @@ Hyprland VIRT1 ──(ext-image-copy-capture + dmabuf)──▶ capture.c ──
        layout.c (wall placement) ───────────┐              ▼                  ▼
                                              └──────▶ render.c ──▶ fullscreen window on the glasses
                                                             ▲
-       grab.c (trackpad → cursor/zoom/swipe) ───────────────┘
+       grab.c (trackpad → cursor/zoom) ─────────────────────┘
 ```
 
 mirage captures the `VIRT1` headless output zero-copy, lays it out as a curved
@@ -140,7 +135,7 @@ filter, reading deadband, sharpening, and the head-tracking gains. Edit and rebu
 | `src/capture.c` | `ext-image-copy-capture` → gbm/dmabuf → EGLImage → GLES2 texture |
 | `src/render.c` | EGL/GLES2: curved textured wall, perspective camera, sharpen |
 | `src/layout.c` | where the wall sits on the arc |
-| `src/grab.c` | trackpad capture, arc cursor, zoom, gaze cursor, 3-finger swipe |
+| `src/grab.c` | trackpad capture, arc cursor, zoom, gaze cursor |
 | `src/config.c` | the one hardcoded scene/tracking configuration |
 | `src/math3d.h` | vec / quat / mat4 (no glm dependency) |
 | `src/rayneo*.c`, `src/magcal.c` | the RayNeo IMU bridge (Madgwick AHRS, mag calibration) |

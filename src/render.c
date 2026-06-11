@@ -598,7 +598,6 @@ bool render_init(struct mirage *m) {
           "2X CMD: RECENTER\n"
           "2X ALT: GAZE\n"
           "CMD+SCROLL: ZOOM\n"
-          "3-SWIPE: WORKSPACE\n"
           "SUPER+SHIFT+Q: QUIT",
           hc, &R.help_w, &R.help_h); }
 

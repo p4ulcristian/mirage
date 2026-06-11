@@ -65,10 +65,6 @@ typedef struct {
     uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
     uint32_t last_super_ms;    /* last Cmd press (for double-tap recenter)    */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
-    int    swipe_fingers;      /* finger count of the in-progress swipe gesture */
-    double swipe_dx, swipe_dy; /* accumulated swipe travel (3-finger workspace swipe) */
-    int    ws_k[GRAB_MAX];     /* per-screen position in its named-workspace band (0 = home) */
-    int    ws_home[GRAB_MAX];  /* per-screen home workspace id, captured on first swipe (0 = unknown) */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
@@ -247,61 +243,6 @@ static void do_zoom(grab_state *g, double scroll_v) {
     g->m->zoom = z;
 }
 
-/* The workspace id currently shown on output `out`, or 0 if it can't be read.
- * Parses `hyprctl monitors -j` with python (already a project dependency). Used
- * to remember a screen's home workspace the first time it's swiped away from. */
-static int query_ws_id(const char *out) {
-    char cmd[256];
-    snprintf(cmd, sizeof cmd,
-             "hyprctl monitors -j | python3 -c 'import sys,json;"
-             "print(next((m[\"activeWorkspace\"][\"id\"] for m in json.load(sys.stdin)"
-             " if m[\"name\"]==\"%s\"),0))'", out);
-    FILE *p = popen(cmd, "r");
-    if (!p) return 0;
-    int id = 0;
-    if (fscanf(p, "%d", &id) != 1) id = 0;
-    pclose(p);
-    return id;
-}
-
-/* Swipe the workspace shown on the screen under the cursor. We own the trackpad
- * grab, so Hyprland never sees the 3-finger gesture - we run the switch ourselves.
- *
- * Each screen has its OWN band of named workspaces ("<output>.<k>", k>=1) that it
- * can swipe through: right advances k (always a FRESH empty workspace, created the
- * first time it's reached), left walks back, and k=0 returns to the screen's home
- * workspace - whatever it showed at launch, with the user's windows. Named
- * workspaces auto-create on focus and bind to the monitor they're made on, and
- * Hyprland reaps them once empty, so swiping back out recreates them. We keep the
- * per-screen index ourselves (ws_k[]) because the monitor-relative selectors no-op
- * on headless outputs; on_current_monitor pulls the target onto THIS screen rather
- * than moving focus to wherever the workspace already lives. Backgrounded so it
- * never stalls the render loop. */
-static void workspace_swipe(grab_state *g, int dir) {
-    int s = (g->cur >= 0 && g->cur < g->n) ? g->cur : 0;
-    const char *out = g->m->screen[s].name;
-    int prev = g->ws_k[s];
-    int k = prev + dir;
-    if (k < 0) k = 0;                 /* home is the floor; can't swipe past it */
-    /* Remember the home workspace the first time we leave it, so k=0 can return. */
-    if (prev == 0 && k > 0 && g->ws_home[s] == 0)
-        g->ws_home[s] = query_ws_id(out);
-    g->ws_k[s] = k;
-
-    char target[80];
-    if (k > 0)                 snprintf(target, sizeof target, "name:%s.%d", out, k);
-    else if (g->ws_home[s] > 0) snprintf(target, sizeof target, "%d", g->ws_home[s]);
-    else                       snprintf(target, sizeof target, "name:%s.home", out);
-
-    char cmd[256];
-    snprintf(cmd, sizeof cmd,
-             "hyprctl eval 'hl.dispatch(hl.dsp.focus({ monitor = \"%s\" })); "
-             "hl.dispatch(hl.dsp.focus({ workspace = \"%s\", on_current_monitor = true }))'"
-             " >/dev/null 2>&1 &",
-             out, target);
-    if (system(cmd) < 0) { /* best-effort; nothing useful to do on failure */ }
-}
-
 static void handle_event(grab_state *g, struct libinput_event *ev) {
     enum libinput_event_type t = libinput_event_get_type(ev);
     switch (t) {
@@ -406,29 +347,6 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             uinput_wheel(g->uifd, -step);   /* -step: match natural scroll dir */
         }
         if (v == 0.0) g->scroll_acc = 0.0;   /* reset on finger lift */
-        break;
-    }
-    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN: {
-        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
-        g->swipe_fingers = libinput_event_gesture_get_finger_count(gst);
-        g->swipe_dx = g->swipe_dy = 0.0;
-        break;
-    }
-    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
-        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
-        g->swipe_dx += libinput_event_gesture_get_dx(gst);
-        g->swipe_dy += libinput_event_gesture_get_dy(gst);
-        break;
-    }
-    case LIBINPUT_EVENT_GESTURE_SWIPE_END: {
-        struct libinput_event_gesture *gst = libinput_event_get_gesture_event(ev);
-        /* 3-finger horizontal swipe -> change workspace on the wall (create a new
-         * one past the end), replicating Hyprland's workspace_swipe - which can't
-         * see the trackpad while we hold the exclusive grab. One switch per swipe. */
-        if (!libinput_event_gesture_get_cancelled(gst) && g->swipe_fingers == 3 &&
-            fabs(g->swipe_dx) > 60.0 && fabs(g->swipe_dx) > fabs(g->swipe_dy))
-            workspace_swipe(g, g->swipe_dx > 0 ? +1 : -1);
-        g->swipe_fingers = 0;
         break;
     }
     default: break;
