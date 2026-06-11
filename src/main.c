@@ -191,6 +191,17 @@ int main(void) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
 
+    /* named layouts: if layouts.conf is present, apply the active one over the
+     * hardcoded defaults. Toggle between them at runtime with Alt+1/2/3 (grab.c).
+     * Path overridable via $MIRAGE_LAYOUTS; otherwise the cwd's layouts.conf. */
+    { const char *lp = getenv("MIRAGE_LAYOUTS");
+      if (!lp || !*lp) lp = "layouts.conf";
+      if (layouts_load(&M.layouts, lp) > 0) {
+          M.cfg = M.layouts.l[M.layouts.active].cfg;
+          fprintf(stderr, "mirage: loaded %d layout(s) from %s, active '%s'\n",
+                  M.layouts.n, lp, M.layouts.l[M.layouts.active].name);
+      } }
+
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGUSR1, on_recenter);   /* recenter head pose on demand (scriptable: pkill -USR1 mirage) */

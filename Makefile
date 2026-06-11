@@ -36,7 +36,7 @@ LDLIBS  := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
 
 # ---- core mirage objects (wayland + GL) ----
 MIRAGE_SRC := src/main.c src/pose.c src/capture.c src/render.c \
-              src/layout.c src/grab.c src/config.c
+              src/layout.c src/grab.c src/config.c src/layouts.c
 MIRAGE_OBJ := $(MIRAGE_SRC:src/%.c=build/obj/%.o) $(PROTO_OBJ)
 
 # ---- pose test tool (no wayland/GL) ----

@@ -80,6 +80,11 @@ typedef struct {
     bool  explicit_layout;      /* true: place by screen_col[] + per-column vertical centring,
                                  * so columns can hold different screen counts (uneven grid) */
     int   screen_col[MIRAGE_MAX_SCREENS]; /* yaw-column index per screen (left->right), explicit_layout */
+    /* free placement: a screen with a finite yaw is pinned to this pose and skips
+     * the column/grid logic entirely (NAN = auto, derive from the column). lift is
+     * the metres above eye level. Set by named layouts (layouts.c). */
+    float screen_yaw_deg[MIRAGE_MAX_SCREENS];  /* NAN = auto (column) */
+    float screen_lift_m [MIRAGE_MAX_SCREENS];  /* NAN = auto (row)    */
     float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
@@ -116,6 +121,19 @@ typedef struct {
 
     float bg[3];                /* background clear colour               */
 } mirage_config;
+
+/* Named layouts loaded from layouts.conf: a set of full mirage_config snapshots
+ * the user toggles between at runtime (Alt+1/2/3). See layouts.c. */
+#define MIRAGE_MAX_LAYOUTS 8
+typedef struct {
+    char          name[32];
+    mirage_config cfg;
+} mirage_layout;
+typedef struct {
+    mirage_layout l[MIRAGE_MAX_LAYOUTS];
+    int           n;        /* layouts parsed (0 = none; hardcoded defaults used) */
+    int           active;   /* index currently applied to m->cfg                  */
+} mirage_layouts;
 
 struct mirage {
     /* wayland globals */
@@ -178,6 +196,11 @@ struct mirage {
      * is held. gaze_have gates it off until the first head-tracked frame. */
     float gaze_yaw, gaze_pitch;
     bool  gaze_have;
+
+    /* named layouts (layouts.c): the registry plus a dirty flag the render loop
+     * watches so a runtime layout switch rebuilds the screen meshes. */
+    mirage_layouts layouts;
+    bool  layout_dirty;
     bool running;
 };
 
@@ -191,6 +214,13 @@ void mirage_config_defaults(mirage_config *c);
 bool render_init(struct mirage *m);
 void render_frame(struct mirage *m, quat head);   /* 3D head-tracked arc      */
 void render_finish(struct mirage *m);
+/* (re)build every screen's mesh + slab from the current cfg; call after a layout
+ * switch changes arcs/geometry/distance. Safe to call only with a live GL ctx. */
+void render_rebuild_meshes(struct mirage *m);
+
+/* layouts.c - named layouts loaded from layouts.conf, toggled at runtime */
+int  layouts_load(mirage_layouts *L, const char *path); /* parse file -> registry; returns count */
+void layouts_switch(struct mirage *m, int idx);         /* apply layout idx, flag a mesh rebuild */
 
 /* capture.c - wlr-screencopy into GL textures */
 bool capture_init(struct mirage *m);     /* opens drm/gbm                */

@@ -277,6 +277,27 @@ static void build_slab_mesh(struct mirage *m, screen_t *s) {
     s->slab_verts = 5*6;
 }
 
+/* (Re)build every screen's mesh + slab from the current cfg. Called once at init
+ * and again whenever a layout switch changes arcs/geometry/distance; old VBOs are
+ * released first so a repeated switch doesn't leak GPU buffers. Needs a live ctx. */
+void render_rebuild_meshes(struct mirage *m) {
+    int n = m->n_screen;
+    if (n < 0 || n > MIRAGE_MAX_SCREENS) n = 0;
+    for (int i = 0; i < n; i++) {
+        screen_t *s = &m->screen[i];
+        if (s->mesh_vbo) { glDeleteBuffers(1, &s->mesh_vbo); s->mesh_vbo = 0; }
+        if (s->slab_vbo) { glDeleteBuffers(1, &s->slab_vbo); s->slab_vbo = 0; }
+        /* each screen's angular width is its per-screen override (cfg.screen_arc[i]),
+         * falling back to the default - so the wide wall and the narrower 16:9 each
+         * get their own arc. */
+        s->arc_deg = m->cfg.screen_arc[i] > 0.0f
+                     ? m->cfg.screen_arc[i] : m->cfg.screen_arc_deg;
+        if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, s);
+        else                              build_curved_mesh(m, s);
+        build_slab_mesh(m, s);
+    }
+}
+
 /* ---- status plaque text ---------------------------------------------------
  * A 5x7 bitmap font, just the glyphs the "GAZE: ON/OFF" label needs. Each glyph
  * is 7 rows; the low 5 bits of each byte are the pixels, MSB (bit 4) leftmost.
@@ -563,19 +584,7 @@ bool render_init(struct mirage *m) {
 
     glEnable(GL_DEPTH_TEST);
 
-    /* build one mesh per screen (flat quad or curved strip) + its slab body.
-     * Each screen's angular width is its per-screen override (cfg.screen_arc[i]),
-     * falling back to the default - so the wide wall and the narrower 16:9 above
-     * it each get their own arc. */
-    int nbuild = m->n_screen;
-    if (nbuild < 0 || nbuild > MIRAGE_MAX_SCREENS) nbuild = 0;
-    for (int i = 0; i < nbuild; i++) {
-        m->screen[i].arc_deg = m->cfg.screen_arc[i] > 0.0f
-                               ? m->cfg.screen_arc[i] : m->cfg.screen_arc_deg;
-        if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, &m->screen[i]);
-        else                              build_curved_mesh(m, &m->screen[i]);
-        build_slab_mesh(m, &m->screen[i]);
-    }
+    render_rebuild_meshes(m);
 
     /* gaze-mode status plaque (ON green, OFF grey) - same dims for both */
     { const float on[3]  = {0.31f, 0.90f, 0.47f};
@@ -609,6 +618,10 @@ static const float PLACEHOLDER[][3] = {
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
     struct timespec rt0; if (m->profile) clock_gettime(CLOCK_MONOTONIC, &rt0);
+
+    /* a runtime layout switch (Alt+1/2/3) swapped m->cfg; rebuild meshes here,
+     * on the render thread with the GL context current. */
+    if (m->layout_dirty) { render_rebuild_meshes(m); m->layout_dirty = false; }
 
     glViewport(0, 0, m->glasses_w, m->glasses_h);
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);

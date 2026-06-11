@@ -48,6 +48,7 @@ typedef struct {
     struct mirage *m;           /* back-ref for zoom etc.                 */
     bool active;
     bool super;                 /* Super held? (from the un-grabbed kbd)  */
+    bool alt;                   /* Alt held? (gates the Alt+N layout combo) */
 
     int   n;                    /* screen count                          */
     int   x0[GRAB_MAX], y0[GRAB_MAX];  /* top-left of each screen's grid cell */
@@ -66,6 +67,8 @@ typedef struct {
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
     int    swipe_fingers;      /* finger count of the in-progress swipe gesture */
     double swipe_dx, swipe_dy; /* accumulated swipe travel (3-finger workspace swipe) */
+    int    ws_k[GRAB_MAX];     /* per-screen position in its named-workspace band (0 = home) */
+    int    ws_home[GRAB_MAX];  /* per-screen home workspace id, captured on first swipe (0 = unknown) */
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
@@ -244,24 +247,58 @@ static void do_zoom(grab_state *g, double scroll_v) {
     g->m->zoom = z;
 }
 
-/* Change the workspace on the wall via a Hyprland dispatch. We own the trackpad
- * grab, so Hyprland never sees the 3-finger swipe - we run the switch ourselves.
- * Hyprland 0.55's Lua API: focus the VIRT output the cursor is on, then step its
- * workspace with the "e+1"/"e-1" selector plus on_current_monitor=true. The "e"
- * (next/prev including empty) form actually resolves on headless monitors, where
- * the monitor-relative "m+1" silently no-ops; on_current_monitor pulls the target
- * workspace onto the focused output instead of just moving focus to whichever
- * monitor already holds it, so the wall's content changes under the cursor.
- * Backgrounded so it never stalls the render loop. */
+/* The workspace id currently shown on output `out`, or 0 if it can't be read.
+ * Parses `hyprctl monitors -j` with python (already a project dependency). Used
+ * to remember a screen's home workspace the first time it's swiped away from. */
+static int query_ws_id(const char *out) {
+    char cmd[256];
+    snprintf(cmd, sizeof cmd,
+             "hyprctl monitors -j | python3 -c 'import sys,json;"
+             "print(next((m[\"activeWorkspace\"][\"id\"] for m in json.load(sys.stdin)"
+             " if m[\"name\"]==\"%s\"),0))'", out);
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+    int id = 0;
+    if (fscanf(p, "%d", &id) != 1) id = 0;
+    pclose(p);
+    return id;
+}
+
+/* Swipe the workspace shown on the screen under the cursor. We own the trackpad
+ * grab, so Hyprland never sees the 3-finger gesture - we run the switch ourselves.
+ *
+ * Each screen has its OWN band of named workspaces ("<output>.<k>", k>=1) that it
+ * can swipe through: right advances k (always a FRESH empty workspace, created the
+ * first time it's reached), left walks back, and k=0 returns to the screen's home
+ * workspace - whatever it showed at launch, with the user's windows. Named
+ * workspaces auto-create on focus and bind to the monitor they're made on, and
+ * Hyprland reaps them once empty, so swiping back out recreates them. We keep the
+ * per-screen index ourselves (ws_k[]) because the monitor-relative selectors no-op
+ * on headless outputs; on_current_monitor pulls the target onto THIS screen rather
+ * than moving focus to wherever the workspace already lives. Backgrounded so it
+ * never stalls the render loop. */
 static void workspace_swipe(grab_state *g, int dir) {
-    const char *out = (g->cur >= 0 && g->cur < g->n)
-                      ? g->m->screen[g->cur].name : "VIRT1";
+    int s = (g->cur >= 0 && g->cur < g->n) ? g->cur : 0;
+    const char *out = g->m->screen[s].name;
+    int prev = g->ws_k[s];
+    int k = prev + dir;
+    if (k < 0) k = 0;                 /* home is the floor; can't swipe past it */
+    /* Remember the home workspace the first time we leave it, so k=0 can return. */
+    if (prev == 0 && k > 0 && g->ws_home[s] == 0)
+        g->ws_home[s] = query_ws_id(out);
+    g->ws_k[s] = k;
+
+    char target[80];
+    if (k > 0)                 snprintf(target, sizeof target, "name:%s.%d", out, k);
+    else if (g->ws_home[s] > 0) snprintf(target, sizeof target, "%d", g->ws_home[s]);
+    else                       snprintf(target, sizeof target, "name:%s.home", out);
+
     char cmd[256];
     snprintf(cmd, sizeof cmd,
              "hyprctl eval 'hl.dispatch(hl.dsp.focus({ monitor = \"%s\" })); "
-             "hl.dispatch(hl.dsp.focus({ workspace = \"e%c1\", on_current_monitor = true }))'"
+             "hl.dispatch(hl.dsp.focus({ workspace = \"%s\", on_current_monitor = true }))'"
              " >/dev/null 2>&1 &",
-             out, dir > 0 ? '+' : '-');
+             out, target);
     if (system(cmd) < 0) { /* best-effort; nothing useful to do on failure */ }
 }
 
@@ -296,7 +333,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             g->last_super_ms = 0;
             g->last_alt_ms   = 0;
         }
+        /* Alt+1 / Alt+2 / Alt+3 switch to the Nth named layout (layouts.conf).
+         * Alt-held + number, so it never collides with the Alt double-tap above. */
+        if (down && g->alt && (key == KEY_1 || key == KEY_2 || key == KEY_3)) {
+            int idx = key == KEY_1 ? 0 : key == KEY_2 ? 1 : 2;
+            layouts_switch(g->m, idx);
+        }
         if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
+            g->alt = down;                  /* track Alt for the Alt+N layout combo */
             /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
              * 350 ms flips it; a single Alt tap does nothing here. */
             if (down) {
@@ -590,6 +634,7 @@ void grab_toggle(struct mirage *m) {
         if (g->uifd < 0) g->uifd = uinput_open();   /* real wheel for scroll */
         g->scroll_acc = 0.0;
         g->super = false;
+        g->alt   = false;
         g->active = true;
         push_cursor(g);
         fprintf(stderr, "grab: capture ON (trackpad grabbed%s)\n",

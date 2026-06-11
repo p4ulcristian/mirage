@@ -1,8 +1,15 @@
 #include "mirage.h"
 #include <string.h>
+#include <math.h>
 
 void mirage_config_defaults(mirage_config *c) {
     memset(c, 0, sizeof *c);
+    /* free-placement poses default to "auto": derive yaw/lift from the column
+     * grid. A named layout (layouts.c) pins a screen by setting a finite yaw. */
+    for (int i = 0; i < MIRAGE_MAX_SCREENS; i++) {
+        c->screen_yaw_deg[i] = NAN;
+        c->screen_lift_m[i]  = NAN;
+    }
     /* 3-column wall (4 virtual displays):
      *   col 0 (left)  : VIRT3, 1080x2160 portrait
      *   col 1 (centre): VIRT1 (top) + VIRT2 (bottom), 1920x1080 stacked

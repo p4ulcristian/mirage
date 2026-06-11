@@ -29,6 +29,12 @@ static float screen_height(const struct mirage *m, int j) {
     return scr_height(m, j, scr_arc(m, j));
 }
 
+/* A screen is "free" when a named layout pinned it to an explicit yaw: it ignores
+ * the column grid and sits exactly where placed (layouts.c / cfg.screen_yaw_deg). */
+static bool screen_is_free(const struct mirage *m, int i) {
+    return isfinite(m->cfg.screen_yaw_deg[i]);
+}
+
 /* ---- column membership (legacy uniform grid OR explicit per-screen columns) ---- */
 
 int layout_screen_col(const struct mirage *m, int i) {
@@ -43,7 +49,10 @@ int layout_num_cols(const struct mirage *m) {
     int n = m->n_screen > 0 ? m->n_screen : c->screen_count;
     if (!c->explicit_layout) return c->screen_cols > 0 ? c->screen_cols : 3;
     int mx = 0;
-    for (int i = 0; i < n; i++) { int cc = layout_screen_col(m, i); if (cc > mx) mx = cc; }
+    for (int i = 0; i < n; i++) {
+        if (screen_is_free(m, i)) continue;
+        int cc = layout_screen_col(m, i); if (cc > mx) mx = cc;
+    }
     return mx + 1;
 }
 
@@ -82,6 +91,13 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     float arc_i = scr_arc(m, i);
     *arc_out = arc_i;
 
+    /* free-placed: pinned to an explicit yaw/lift, independent of any column. */
+    if (screen_is_free(m, i)) {
+        *yaw_out  = c->screen_yaw_deg[i] * (float)M_PI/180.0f;
+        *lift_out = isfinite(c->screen_lift_m[i]) ? c->screen_lift_m[i] : 0.0f;
+        return;
+    }
+
     if (!c->explicit_layout) {
         int cols = c->screen_cols > 0 ? c->screen_cols : 3;
         int col = i % cols, row = i / cols;
@@ -99,6 +115,7 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     float colw[MIRAGE_MAX_SCREENS];
     for (int k = 0; k < ncols; k++) colw[k] = 0.0f;
     for (int j = 0; j < n; j++) {
+        if (screen_is_free(m, j)) continue;
         int cc = layout_screen_col(m, j);
         float a = scr_arc(m, j) * (float)M_PI/180.0f;
         if (a > colw[cc]) colw[cc] = a;
@@ -121,11 +138,11 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     float vgap = c->screen_distance_m * gap;   /* metres */
     float Hc = 0.0f; int cnt = 0;
     for (int j = 0; j < n; j++)
-        if (layout_screen_col(m, j) == myc) { Hc += scr_height(m, j, scr_arc(m, j)); cnt++; }
+        if (!screen_is_free(m, j) && layout_screen_col(m, j) == myc) { Hc += scr_height(m, j, scr_arc(m, j)); cnt++; }
     if (cnt > 1) Hc += vgap * (float)(cnt - 1);
     float top = Hc * 0.5f, acc = 0.0f, mylift = 0.0f;
     for (int j = 0; j < n; j++)
-        if (layout_screen_col(m, j) == myc) {
+        if (!screen_is_free(m, j) && layout_screen_col(m, j) == myc) {
             float h = scr_height(m, j, scr_arc(m, j));
             float center = top - acc - h * 0.5f;
             if (j == i) mylift = center;
