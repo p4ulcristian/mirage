@@ -605,26 +605,8 @@ void render_frame(struct mirage *m, quat head) {
         head = presented;
     }
 
-    /* Cmd+horizontal-scroll pan: ease the camera toward the focused display so
-     * the whole wall glides until that screen sits dead-centre. Applied after
-     * the comfort gains + deadband (it's a deliberate offset, not head tremor),
-     * and composed in world space so head-turns stay relative to where we look. */
-    {
-        int nf = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
-        int f  = m->view_focus;
-        if (f < 0) f = 0;
-        if (nf > 0 && f >= nf) f = nf - 1;
-        float ty = 0.0f, tp = 0.0f;
-        layout_focus_angles(m, f, &ty, &tp);
-        const float k = 0.15f;   /* per-frame easing toward the focused screen */
-        m->pan_yaw   += (ty - m->pan_yaw)   * k;
-        m->pan_pitch += (tp - m->pan_pitch) * k;
-        quat pan = q_from_euler_ypr(m->pan_yaw, m->pan_pitch, 0.0f);
-        head = q_mul(pan, head);
-    }
-
     /* Publish the look direction for the gaze cursor: this is the exact camera
-     * orientation we render through (comfort gains + deadband + pan all baked
+     * orientation we render through (comfort gains + deadband baked
      * in), so grab.c can map "where the eye points" back to a screen + pixel.
      * Same yaw/pitch convention as layout_focus_angles, so its inverse lands
      * straight on the cursor strip. */

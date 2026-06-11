@@ -23,7 +23,6 @@ void mirage_config_defaults(mirage_config *c) {
     c->screen_col[1]     = 1;      /* VIRT2 -> centre column, bottom */
     c->screen_col[2]     = 0;      /* VIRT3 -> left column           */
     c->screen_col[3]     = 2;      /* VIRT4 -> right column          */
-    c->default_focus     = 1;      /* Cmd+H pan starts on the centre-bottom screen    */
     c->screen_cols       = 3;      /* informational; explicit_layout drives placement */
     c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
     c->gaze_cursor       = false;  /* off by default; double-tap Alt toggles */

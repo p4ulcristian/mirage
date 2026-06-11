@@ -190,7 +190,6 @@ static int classify_outputs(void) {
 int main(void) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
-    M.view_focus = M.cfg.default_focus;   /* initial Cmd+H pan target (centre screen) */
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);

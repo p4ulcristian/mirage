@@ -80,7 +80,6 @@ typedef struct {
     bool  explicit_layout;      /* true: place by screen_col[] + per-column vertical centring,
                                  * so columns can hold different screen counts (uneven grid) */
     int   screen_col[MIRAGE_MAX_SCREENS]; /* yaw-column index per screen (left->right), explicit_layout */
-    int   default_focus;        /* initial Cmd+H pan target (screen index)        */
     float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
@@ -168,9 +167,6 @@ struct mirage {
 
     mirage_config cfg;
     float zoom;       /* view zoom (Super+scroll); 1.0 = default, clamped       */
-    int   view_focus; /* Cmd+H-scroll focus: display the view pans to (ring idx) */
-    float pan_yaw;    /* current eased pan angles (rad) toward view_focus screen */
-    float pan_pitch;
     float fps;        /* last measured throughput, published by the main loop (HUD) */
     /* perf profiling (dormant; set profile=true to enable): split a frame into pure
      * GPU draw cost (glFinish before swap) vs present wait (eglSwapBuffers). gpu high
