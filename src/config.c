@@ -33,14 +33,14 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
     c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
-    c->yaw_gain          = 4.0f;   /* >1 amplifies head yaw: the scene swings faster than the head, so the
+    c->yaw_gain          = 8.0f;   /* >1 amplifies head yaw: the scene swings faster than the head, so the
                                     * side screens need less neck turn. 1.0 = 1:1 world-fixed (nailed in
                                     * space like a real monitor). (Verified direction empirically via the
                                     * gaze readout: yaw_gain=-1 tracked inverted, so + is correct after the
                                     * IMU axis remap.) */
-    c->pitch_gain        = 4.0f;   /* amplify up/down look too, so top/bottom rows need less neck tilt */
+    c->pitch_gain        = 8.0f;   /* amplify up/down look too, so top/bottom rows need less neck tilt */
     c->roll_damp         = 0.0f;   /* no tilt: fully horizon-locked (head roll ignored) */
-    c->read_deadband_deg = 0.8f;   /* freeze <0.8deg tremor so held text stays still (high gains amplify jitter) */
+    c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
