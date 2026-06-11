@@ -1,6 +1,18 @@
 # Viture Glasses Implementation Guide
 
-Reverse-engineered from SpaceWalker 1.8.4 on macOS. This documents how to implement Viture XR glasses (N6, N6P, P6, R6) support in mirage.
+Reverse-engineered from SpaceWalker 1.8.4 on macOS and [mgschwan/viture_virtual_display](https://github.com/mgschwan/viture_virtual_display).
+
+This documents how to implement Viture XR glasses (One, Pro, N6, N6P, P6, R6) support in mirage.
+
+---
+
+## Quick Summary
+
+**The easy path**: Use the existing reverse-engineered code from `viture_virtual_display`:
+- Copy `viture_connection.c` and `viture_connection.h`
+- IMU data arrives as **3 floats: roll, pitch, yaw** (in degrees)
+- Yaw needs to be **negated**
+- Send to mirage via OpenTrack UDP or the JSON socket
 
 ---
 
@@ -20,42 +32,57 @@ For mirage, we only need tier 1 (IMU) + a Madgwick AHRS, identical to the RayNeo
 ### Device Identification
 
 ```c
-// Viture glasses USB identifiers
-#define VITURE_VID  0x2D7F    // Viture vendor ID
+#define VITURE_VID  0x35CA    // Viture vendor ID (13770 decimal)
 
-// Known PIDs (check for multiple - different models)
-// The exact PID varies by model (N6, N6P, P6, R6)
-// Discover via: system_profiler SPUSBDataType | grep -i viture
+// Known PIDs:
+// 0x1201 (4609) - Beast XR Glasses (Pro)
+// Others vary by model - use VID match with PID=0
+
+// Two HID interfaces:
+#define IMU_INTERFACE  0      // For IMU data stream
+#define MCU_INTERFACE  1      // For commands (enable IMU, brightness, etc.)
 ```
 
-### HID Report Structure
+### HID Packet Structure
 
-SpaceWalker receives IMU data via HID reports. Based on the source paths in the binary:
-- `VTIMUManager.swift` - Main IMU handling
-- `VTGetIMUReportFQHIDMsg.swift` - IMU frequency/data messages
+All packets use a common format with CRC-16-CCITT:
 
-**IMU Report Format** (derived from SpaceWalker strings):
 ```c
-struct viture_imu_report {
-    uint8_t  report_id;       // HID report identifier
-    uint8_t  subtype;         // Message subtype
-    // ... padding
-    float    accel[3];        // Accelerometer (m/s^2)
-    float    gyro[3];         // Gyroscope (deg/s or rad/s)
-    float    mag[3];          // Magnetometer (optional)
-    uint32_t timestamp;       // Device timestamp
+// 64-byte HID packet structure
+struct viture_packet {
+    uint8_t  header[2];       // 0xFF 0xFE (MCU) or 0xFF 0xFC (IMU)
+    uint16_t crc;             // CRC-16-CCITT over bytes 4+
+    uint16_t payload_len;     // Length of payload (from this field)
+    uint8_t  reserved[8];     // Usually zeros, may contain timestamp
+    uint16_t cmd_id;          // Command/event ID
+    uint8_t  reserved2[2];    // More reserved bytes
+    uint8_t  data[46];        // Actual payload data (max 46 bytes)
 };
 ```
 
-**Enable IMU streaming:**
-SpaceWalker sends HID commands to start/stop IMU. Pattern likely similar to RayNeo:
-```c
-// Start IMU (hypothetical - needs verification via USB capture)
-uint8_t cmd_start[64] = {0x66, 0x01, ...};
-write(fd, cmd_start, 64);
+### IMU Data Format (THE KEY PART)
 
-// Stop IMU
-uint8_t cmd_stop[64] = {0x66, 0x02, ...};
+IMU packets arrive with header `0xFF 0xFC`. After parsing, the data payload contains:
+
+```c
+// IMU data is 3 floats = 12 bytes (euler angles in degrees)
+float roll  = *(float*)(data + 0);    // bytes 0-3
+float pitch = *(float*)(data + 4);    // bytes 4-7
+float yaw   = -*(float*)(data + 8);   // bytes 8-11, NEGATED!
+```
+
+**Note**: Yaw must be negated to match expected convention.
+
+### Enable/Disable IMU
+
+Send command `0x15` via the MCU interface:
+
+```c
+// Enable IMU streaming
+uint32_t set_imu(bool enable) {
+    // cmd_id = 0x15, data = 0x01 (on) or 0x00 (off)
+    return native_mcu_exec(0x15, enable ? 1 : 0);
+}
 ```
 
 ---
