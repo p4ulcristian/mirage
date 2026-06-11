@@ -285,6 +285,13 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 }
             }
         }
+        if (down && key != KEY_LEFTMETA && key != KEY_RIGHTMETA
+                 && key != KEY_LEFTALT  && key != KEY_RIGHTALT) {
+            /* Any other key (e.g. the V in Cmd+V) breaks a double-tap: the two
+             * modifier presses must be consecutive with nothing between them. */
+            g->last_super_ms = 0;
+            g->last_alt_ms   = 0;
+        }
         if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
             /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
              * 350 ms flips it; a single Alt tap (e.g. the Alt+C recenter bind)

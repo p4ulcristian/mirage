@@ -26,7 +26,7 @@ void mirage_config_defaults(mirage_config *c) {
     c->default_focus     = 1;      /* Cmd+H pan starts on the centre-bottom screen    */
     c->screen_cols       = 3;      /* informational; explicit_layout drives placement */
     c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
-    c->gaze_cursor       = true;   /* Cmd-held: cursor follows head gaze */
+    c->gaze_cursor       = false;  /* off by default; double-tap Alt toggles */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
     c->pose_port         = 4242;
     c->pose_smoothing    = 0.08f;  /* legacy fixed nlerp @500Hz (only if --smooth) */
