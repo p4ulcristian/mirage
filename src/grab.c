@@ -294,8 +294,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         }
         if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
             /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
-             * 350 ms flips it; a single Alt tap (e.g. the Alt+C recenter bind)
-             * does nothing here. */
+             * 350 ms flips it; a single Alt tap does nothing here. */
             if (down) {
                 uint32_t t = now_ms();
                 if (t - g->last_alt_ms < 350u) {

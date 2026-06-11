@@ -16,8 +16,6 @@ eval_bind() {
 }
 
 eval_bind "local d=\"$HERE\"; hl.bind(\"SUPER + SHIFT + Q\", hl.dsp.exec_cmd(\"bash \" .. d .. \"/scripts/stop.sh --restore\"))"
-eval_bind "hl.bind(\"ALT + C\", hl.dsp.exec_cmd(\"pkill -USR1 -x mirage\"))"
 
 echo "registered:"
 echo "  SUPER+SHIFT+Q  -> quit mirage + restore windows + remove virtual displays"
-echo "  ALT+C          -> recenter head pose (look straight ahead, then press)"

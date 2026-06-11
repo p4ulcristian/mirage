@@ -193,7 +193,7 @@ int main(void) {
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
-    signal(SIGUSR1, on_recenter);   /* recenter head pose on demand (Alt+C) */
+    signal(SIGUSR1, on_recenter);   /* recenter head pose on demand (scriptable: pkill -USR1 mirage) */
     signal(SIGHUP,  on_smooth);     /* A/B the pose smoothing filter (perf diag) */
 
     M.display = wl_display_connect(NULL);

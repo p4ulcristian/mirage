@@ -64,7 +64,6 @@ The glasses must be present as the extended `DP-1` SmartGlasses output (not mirr
 | Key | Action |
 |-----|--------|
 | `Super+Shift+Q` | quit mirage, restore windows, remove the virtual display |
-| `Alt+C` | recenter head pose — look straight ahead, then press |
 
 **Trackpad** (capture is on from the first frame):
 
@@ -72,6 +71,7 @@ The glasses must be present as the extended `DP-1` SmartGlasses output (not mirr
 |---------|--------|
 | move / click / two-finger scroll | cursor / click / scroll the focused window |
 | **Cmd + scroll** | telephoto zoom (narrows the field of view) |
+| **double-tap Cmd** | recenter head pose — look straight ahead, then double-tap |
 | **double-tap Alt** | toggle the gaze-follow cursor |
 | **3-finger swipe** | switch workspaces on the wall (new one past the end) |
 
@@ -79,10 +79,10 @@ The 3-finger swipe is handled by mirage itself: its exclusive trackpad grab hide
 the gesture from Hyprland, so mirage reads the libinput swipe and dispatches the
 workspace change (monitor-relative, so it never escapes to the real desktop).
 
-> **Note on `keyd`:** if you remap Cmd→Ctrl for app shortcuts (mac-style), Cmd+C
-> never reaches Hyprland — that's why recenter is **Alt+C**. mirage auto-detects the
-> trackpad and *every* Meta-capable keyboard by evdev capability, so it works whether
-> keyd is grabbing the raw keyboard or passing it through.
+> **Note on `keyd`:** recenter is **double-tap Cmd**, read straight off libinput by
+> mirage's trackpad grab, so it never depends on Hyprland seeing the keystroke. mirage
+> auto-detects the trackpad and *every* Meta-capable keyboard by evdev capability, so it
+> works whether keyd is grabbing the raw keyboard or passing it through.
 
 ## How it works
 
@@ -108,7 +108,7 @@ The **RayNeo bridge** (`scripts/bridge.sh` → `rayneo-bridge`) reads the glasse
 over hidraw, runs a Madgwick AHRS, and streams orientation as OpenTrack UDP on
 `127.0.0.1:4242` (6 little-endian doubles `{x, y, z, yaw, pitch, roll}`, degrees) —
 exactly what `pose.c` consumes. mirage auto-recenters on the first sample, so
-"straight ahead" is wherever you're looking at launch (or hit `Alt+C` any time).
+"straight ahead" is wherever you're looking at launch (or double-tap Cmd any time).
 
 - **6-axis** (gyro + accel) by default: the bridge's gyro-bias auto-zero makes it
   essentially drift-free at a desk, where the magnetometer's heading is corrupted by
