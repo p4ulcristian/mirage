@@ -246,17 +246,21 @@ static void do_zoom(grab_state *g, double scroll_v) {
 
 /* Change the workspace on the wall via a Hyprland dispatch. We own the trackpad
  * grab, so Hyprland never sees the 3-finger swipe - we run the switch ourselves.
- * Hyprland 0.55's Lua API: focus the VIRT output the cursor is on, then step the
- * workspace with "m+1"/"m-1" - the MONITOR-relative form, so it only ever cycles
- * the wall's own workspaces and never crosses onto the glasses (which would drop
- * you out to the real desktop). Backgrounded so it never stalls the render loop. */
+ * Hyprland 0.55's Lua API: focus the VIRT output the cursor is on, then step its
+ * workspace with the "e+1"/"e-1" selector plus on_current_monitor=true. The "e"
+ * (next/prev including empty) form actually resolves on headless monitors, where
+ * the monitor-relative "m+1" silently no-ops; on_current_monitor pulls the target
+ * workspace onto the focused output instead of just moving focus to whichever
+ * monitor already holds it, so the wall's content changes under the cursor.
+ * Backgrounded so it never stalls the render loop. */
 static void workspace_swipe(grab_state *g, int dir) {
     const char *out = (g->cur >= 0 && g->cur < g->n)
                       ? g->m->screen[g->cur].name : "VIRT1";
     char cmd[256];
     snprintf(cmd, sizeof cmd,
              "hyprctl eval 'hl.dispatch(hl.dsp.focus({ monitor = \"%s\" })); "
-             "hl.dispatch(hl.dsp.focus({ workspace = \"m%c1\" }))' >/dev/null 2>&1 &",
+             "hl.dispatch(hl.dsp.focus({ workspace = \"e%c1\", on_current_monitor = true }))'"
+             " >/dev/null 2>&1 &",
              out, dir > 0 ? '+' : '-');
     if (system(cmd) < 0) { /* best-effort; nothing useful to do on failure */ }
 }
