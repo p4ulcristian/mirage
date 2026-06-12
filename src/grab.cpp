@@ -480,40 +480,48 @@ bool grab_init(struct mirage *m) {
 
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
 
-    /* Lay the cursor canvas out to MIRROR the visual wall (layout.c): columns side
-     * by side (each as wide as its widest screen), every column's screens stacked
-     * vertically and the stack centred in the canvas height - so tall side panels
-     * sit alongside a shorter stacked centre and still line up. Each screen owns a
-     * pixel rect; push_cursor hit-tests the rects, so the cursor roams the uneven
-     * grid in any direction. */
-    int ncols = layout_num_cols(m);
-    int colw[GRAB_MAX], colh[GRAB_MAX], colx[GRAB_MAX], coly[GRAB_MAX];
-    for (int k = 0; k < ncols && k < GRAB_MAX; k++) { colw[k] = 0; colh[k] = 0; }
+    /* Cursor canvas = the VISUAL wall projected to a flat strip (yaw -> x, lift ->
+     * y), so the trackpad cursor matches what you actually see. The old column-grid
+     * canvas collapsed for free-placed / masonry layouts - every panel fell into one
+     * column, so the side panels were unreachable left/right. Projecting from
+     * layout_place works for any layout. Each panel's strip rect is its on-wall size
+     * (metres) scaled by S; motion_absolute maps strip-local -> output
+     * proportionally, so S only sets cursor speed (tune g->sens), not correctness. */
+    const float S = 1500.0f, d = m->cfg.screen_distance_m;
+    float uw[GRAB_MAX], vh[GRAB_MAX], uL[GRAB_MAX], vT[GRAB_MAX];   /* metres */
+    float umax = -1e30f, vmax = -1e30f;
     for (int i = 0; i < g->n; i++) {
-        int cc = layout_screen_col(m, i); if (cc < 0) cc = 0; if (cc >= ncols) cc = ncols - 1;
-        if (m->screen[i].width > colw[cc]) colw[cc] = m->screen[i].width;
-        colh[cc] += m->screen[i].height;
-        if (m->screen[i].width  > g->cellw) g->cellw = m->screen[i].width;  /* motion cap */
-        if (m->screen[i].height > g->cellh) g->cellh = m->screen[i].height;
+        float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
+        float ar = arc * (float)M_PI/180.0f;
+        const screen_t *s = &m->screen[i];
+        float aspect = (s->width > 0 && s->height > 0)
+                       ? (float)s->height/(float)s->width : 9.0f/16.0f;
+        uw[i] = d * ar;                  /* on-wall width  (arc length, m) */
+        vh[i] = uw[i] * aspect;          /* on-wall height (m)             */
+        uL[i] = d * (yaw + ar*0.5f);     /* +u = viewer's left edge        */
+        vT[i] = lift + vh[i]*0.5f;       /* top edge                       */
+        if (uL[i] > umax) umax = uL[i];
+        if (vT[i] > vmax) vmax = vT[i];
     }
-    int canvasH = 0, xrun = 0;
-    for (int k = 0; k < ncols; k++) if (colh[k] > canvasH) canvasH = colh[k];
-    for (int k = 0; k < ncols; k++) { colx[k] = xrun; xrun += colw[k]; coly[k] = (canvasH - colh[k]) / 2; }
+    int sw = 0, sh = 0;
     for (int i = 0; i < g->n; i++) {
         screen_t *s = &m->screen[i];
-        int cc = layout_screen_col(m, i); if (cc < 0) cc = 0; if (cc >= ncols) cc = ncols - 1;
-        g->w[i]  = s->width;  g->h[i] = s->height;
-        g->x0[i] = colx[cc] + (colw[cc] - s->width) / 2;   /* centre in its column */
-        g->y0[i] = coly[cc];
-        coly[cc] += s->height;                              /* next screen below it */
+        g->x0[i] = (int)((umax - uL[i]) * S);          /* +u (left) -> small x */
+        g->y0[i] = (int)((vmax - vT[i]) * S);          /* top      -> small y  */
+        g->w[i]  = (int)(uw[i] * S); if (g->w[i] < 1) g->w[i] = 1;
+        g->h[i]  = (int)(vh[i] * S); if (g->h[i] < 1) g->h[i] = 1;
+        if (g->w[i] > g->cellw) g->cellw = g->w[i];    /* motion cap */
+        if (g->h[i] > g->cellh) g->cellh = g->h[i];
+        if (g->x0[i] + g->w[i] > sw) sw = g->x0[i] + g->w[i];
+        if (g->y0[i] + g->h[i] > sh) sh = g->y0[i] + g->h[i];
         g->vp[i] = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
                        m->vpointer_mgr, m->seat, s->wl);
     }
-    g->cols = ncols; g->rows = 1;          /* retained only for the motion cap */
-    g->strip_w = xrun; g->strip_h = canvasH;
+    g->cols = g->n; g->rows = 1;
+    g->strip_w = sw; g->strip_h = sh;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    std::print(stderr, "grab: ready ({} screens in {} cols, canvas {}x{}, trackpad {}, {} keyboard(s):",
-            g->n, ncols, g->strip_w, g->strip_h, g->dev, g->n_kbd);
+    std::print(stderr, "grab: ready ({} panels, projected canvas {}x{}, trackpad {}, {} keyboard(s):",
+            g->n, g->strip_w, g->strip_h, g->dev, g->n_kbd);
     for (int i = 0; i < g->n_kbd; i++) std::print(stderr, " {}", g->kbd[i]);
     std::print(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
