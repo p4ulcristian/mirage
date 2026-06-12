@@ -125,13 +125,16 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     float span = gap * (float)(ncols - 1);
     for (int k = 0; k < ncols; k++) span += colw[k];
     float edge = span * 0.5f;          /* left edge of the whole wall */
-    float yaw_c = 0.0f;
+    float yaw_c = 0.0f, anchor = 0.0f;
     for (int k = 0; k < ncols; k++) {
         float center = edge - colw[k] * 0.5f;
-        if (k == myc) yaw_c = center;
+        if (k == myc)             yaw_c  = center;
+        if (k == c->center_col)   anchor = center;   /* this column -> dead ahead */
         edge -= (colw[k] + gap);
     }
-    *yaw_out = yaw_c;
+    /* anchor stays 0 when center_col is out of range -> the whole span is
+     * centred (default); otherwise slide the wall so center_col sits at yaw 0. */
+    *yaw_out = yaw_c - anchor;
 
     /* vertical: stack my column's members (array order = top first), centre the
      * whole stack on eye level so columns of differing heights line up. */
@@ -148,6 +151,10 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
             if (j == i) mylift = center;
             acc += h + vgap;
         }
+    /* a column-placed screen may carry an explicit lift as an additive nudge:
+     * it shifts the whole column up/down off its auto-centred position (e.g. to
+     * anchor a stack's bottom panel at eye level instead of its centre). */
+    if (isfinite(c->screen_lift_m[i])) mylift += c->screen_lift_m[i];
     *lift_out = mylift;
 }
 

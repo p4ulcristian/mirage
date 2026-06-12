@@ -66,6 +66,7 @@ static void parse_kv(mirage_config *cfg, const char *key, const char *val) {
     if      (!strcmp(key, "distance"))   cfg->screen_distance_m = (float)atof(val);
     else if (!strcmp(key, "slab_depth")) cfg->slab_depth_m      = (float)atof(val);
     else if (!strcmp(key, "spacing"))    cfg->arc_spacing_deg   = (float)atof(val);
+    else if (!strcmp(key, "center_col")) cfg->center_col        = atoi(val);
     else if (!strcmp(key, "arc"))        cfg->screen_arc_deg    = (float)atof(val);
     else if (!strcmp(key, "fov"))        cfg->fov_deg           = (float)atof(val);
     else if (!strcmp(key, "sharpen"))    cfg->sharpen           = (float)atof(val);

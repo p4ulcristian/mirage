@@ -80,6 +80,8 @@ typedef struct {
     bool  explicit_layout;      /* true: place by screen_col[] + per-column vertical centring,
                                  * so columns can hold different screen counts (uneven grid) */
     int   screen_col[MIRAGE_MAX_SCREENS]; /* yaw-column index per screen (left->right), explicit_layout */
+    int   center_col;           /* explicit_layout: column to anchor dead-ahead (yaw 0);
+                                 * <0 or out of range = centre the whole span (default) */
     /* free placement: a screen with a finite yaw is pinned to this pose and skips
      * the column/grid logic entirely (NAN = auto, derive from the column). lift is
      * the metres above eye level. Set by named layouts (layouts.c). */

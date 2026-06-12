@@ -7,20 +7,22 @@
 # name regardless of where they sit in the Hyprland layout.
 #
 # The displays match mirage's screen order (VIRT1, VIRT2, ...) and config.c's
-# per-screen geometry. The wall is a 3-column arrangement:
-#   col 0 (left)  : VIRT3  1080x2160 portrait
-#   col 1 (centre): VIRT1 (top) + VIRT2 (bottom), 1920x1080 stacked
-#   col 2 (right) : VIRT4  1080x2160 portrait
+# per-screen geometry. The wall is a 5-column arrangement:
+#   col 0 : VIRT1 (top) + VIRT2 (bottom), 1920x1080 stacked, pair centred
+#   col 1 : VIRT3 (top) + VIRT4 (bottom), 1920x1080 stacked, bottom at eye level
+#   col 2 : VIRT5                         1080x2160 portrait, single, centred
+#   col 3 : VIRT6                         1080x2160 portrait, single, centred
+#   col 4 : VIRT7                         1080x2160 portrait, single, centred
 # They're placed far off-screen right, stacked so they never overlap; mirage
 # captures them by name, so the exact desktop layout only matters for keeping
 # them out of the real desktop.
 set -euo pipefail
 
-# Per-display geometry, in mirage's capture order (VIRT1, VIRT2, VIRT3, VIRT4).
-# Two Full-HD 16:9 for the centre stack + two 1080x2160 portraits for the sides.
-NAMES=(VIRT1 VIRT2 VIRT3 VIRT4)
-WS=(1920 1920 1080 1080)        # widths
-HS=(1080 1080 2160 2160)        # heights
+# Per-display geometry, in mirage's capture order (VIRT1..VIRT7).
+# Four Full-HD 16:9 panels (two stacked pairs) + three 1080x2160 portraits.
+NAMES=(VIRT1 VIRT2 VIRT3 VIRT4 VIRT5 VIRT6 VIRT7)
+WS=(1920 1920 1920 1920 1080 1080 1080)        # widths
+HS=(1080 1080 1080 1080 2160 2160 2160)        # heights
 VR=60; VSCALE=1; VORIGIN=8000
 
 command -v hyprctl >/dev/null || { echo "hyprctl not found (need Hyprland)"; exit 1; }
