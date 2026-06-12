@@ -86,7 +86,7 @@ def apply_moves(targets):
 def do_sweep():
     virt = virt_outputs()
     if not virt:
-        sys.exit("sweep: no VIRT outputs - run setup-displays.sh first")
+        sys.exit("sweep: no VIRT outputs - run setup_displays.py first")
     slots = [m["activeWorkspace"]["id"] for m in virt]   # slot i -> workspace id
     virt_ids = {m["id"] for m in virt}
     nslots = len(slots)
