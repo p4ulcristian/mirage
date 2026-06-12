@@ -48,6 +48,41 @@ VITURE Beast XR Glasses
   Firmware: 20.0.01.025_20260608
 ```
 
+### 4b. Beast HID Protocol (Reverse-Engineered 2025-06-12)
+
+**IMPORTANT:** Beast uses a DIFFERENT protocol than older Viture glasses!
+
+**Packet format:**
+```
+Header: 10 00 XX YY [data...]  (64 bytes total)
+        ^^ ^^ ^^ ^^
+        |  |  |  +-- Sub-command/parameter
+        |  |  +----- Command type
+        |  +-------- Always 0x00
+        +----------- Report ID 0x10
+```
+
+**NOT `FF FC`/`FF FE` like older glasses!**
+
+**Commands observed (via SpaceWalker trace):**
+```
+10 00 03 30 - Query (serial/version?)
+10 00 02 30 - Query (status?)
+10 00 01 32 - Get firmware version
+10 00 22 31 - Get display mode
+10 00 05 30 - Get brightness
+10 00 28 31 - Unknown query
+10 00 24 31 - Get display size/mode
+10 00 00 34 - Unknown (init?)
+10 00 01 34 08 00 1c 00 07 00 01 02 03 04 05 06 - Configuration
+10 00 02 34 07 00 15 00 06 00 01 02 03 04 05    - Configuration
+10 00 00 04 04 00 7e 01 9a 4f 2b 6a             - Unknown (timestamp?)
+```
+
+**IMU data:** Likely delivered via HID input reports (async), not SetReport/GetReport.
+The input callback registration didn't fire in our trace - SpaceWalker may use
+IOHIDQueueCreate or a different async mechanism.
+
 ### 5. SpaceWalker Display Modes
 
 From HID messages:
