@@ -242,6 +242,12 @@ void layout_place(const struct mirage *m, int i, float *yaw, float *lift, float 
 int  layout_num_cols(const struct mirage *m);          /* distinct yaw columns       */
 int  layout_screen_col(const struct mirage *m, int i); /* column index of screen i   */
 
+/* Angular + vertical extent of the column-placed wall (free satellites excluded):
+ * the yaw of its centre (rad), its total angular width (rad), and the height of
+ * its top edge (m). Lets the clock banner hang above the wall on the same curve.
+ * Sets *arc_total <= 0 when there are no column-placed screens. */
+void layout_wall_extent(const struct mirage *m, float *yaw_c, float *arc_total, float *top);
+
 /* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
  * drive a cursor across the virtual screens as one continuous strip. */
 bool grab_init(struct mirage *m);

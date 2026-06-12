@@ -158,6 +158,33 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     *lift_out = mylift;
 }
 
+/* Angular + vertical extent of the column-placed wall (free satellites excluded):
+ * the yaw of its centre, its total angular width (rad), and the height of its top
+ * edge (m) - the union of every column-placed screen's left/right yaw edges and
+ * top. Used to hang the clock banner above the wall on the same curve. */
+void layout_wall_extent(const struct mirage *m, float *yaw_c, float *arc_total,
+                        float *top) {
+    int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
+    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
+    float left = -1e30f, right = 1e30f, hi = -1e30f;
+    bool any = false;
+    for (int i = 0; i < n; i++) {
+        if (screen_is_free(m, i)) continue;          /* satellites aren't the wall */
+        float yaw, lift, arc;
+        layout_place(m, i, &yaw, &lift, &arc);
+        float halfw = arc * (float)M_PI/180.0f * 0.5f;
+        float h2    = screen_height(m, i) * 0.5f;
+        if (yaw + halfw > left)  left  = yaw + halfw;   /* +yaw = viewer's left */
+        if (yaw - halfw < right) right = yaw - halfw;
+        if (lift + h2   > hi)    hi    = lift + h2;
+        any = true;
+    }
+    if (!any) { *yaw_c = 0.0f; *arc_total = 0.0f; *top = 0.0f; return; }
+    *yaw_c     = 0.5f * (left + right);
+    *arc_total = left - right;
+    *top       = hi;
+}
+
 /* Place screen `i` on the arc: a yaw (its column) + a straight-up lift (its row),
  * both about the viewer at the origin. */
 mat4 layout_model_matrix(const struct mirage *m, int i) {

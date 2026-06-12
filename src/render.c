@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 
 #include <wayland-egl.h>
 
@@ -102,6 +103,12 @@ static struct {
     /* static multi-line shortcut cheat-sheet, baked once at init */
     GLuint label_help;
     int    help_w, help_h;
+    /* big clock banner, hung above the wall on the same curve. Geometry (clock_vbo)
+     * is static, built with the meshes; only the baked HH:MM + date texture changes,
+     * and only when the minute rolls over (clock_key = last-baked minute-of-year). */
+    GLuint clock_vbo;   int clock_verts;
+    GLuint label_clock; int clock_w, clock_h, clock_key;
+    float  clock_yaw, clock_lift;
 } R;
 
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
@@ -280,6 +287,10 @@ static void build_slab_mesh(struct mirage *m, screen_t *s) {
 /* (Re)build every screen's mesh + slab from the current cfg. Called once at init
  * and again whenever a layout switch changes arcs/geometry/distance; old VBOs are
  * released first so a repeated switch doesn't leak GPU buffers. Needs a live ctx. */
+static void   build_clock_banner(struct mirage *m); /* clock banner: defined below */
+static GLuint bake_clock(struct mirage *m, int *ow, int *oh);
+static int    clock_key_now(void);
+
 void render_rebuild_meshes(struct mirage *m) {
     int n = m->n_screen;
     if (n < 0 || n > MIRAGE_MAX_SCREENS) n = 0;
@@ -295,6 +306,16 @@ void render_rebuild_meshes(struct mirage *m) {
         if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, s);
         else                              build_curved_mesh(m, s);
         build_slab_mesh(m, s);
+    }
+    /* the clock banner hangs off the wall's extent, so rebuild it too on a layout
+     * switch. The texture's width is tuned to the arc (see bake_clock), so re-bake
+     * it first for the new extent, then build the mesh. No-op until the clock has
+     * been baked once (clock_w == 0 on the first call, from render_init). */
+    if (R.clock_w > 0) {
+        if (R.label_clock) glDeleteTextures(1, &R.label_clock);
+        R.label_clock = bake_clock(m, &R.clock_w, &R.clock_h);
+        R.clock_key   = clock_key_now();
+        build_clock_banner(m);
     }
 }
 
@@ -414,6 +435,94 @@ static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
     if (ow) *ow = tw;
     if (oh) *oh = th;
     return tex;
+}
+
+/* ---- big clock banner --------------------------------------------------------
+ * A curved strip hung above the wall, bent on the same cylinder as the displays
+ * (radius = screen distance) so it belongs to the wall. The texture is HH:MM over
+ * a date line; the mesh is static (rebuilt only on a layout switch). */
+
+/* Second-of-year of local now: the key that gates re-baking the clock texture
+ * (ticks every second so the seconds digits update). */
+static int clock_key_now(void) {
+    time_t tt = time(NULL);
+    struct tm lt; localtime_r(&tt, &lt);
+    return ((lt.tm_yday*24 + lt.tm_hour)*60 + lt.tm_min)*60 + lt.tm_sec;
+}
+
+#define CLOCK_BAR_H 0.5f   /* target banner height (m): a slim bar, not a tower */
+
+/* Rasterise the current local time as "HH:MM:SS" over "WED JUN 12" in warm amber. The
+ * font is uppercase-only, so the date line is upper-cased. Both lines are centred
+ * (leading + trailing spaces) to a width N chosen so that build_clock_banner's
+ * aspect-preserving height lands at ~CLOCK_BAR_H across the wall's full arc - i.e.
+ * the bar spans the whole curve while the digits stay square and centred on it. */
+static GLuint bake_clock(struct mirage *m, int *ow, int *oh) {
+    time_t tt = time(NULL);
+    struct tm lt; localtime_r(&tt, &lt);
+    char l1[16], l2[16];
+    strftime(l1, sizeof l1, "%H:%M:%S", &lt);
+    strftime(l2, sizeof l2, "%a %b %d", &lt);
+    for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
+
+    /* Banner width L = d * arc; bake_label gives tw = 30N+7, th = 97 (2 lines). The
+     * banner height = L * th/tw, so to hit CLOCK_BAR_H we want tw = L*th/CLOCK_BAR_H,
+     * i.e. N = (that - 7)/30. */
+    float yaw_c, ang, top;
+    layout_wall_extent(m, &yaw_c, &ang, &top);
+    float L  = m->cfg.screen_distance_m * (ang > 0.0f ? ang : 1.0f);
+    int   N  = (int)((L * 97.0f / CLOCK_BAR_H - 7.0f) / 30.0f + 0.5f);
+    int   l1n = (int)strlen(l1), l2n = (int)strlen(l2);
+    int   wid = l2n > l1n ? l2n : l1n;
+    if (N < wid) N = wid;
+    if (N > 90)  N = 90;                              /* clamp the canvas (and bufs) */
+
+    char b1[96], b2[96], buf[200];
+    int p1 = (N - l1n) / 2, p2 = (N - l2n) / 2;
+    snprintf(b1, sizeof b1, "%*s%s%*s", p1, "", l1, N - l1n - p1, "");
+    snprintf(b2, sizeof b2, "%*s%s%*s", p2, "", l2, N - l2n - p2, "");
+    snprintf(buf, sizeof buf, "%s\n%s", b1, b2);
+
+    const float cc[3] = {0.96f, 0.87f, 0.62f};       /* warm amber */
+    return bake_label(buf, cc, ow, oh);
+}
+
+/* Build the curved banner: a vertical strip swept along the wall's full arc (same
+ * x=d*sin(phi), z=-d*cos(phi) as build_curved_mesh), its height set from the text
+ * aspect so the digits aren't stretched, hung a margin above the wall's top edge.
+ * Needs R.clock_w/clock_h from a prior bake_clock(); a no-op before that. */
+static void build_clock_banner(struct mirage *m) {
+    if (R.clock_vbo) { glDeleteBuffers(1, &R.clock_vbo); R.clock_vbo = 0; }
+    R.clock_verts = 0;
+    if (R.clock_w <= 0 || R.clock_h <= 0) return;        /* texture not baked yet */
+
+    float yaw_c, ang, top;
+    layout_wall_extent(m, &yaw_c, &ang, &top);
+    if (ang <= 0.0f) return;                             /* no column-placed wall */
+
+    float d = m->cfg.screen_distance_m;
+    float L = d * ang;                                   /* banner width (arc len) */
+    float h = L * ((float)R.clock_h / (float)R.clock_w); /* keep the text aspect */
+    R.clock_yaw  = yaw_c;
+    R.clock_lift = top + 0.08f + h * 0.5f;               /* float above the top edge */
+
+    const int cols = 64;
+    int verts = (cols + 1) * 2;
+    GLfloat *buf = malloc((size_t)verts * 5 * sizeof(GLfloat));
+    int k = 0;
+    for (int ci = 0; ci <= cols; ci++) {
+        float u   = (float)ci / (float)cols;
+        float phi = -ang * 0.5f + u * ang;
+        float x   =  d * sinf(phi);
+        float z   = -d * cosf(phi);
+        buf[k++]=x; buf[k++]= h*0.5f; buf[k++]=z; buf[k++]=u; buf[k++]=0.0f; /* top */
+        buf[k++]=x; buf[k++]=-h*0.5f; buf[k++]=z; buf[k++]=u; buf[k++]=1.0f; /* bottom */
+    }
+    glGenBuffers(1, &R.clock_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, R.clock_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf, GL_STATIC_DRAW);
+    R.clock_verts = verts;
+    free(buf);
 }
 
 /* ---- HDRI environment dome ---------------------------------------------------
@@ -600,6 +709,13 @@ bool render_init(struct mirage *m) {
           "CMD+SCROLL: ZOOM\n"
           "SUPER+SHIFT+Q: QUIT",
           hc, &R.help_w, &R.help_h); }
+    /* big clock banner: bake once so the banner mesh knows the text aspect, then
+     * build the curved strip (render_rebuild_meshes above ran before this bake, so
+     * its build_clock_banner was a no-op - this is the first real build). The frame
+     * loop re-bakes the texture when the minute rolls over. */
+    R.label_clock = bake_clock(m, &R.clock_w, &R.clock_h);
+    R.clock_key   = clock_key_now();
+    build_clock_banner(m);
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
 
@@ -864,6 +980,42 @@ void render_frame(struct mirage *m, quat head) {
                 glUniform1f(R.uSharpen, 0.0f);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             }
+        }
+    }
+
+    /* Big clock banner, bent above the wall on the same curve. World-fixed to the
+     * wall (yaw + lift baked at build time), so it pans with the displays. Static
+     * geometry; the texture re-bakes only when the local minute changes. */
+    if (R.clock_verts > 0) {
+        int key = clock_key_now();
+        if (key != R.clock_key || !R.label_clock) {
+            if (R.label_clock) glDeleteTextures(1, &R.label_clock);
+            int ow, oh;
+            R.label_clock = bake_clock(m, &ow, &oh);
+            if (ow != R.clock_w || oh != R.clock_h) {    /* aspect changed -> remesh */
+                R.clock_w = ow; R.clock_h = oh;
+                build_clock_banner(m);
+            }
+            R.clock_key = key;
+        }
+        if (R.label_clock && R.clock_verts > 0) {
+            mat4 Rm    = m4_from_quat(q_from_euler_ypr(R.clock_yaw, 0.0f, 0.0f));
+            mat4 Tm    = m4_translate(v3(0.0f, R.clock_lift, 0.0f));
+            mat4 model = m4_mul(Tm, Rm);
+            mat4 mvp   = m4_mul(vp, model);
+            glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
+            glBindBuffer(GL_ARRAY_BUFFER, R.clock_vbo);
+            glEnableVertexAttribArray(R.aPos);
+            glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+            glEnableVertexAttribArray(R.aUV);
+            glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, R.label_clock);
+            glUniform1i(R.uTex, 0);
+            glUniform1f(R.uHasTex, 1.0f);
+            glUniform1f(R.uYFlip, 0.0f);
+            glUniform1f(R.uSharpen, 0.0f);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, R.clock_verts);
         }
     }
 
