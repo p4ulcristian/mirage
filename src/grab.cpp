@@ -53,25 +53,22 @@ typedef struct {
     bool alt;                   /* Alt held? (gates the Alt+N layout combo) */
 
     int   n;                    /* screen count                          */
-    float sens;                /* relative-motion scale (cursor speed)   */
-    float gaze_gain;           /* scales gaze delta -> cursor delta      */
-    float gaze_prev_yaw, gaze_prev_pitch;  /* last frame's gaze angles   */
-    bool  gaze_prev_valid;     /* false until the first gaze sample      */
+    int   x0[GRAB_MAX], y0[GRAB_MAX];  /* top-left of each screen's grid cell */
+    int   w[GRAB_MAX], h[GRAB_MAX];
+    int   cols, rows, cellw, cellh;    /* cursor grid (matches the visual wall) */
+    int   strip_w, strip_h;
+
+    double gx, gy;              /* cursor position in strip space         */
+    int    cur;                 /* screen the cursor is currently on      */
+    float  sens;               /* motion scale                          */
+    float  gaze_gain;          /* scales gaze delta -> cursor delta (1 = 1:1)     */
+    double gaze_prev_gx, gaze_prev_gy;  /* last frame's gaze strip point          */
+    bool   gaze_prev_valid;    /* false until the first gaze sample is seeded     */
     uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
     uint32_t last_super_ms;    /* last Cmd press (for double-tap recenter)    */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
 
-    /* ONE global virtual pointer drives all motion + buttons, so an interactive
-     * drag's press/move/release stay on a single device and Hyprland's move
-     * follows the cursor across outputs. (Per-output pointers split the drag and
-     * stranded the side panels.) The cursor lives in the real 2D desktop - the
-     * masonry is gap-free, so it roams it naturally. A second, output-bound
-     * pointer warps it onto the wall once at startup (the global one is relative). */
-    struct zwlr_virtual_pointer_v1 *vp;       /* global, relative motion */
-    struct zwlr_virtual_pointer_v1 *warp_vp;  /* output-bound, one-time warp */
-    int    warp_screen;                       /* central screen to warp onto */
-    bool   warped;
-
+    struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
     char   dev[64];             /* trackpad device path (grabbed)         */
     char   kbd[MAX_KBD][64];    /* keyboard device paths (observed, not grabbed) */
@@ -156,14 +153,87 @@ static void uinput_wheel(int fd, int notches) {
     if (write(fd, ev, 3 * sizeof ev[0]) < 0) { /* device may have vanished */ }
 }
 
-/* Inject a relative cursor motion on the single global pointer. Hyprland moves
- * the seat cursor through the real 2D desktop (the masonry), so it crosses
- * outputs itself and an interactive drag follows it everywhere. */
-static void move_cursor(grab_state *g, double dx, double dy) {
-    if (!g->vp || (dx == 0.0 && dy == 0.0)) return;
-    zwlr_virtual_pointer_v1_motion(g->vp, now_ms(),
-                                   wl_fixed_from_double(dx), wl_fixed_from_double(dy));
-    zwlr_virtual_pointer_v1_frame(g->vp);
+/* The screen whose pixel rect is nearest the canvas point (0 distance if the
+ * point is inside it). Lets the cursor roam an uneven, multi-column canvas: gaps
+ * between panels snap to the closest screen instead of dropping the cursor. */
+static int screen_at(grab_state *g, double x, double y) {
+    int best = 0; double bd = 1e30;
+    for (int i = 0; i < g->n; i++) {
+        double cx = x, cy = y;
+        if (cx < g->x0[i])               cx = g->x0[i];
+        else if (cx > g->x0[i] + g->w[i] - 1) cx = g->x0[i] + g->w[i] - 1;
+        if (cy < g->y0[i])               cy = g->y0[i];
+        else if (cy > g->y0[i] + g->h[i] - 1) cy = g->y0[i] + g->h[i] - 1;
+        double dx = x - cx, dy = y - cy, d = dx*dx + dy*dy;
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+/* Map the strip cursor to a screen + output-local pixel and inject it. */
+static void push_cursor(grab_state *g) {
+    if (g->gx < 0) g->gx = 0;
+    if (g->gy < 0) g->gy = 0;
+    if (g->gx > g->strip_w - 1) g->gx = g->strip_w - 1;
+    if (g->gy > g->strip_h - 1) g->gy = g->strip_h - 1;
+
+    int s = screen_at(g, g->gx, g->gy);
+    g->cur = s;
+    if (!g->vp[s]) return;
+
+    double lxd = g->gx - g->x0[s], lyd = g->gy - g->y0[s];
+    if (lxd < 0) lxd = 0;
+    if (lxd > g->w[s] - 1) lxd = g->w[s] - 1;
+    if (lyd < 0) lyd = 0;
+    if (lyd > g->h[s] - 1) lyd = g->h[s] - 1;
+
+    zwlr_virtual_pointer_v1_motion_absolute(g->vp[s], now_ms(),
+                                            (uint32_t)lxd, (uint32_t)lyd,
+                                            (uint32_t)g->w[s], (uint32_t)g->h[s]);
+    zwlr_virtual_pointer_v1_frame(g->vp[s]);
+}
+
+/* Inverse of layout_focus_angles + push_cursor: given the camera look angles
+ * render_frame published (m->gaze_yaw/pitch), find the strip position (gx,gy)
+ * the eye is pointing at. We pick the screen whose centre is angularly nearest
+ * the gaze, then offset within it by the leftover angle: a screen spans
+ * screen_arc_deg horizontally and ~the same * aspect vertically, mapped linearly
+ * to its pixel box. +yaw is the viewer's left (see layout.c), so we subtract.
+ * Out-of-screen gaze (the gaps between panels) clamps to the nearest edge. */
+static void gaze_target(grab_state *g, double *out_gx, double *out_gy) {
+    struct mirage *m = g->m;
+    const mirage_config *c = &m->cfg;
+    float gy_a = m->gaze_yaw, gp_a = m->gaze_pitch;
+
+    int best = -1; float bestd = 1e30f, bty = 0, btp = 0;
+    for (int i = 0; i < g->n; i++) {
+        float ty, tp; layout_focus_angles(m, i, &ty, &tp);
+        float dy = gy_a - ty, dp = gp_a - tp;
+        float dd = dy*dy + dp*dp;
+        if (dd < bestd) { bestd = dd; best = i; bty = ty; btp = tp; }
+    }
+    if (best < 0) { *out_gx = g->gx; *out_gy = g->gy; return; }
+
+    float arc_deg = m->screen[best].arc_deg;                  /* this screen's own arc */
+    if (arc_deg <= 0.0f)
+        arc_deg = c->screen_arc[best] > 0.0f ? c->screen_arc[best] : c->screen_arc_deg;
+    float ang_w = arc_deg * (float)M_PI/180.0f;               /* horizontal span */
+    float aspect = (g->w[best] > 0 && g->h[best] > 0)
+                   ? (float)g->h[best] / (float)g->w[best] : 9.0f/16.0f;
+    float h_m = (c->geometry == GEOM_FLAT)
+                ? 2.0f * c->screen_distance_m * tanf(ang_w * 0.5f) * aspect
+                : c->screen_distance_m * ang_w * aspect;
+    float vspan = 2.0f * atan2f(0.5f * h_m, c->screen_distance_m);  /* vertical span */
+
+    float lx = g->w[best] * 0.5f - ((gy_a - bty) / ang_w)  * g->w[best];
+    float ly = g->h[best] * 0.5f - ((gp_a - btp) / vspan)  * g->h[best];
+    if (lx < 0) lx = 0;
+    if (lx > g->w[best] - 1) lx = g->w[best] - 1;
+    if (ly < 0) ly = 0;
+    if (ly > g->h[best] - 1) ly = g->h[best] - 1;
+
+    *out_gx = g->x0[best] + lx;
+    *out_gy = g->y0[best] + ly;
 }
 
 static void do_zoom(grab_state *g, double scroll_v) {
@@ -239,9 +309,9 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
          * The unaccelerated delta is linear in finger travel regardless of
          * speed (and regardless of whether the device exposes an accel config),
          * so boundaries cross at any speed. Our g->sens scales it. */
-        double dx = libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
-        double dy = libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
-        move_cursor(g, dx, dy);
+        g->gx += libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
+        g->gy += libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
+        push_cursor(g);
         break;
     }
     case LIBINPUT_EVENT_POINTER_BUTTON: {
@@ -249,9 +319,9 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t btn = libinput_event_pointer_get_button(p);
         uint32_t st  = libinput_event_pointer_get_button_state(p)
                        == LIBINPUT_BUTTON_STATE_PRESSED ? 1u : 0u;
-        if (g->vp) {
-            zwlr_virtual_pointer_v1_button(g->vp, now_ms(), btn, st);
-            zwlr_virtual_pointer_v1_frame(g->vp);
+        if (g->vp[g->cur]) {
+            zwlr_virtual_pointer_v1_button(g->vp[g->cur], now_ms(), btn, st);
+            zwlr_virtual_pointer_v1_frame(g->vp[g->cur]);
         }
         break;
     }
@@ -304,20 +374,22 @@ void grab_pump(struct mirage *m) {
      * offset. The trackpad deltas above already landed this frame; gaze just adds
      * its own on top. */
     if (m->cfg.gaze_cursor && m->gaze_have) {
-        float yaw = m->gaze_yaw, pitch = m->gaze_pitch;
+        double tx, ty;
+        gaze_target(g, &tx, &ty);
         if (!g->gaze_prev_valid) {
-            g->gaze_prev_yaw = yaw; g->gaze_prev_pitch = pitch;
+            g->gaze_prev_gx = tx; g->gaze_prev_gy = ty;
             g->gaze_prev_valid = true;
         } else {
-            float dyaw = yaw - g->gaze_prev_yaw, dpitch = pitch - g->gaze_prev_pitch;
-            g->gaze_prev_yaw = yaw; g->gaze_prev_pitch = pitch;
-            /* Move the cursor by how much the gaze shifted. +yaw is the viewer's
-             * left and +pitch is up, so they drive -x and -y. Scale gaze radians
-             * to cursor pixels by the on-wall arc length (d * angle). Cap implausible
-             * single-frame jumps (a deadband re-seed, not real head motion). */
-            if (fabsf(dyaw) < 0.3f && fabsf(dpitch) < 0.3f) {
-                double K = (double)m->cfg.screen_distance_m * 1500.0 * g->gaze_gain;
-                move_cursor(g, -(double)dyaw * K, -(double)dpitch * K);
+            double dx = tx - g->gaze_prev_gx, dy = ty - g->gaze_prev_gy;
+            g->gaze_prev_gx = tx; g->gaze_prev_gy = ty;
+            /* Drop implausible single-frame jumps: those come from gaze_target
+             * reclassifying the nearest screen (a position discontinuity), not
+             * real head motion. Smooth turns stay well under half a cell/frame. */
+            double cap = (g->cellw > g->cellh ? g->cellw : g->cellh) * 0.5;
+            if ((dx != 0.0 || dy != 0.0) && fabs(dx) < cap && fabs(dy) < cap) {
+                g->gx += dx * g->gaze_gain;
+                g->gy += dy * g->gaze_gain;
+                push_cursor(g);
             }
         }
     }
@@ -408,23 +480,48 @@ bool grab_init(struct mirage *m) {
 
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
 
-    /* One global pointer for all motion + buttons (relative; Hyprland owns the
-     * absolute position in the 2D desktop). The cursor warps onto the wall once at
-     * startup via a second, output-bound pointer aimed at the most central screen
-     * (smallest yaw^2 + lift^2) - the global pointer can't position absolutely. */
-    g->vp = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(m->vpointer_mgr, m->seat);
-    int center = 0; float best = 1e30f;
+    /* Cursor canvas = the VISUAL wall projected to a flat strip (yaw -> x, lift ->
+     * y), so the trackpad cursor matches what you actually see. The old column-grid
+     * canvas collapsed for free-placed / masonry layouts - every panel fell into one
+     * column, so the side panels were unreachable left/right. Projecting from
+     * layout_place works for any layout. Each panel's strip rect is its on-wall size
+     * (metres) scaled by S; motion_absolute maps strip-local -> output
+     * proportionally, so S only sets cursor speed (tune g->sens), not correctness. */
+    const float S = 1500.0f, d = m->cfg.screen_distance_m;
+    float uw[GRAB_MAX], vh[GRAB_MAX], uL[GRAB_MAX], vT[GRAB_MAX];   /* metres */
+    float umax = -1e30f, vmax = -1e30f;
     for (int i = 0; i < g->n; i++) {
         float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
-        float dd = yaw*yaw + lift*lift;
-        if (dd < best) { best = dd; center = i; }
+        float ar = arc * (float)M_PI/180.0f;
+        const screen_t *s = &m->screen[i];
+        float aspect = (s->width > 0 && s->height > 0)
+                       ? (float)s->height/(float)s->width : 9.0f/16.0f;
+        uw[i] = d * ar;                  /* on-wall width  (arc length, m) */
+        vh[i] = uw[i] * aspect;          /* on-wall height (m)             */
+        uL[i] = d * (yaw + ar*0.5f);     /* +u = viewer's left edge        */
+        vT[i] = lift + vh[i]*0.5f;       /* top edge                       */
+        if (uL[i] > umax) umax = uL[i];
+        if (vT[i] > vmax) vmax = vT[i];
     }
-    g->warp_screen = center;
-    if (g->n > 0)
-        g->warp_vp = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
-                         m->vpointer_mgr, m->seat, m->screen[center].wl);
-    std::print(stderr, "grab: ready ({} panels, single pointer, warp->VIRT{}, trackpad {}, {} keyboard(s):",
-            g->n, center + 1, g->dev, g->n_kbd);
+    int sw = 0, sh = 0;
+    for (int i = 0; i < g->n; i++) {
+        screen_t *s = &m->screen[i];
+        g->x0[i] = (int)((umax - uL[i]) * S);          /* +u (left) -> small x */
+        g->y0[i] = (int)((vmax - vT[i]) * S);          /* top      -> small y  */
+        g->w[i]  = (int)(uw[i] * S); if (g->w[i] < 1) g->w[i] = 1;
+        g->h[i]  = (int)(vh[i] * S); if (g->h[i] < 1) g->h[i] = 1;
+        if (g->w[i] > g->cellw) g->cellw = g->w[i];    /* motion cap */
+        if (g->h[i] > g->cellh) g->cellh = g->h[i];
+        if (g->x0[i] + g->w[i] > sw) sw = g->x0[i] + g->w[i];
+        if (g->y0[i] + g->h[i] > sh) sh = g->y0[i] + g->h[i];
+        g->vp[i] = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
+                       m->vpointer_mgr, m->seat, s->wl);
+    }
+    g->cols = g->n; g->rows = 1;
+    g->strip_w = sw; g->strip_h = sh;
+    g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
+    std::print(stderr, "grab: ready ({} panels, projected canvas {}x{}, trackpad {}, {} keyboard(s):",
+            g->n, g->strip_w, g->strip_h, g->dev, g->n_kbd);
     for (int i = 0; i < g->n_kbd; i++) std::print(stderr, " {}", g->kbd[i]);
     std::print(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
@@ -467,16 +564,7 @@ void grab_toggle(struct mirage *m) {
         g->super = false;
         g->alt   = false;
         g->active = true;
-        /* Warp the cursor onto the wall once (the global pointer is relative-only):
-         * place it at the centre of the central screen via its output-bound pointer. */
-        if (!g->warped && g->warp_vp && g->warp_screen < m->n_screen) {
-            screen_t *s = &m->screen[g->warp_screen];
-            zwlr_virtual_pointer_v1_motion_absolute(g->warp_vp, now_ms(),
-                (uint32_t)(s->width/2), (uint32_t)(s->height/2),
-                (uint32_t)s->width, (uint32_t)s->height);
-            zwlr_virtual_pointer_v1_frame(g->warp_vp);
-            g->warped = true;
-        }
+        push_cursor(g);
         std::print(stderr, "grab: capture ON (trackpad grabbed{})\n",
                 g->uifd >= 0 ? ", scroll via uinput" : ", scroll unavailable");
     } else {
@@ -490,13 +578,21 @@ void grab_toggle(struct mirage *m) {
 
 bool grab_active(struct mirage *m) { grab_state *g = GS(m); return g && g->active; }
 
+/* Screen the captured cursor is currently on (== the focused window's screen
+ * under focus-follows-mouse), or -1 when not capturing. Capture uses this to
+ * grab the active screen at full rate so the focused window never lags. */
+int grab_cursor_screen(struct mirage *m) {
+    grab_state *g = GS(m);
+    return (g && g->active) ? g->cur : -1;
+}
+
 void grab_destroy(struct mirage *m) {
     grab_state *g = GS(m);
     if (!g) return;
     if (g->li) { libinput_unref(g->li); g->li = NULL; }
     if (g->uifd >= 0) { uinput_close(g->uifd); g->uifd = -1; }
-    if (g->vp)      zwlr_virtual_pointer_v1_destroy(g->vp);
-    if (g->warp_vp) zwlr_virtual_pointer_v1_destroy(g->warp_vp);
+    for (int i = 0; i < g->n; i++)
+        if (g->vp[i]) zwlr_virtual_pointer_v1_destroy(g->vp[i]);
     free(g);
     m->grab = NULL;
 }
