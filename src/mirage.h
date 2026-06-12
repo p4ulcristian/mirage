@@ -256,13 +256,13 @@ int  layout_screen_col(const struct mirage *m, int i); /* column index of screen
  * Sets *arc_total <= 0 when there are no column-placed screens. */
 void layout_wall_extent(const struct mirage *m, float *yaw_c, float *arc_total, float *top);
 
-/* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
- * drive a cursor across the virtual screens as one continuous strip. */
+/* grab.c - trackpad input capture: read raw motion and drive one virtual pointer
+ * through the real 2D desktop (the masonry), so the cursor and an interactive drag
+ * roam every screen as a single device. */
 bool grab_init(struct mirage *m);
 void grab_toggle(struct mirage *m);   /* enter/leave capture mode (Super+G)    */
 void grab_pump(struct mirage *m);     /* drain trackpad events (every frame)   */
 bool grab_active(struct mirage *m);
-int  grab_cursor_screen(struct mirage *m);  /* focused screen idx, -1 if none   */
 void grab_destroy(struct mirage *m);
 
 #endif /* MIRAGE_H */
