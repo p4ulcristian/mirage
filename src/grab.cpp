@@ -53,8 +53,6 @@ typedef struct {
     bool alt;                   /* Alt held? (gates the Alt+N layout combo) */
 
     int   n;                    /* screen count                          */
-    double cx, cy;             /* tracked cursor position in 2D desktop px */
-    double bx0, by0, bx1, by1; /* virtual-screen bounding box (the leash)  */
     float sens;                /* relative-motion scale (cursor speed)   */
     float gaze_gain;           /* scales gaze delta -> cursor delta      */
     float gaze_prev_yaw, gaze_prev_pitch;  /* last frame's gaze angles   */
@@ -158,38 +156,14 @@ static void uinput_wheel(int fd, int notches) {
     if (write(fd, ev, 3 * sizeof ev[0]) < 0) { /* device may have vanished */ }
 }
 
-/* Move mirage's pointer by (dx,dy) desktop px. We track its position ourselves so
- * we can (1) leash it to the virtual-screen bounding box - it can never wander onto
- * the laptop/glasses - and (2) publish which screen it's over + where, for the
- * reticle and (later) per-entity dispatch. The realised (clamped) delta is sent as
- * relative motion on the single global pointer, so the real seat cursor rides
- * along 1:1 and an interactive drag follows it across screens. */
+/* Inject a relative cursor motion on the single global pointer. Hyprland moves
+ * the seat cursor through the real 2D desktop (the masonry), so it crosses
+ * outputs itself and an interactive drag follows it everywhere. */
 static void move_cursor(grab_state *g, double dx, double dy) {
-    if (!g->vp) return;
-    struct mirage *m = g->m;
-    double nx = g->cx + dx, ny = g->cy + dy;
-    if (nx < g->bx0) nx = g->bx0;  else if (nx > g->bx1 - 1) nx = g->bx1 - 1;
-    if (ny < g->by0) ny = g->by0;  else if (ny > g->by1 - 1) ny = g->by1 - 1;
-    double rdx = nx - g->cx, rdy = ny - g->cy;
-    g->cx = nx; g->cy = ny;
-    if (rdx != 0.0 || rdy != 0.0) {
-        zwlr_virtual_pointer_v1_motion(g->vp, now_ms(),
-                                       wl_fixed_from_double(rdx), wl_fixed_from_double(rdy));
-        zwlr_virtual_pointer_v1_frame(g->vp);
-    }
-    /* which screen is the pointer over, and where on it (normalised)? */
-    int hit = -1;
-    for (int i = 0; i < m->n_screen && i < g->n; i++) {
-        screen_t *s = &m->screen[i];
-        if (g->cx >= s->out_x && g->cx < s->out_x + s->width &&
-            g->cy >= s->out_y && g->cy < s->out_y + s->height) { hit = i; break; }
-    }
-    m->cursor_screen = hit;
-    if (hit >= 0) {
-        screen_t *s = &m->screen[hit];
-        m->cursor_u = (float)((g->cx - s->out_x) / (double)s->width);
-        m->cursor_v = (float)((g->cy - s->out_y) / (double)s->height);
-    }
+    if (!g->vp || (dx == 0.0 && dy == 0.0)) return;
+    zwlr_virtual_pointer_v1_motion(g->vp, now_ms(),
+                                   wl_fixed_from_double(dx), wl_fixed_from_double(dy));
+    zwlr_virtual_pointer_v1_frame(g->vp);
 }
 
 static void do_zoom(grab_state *g, double scroll_v) {
@@ -449,29 +423,8 @@ bool grab_init(struct mirage *m) {
     if (g->n > 0)
         g->warp_vp = zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
                          m->vpointer_mgr, m->seat, m->screen[center].wl);
-
-    /* The cursor's leash: the bounding box of all virtual screens in 2D desktop
-     * coords (read from each output's geometry). move_cursor clamps to this, so the
-     * pointer can never leave the wall. Start it at the central screen's centre -
-     * where the warp places the real cursor too. */
-    g->bx0 = g->by0 = 1e30; g->bx1 = g->by1 = -1e30;
-    for (int i = 0; i < g->n; i++) {
-        screen_t *s = &m->screen[i];
-        if (s->out_x < g->bx0) g->bx0 = s->out_x;
-        if (s->out_y < g->by0) g->by0 = s->out_y;
-        if (s->out_x + s->width  > g->bx1) g->bx1 = s->out_x + s->width;
-        if (s->out_y + s->height > g->by1) g->by1 = s->out_y + s->height;
-    }
-    if (g->bx1 <= g->bx0) { g->bx0 = 0; g->bx1 = 1; }   /* no geometry yet */
-    if (g->by1 <= g->by0) { g->by0 = 0; g->by1 = 1; }
-    if (g->n > 0) {
-        g->cx = m->screen[center].out_x + m->screen[center].width  / 2.0;
-        g->cy = m->screen[center].out_y + m->screen[center].height / 2.0;
-    }
-    m->cursor_screen = center; m->cursor_u = m->cursor_v = 0.5f;
-
-    std::print(stderr, "grab: ready ({} panels, single pointer, warp->VIRT{}, leash {}x{}, trackpad {}, {} keyboard(s):",
-            g->n, center + 1, (int)(g->bx1-g->bx0), (int)(g->by1-g->by0), g->dev, g->n_kbd);
+    std::print(stderr, "grab: ready ({} panels, single pointer, warp->VIRT{}, trackpad {}, {} keyboard(s):",
+            g->n, center + 1, g->dev, g->n_kbd);
     for (int i = 0; i < g->n_kbd; i++) std::print(stderr, " {}", g->kbd[i]);
     std::print(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms

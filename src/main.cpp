@@ -14,7 +14,6 @@
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
-#include "xdg-output-unstable-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
@@ -64,9 +63,8 @@ static const struct xdg_toplevel_listener XTOP_LISTENER = {
 static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
         int32_t pw, int32_t ph, int32_t sp, const char *make, const char *model,
         int32_t tr) {
-    (void)o;(void)pw;(void)ph;(void)sp;(void)tr;
+    (void)o;(void)x;(void)y;(void)pw;(void)ph;(void)sp;(void)tr;
     int idx = (int)(intptr_t)d;
-    M.pending[idx].x = x; M.pending[idx].y = y;   /* output's place in the 2D desktop */
     M.pending[idx].desc = std::string(make ? make : "") + " " + (model ? model : "");
 }
 static void out_mode(void *d, struct wl_output *o, uint32_t flags,
@@ -92,27 +90,6 @@ static const struct wl_output_listener OUTPUT_LISTENER = {
     .scale = out_scale, .name = out_name, .description = out_description,
 };
 
-/* ---- xdg-output: the LOGICAL position of each output. Hyprland reports 0,0 in
- * wl_output.geometry, so this is the only way to learn where the virtual screens
- * actually sit in the 2D desktop (which the cursor leash needs). ---- */
-static void xo_logical_position(void *d, struct zxdg_output_v1 *o, int32_t x, int32_t y) {
-    (void)o; int idx = (int)(intptr_t)d;
-    if (idx >= 0 && idx < 16) { M.pending[idx].x = x; M.pending[idx].y = y; }
-}
-static void xo_logical_size(void *d, struct zxdg_output_v1 *o, int32_t w, int32_t h) {
-    (void)d;(void)o;(void)w;(void)h;
-}
-static void xo_done(void *d, struct zxdg_output_v1 *o) { (void)d;(void)o; }
-static void xo_name(void *d, struct zxdg_output_v1 *o, const char *n) { (void)d;(void)o;(void)n; }
-static void xo_description(void *d, struct zxdg_output_v1 *o, const char *de) { (void)d;(void)o;(void)de; }
-static const struct zxdg_output_v1_listener XDG_OUTPUT_LISTENER = {
-    .logical_position = xo_logical_position,
-    .logical_size     = xo_logical_size,
-    .done             = xo_done,
-    .name             = xo_name,
-    .description      = xo_description,
-};
-
 /* ---- registry ---- */
 static void reg_global(void *d, struct wl_registry *r, uint32_t name,
                        const char *iface, uint32_t ver) {
@@ -130,9 +107,6 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
                                     ver < 3 ? ver : 3);
     } else if (!strcmp(iface, wl_shm_interface.name)) {
         M.shm = (struct wl_shm*)wl_registry_bind(r, name, &wl_shm_interface, 1);
-    } else if (!strcmp(iface, zxdg_output_manager_v1_interface.name)) {
-        M.xdg_output_mgr = (struct zxdg_output_manager_v1*)wl_registry_bind(r, name,
-            &zxdg_output_manager_v1_interface, ver < 3 ? ver : 3);
     } else if (!strcmp(iface, wl_seat_interface.name)) {
         M.seat = (struct wl_seat*)wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
     } else if (!strcmp(iface, zwp_pointer_constraints_v1_interface.name)) {
@@ -201,8 +175,6 @@ static int classify_outputs(void) {
                 snprintf(s->name, sizeof s->name, "%s", want);
                 s->width  = M.pending[i].w;
                 s->height = M.pending[i].h;
-                s->out_x  = M.pending[i].x;
-                s->out_y  = M.pending[i].y;
                 s->index  = M.n_screen;
                 s->image  = EGL_NO_IMAGE_KHR;
                 s->dmabuf_fd = -1;
@@ -242,14 +214,7 @@ int main(void) {
     M.registry = wl_display_get_registry(M.display);
     wl_registry_add_listener(M.registry, &REGISTRY_LISTENER, NULL);
     wl_display_roundtrip(M.display);   /* globals */
-    /* ask for each output's LOGICAL position (Hyprland gives 0,0 in wl_output) */
-    if (M.xdg_output_mgr)
-        for (int i = 0; i < M.n_pending; i++) {
-            struct zxdg_output_v1 *xo =
-                zxdg_output_manager_v1_get_xdg_output(M.xdg_output_mgr, M.pending[i].wl);
-            zxdg_output_v1_add_listener(xo, &XDG_OUTPUT_LISTENER, (void*)(intptr_t)i);
-        }
-    wl_display_roundtrip(M.display);   /* output name/desc/mode + xdg logical_position */
+    wl_display_roundtrip(M.display);   /* output name/desc/mode events */
 
     if (!M.compositor || !g_wm_base || !M.capture_src_mgr || !M.copy_capture_mgr || !M.dmabuf) {
         std::print(stderr, "mirage: missing required wayland globals "

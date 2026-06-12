@@ -20,7 +20,6 @@ SYS_PROTO := /usr/share/wayland-protocols
 # Wayland protocols we bind. Names map to <name>.xml found via vpath below.
 PROTO_NAMES := \
 	xdg-shell \
-	xdg-output-unstable-v1 \
 	linux-dmabuf-unstable-v1 \
 	wlr-virtual-pointer-unstable-v1 \
 	pointer-constraints-unstable-v1 \
@@ -29,7 +28,7 @@ PROTO_NAMES := \
 	ext-image-capture-source-v1 \
 	ext-image-copy-capture-v1
 
-vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/xdg-output:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/ext-foreign-toplevel-list:$(SYS_PROTO)/staging/ext-image-capture-source:$(SYS_PROTO)/staging/ext-image-copy-capture
+vpath %.xml protocol:$(SYS_PROTO)/stable/xdg-shell:$(SYS_PROTO)/unstable/linux-dmabuf:$(SYS_PROTO)/unstable/pointer-constraints:$(SYS_PROTO)/unstable/relative-pointer:$(SYS_PROTO)/staging/ext-foreign-toplevel-list:$(SYS_PROTO)/staging/ext-image-capture-source:$(SYS_PROTO)/staging/ext-image-copy-capture
 
 PROTO_HDR := $(PROTO_NAMES:%=build/proto/%-client-protocol.h)
 PROTO_SRC := $(PROTO_NAMES:%=build/proto/%-protocol.c)
