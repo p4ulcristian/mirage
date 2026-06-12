@@ -500,6 +500,10 @@ static own::GlTexture bake_clock(struct mirage *m, int *ow, int *oh) {
 static void build_clock_banner(struct mirage *m) {
     R.clock_vbo.reset();
     R.clock_verts = 0;
+    /* Clock disabled: it hung above the column-wall and now collides with the 21:9
+     * banner. It returns as a proper Banner entity once the entity system lands
+     * (see the plan); until then leave clock_verts=0 so the frame loop skips it. */
+    return;
     if (R.clock_w <= 0 || R.clock_h <= 0) return;        /* texture not baked yet */
 
     float yaw_c, ang, top;

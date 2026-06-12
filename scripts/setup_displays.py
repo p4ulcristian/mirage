@@ -43,7 +43,7 @@ ORIGIN_X, ORIGIN_Y, REFRESH = 8000, 0, 60
 # its spot on the 3D arc (d3). 2D rects below form a gap-free rectangle.
 PANELS = [
     dict(name="VIRT1", w=4080, h=1748, x=0,    y=0,    role="21:9 banner",
-         d3=dict(yaw=0.0, lift=1.8, arc=72)),                  # free-placed, on top
+         d3=dict(yaw=0.0, lift=1.85, arc=88)),                 # free-placed, spans the wall
     dict(name="VIRT2", w=1080, h=2160, x=0,    y=1748, role="left portrait",
          d3=dict(col=0, arc=23, lift=0.41)),
     dict(name="VIRT3", w=1920, h=1080, x=1080, y=1748, role="centre top 16:9",
@@ -53,7 +53,7 @@ PANELS = [
     dict(name="VIRT5", w=1080, h=2160, x=3000, y=1748, role="right portrait",
          d3=dict(col=2, arc=23, lift=0.41)),
 ]
-ACTIVE, DISTANCE, CENTER_COL, SPACING, SLAB = "theater", 2.0, 1, 1.0, 0.05
+ACTIVE, DISTANCE, CENTER_COL, SPACING, SLAB = "theater", 2.0, 1, 0.0, 0.05
 
 
 def hypr(*args):
