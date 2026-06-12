@@ -39,6 +39,7 @@ typedef struct {
     struct wl_output *wl;
     char     name[32];
     int32_t  width, height;     /* pixel size of the source output      */
+    int32_t  out_x, out_y;      /* its position in the 2D desktop (wl_output geometry) */
     int      index;             /* 0-based slot among virtual screens    */
 
     /* capture target (allocated lazily once the format is known) */
@@ -150,6 +151,7 @@ struct mirage {
     struct ext_image_copy_capture_manager_v1           *copy_capture_mgr;
     struct zwp_linux_dmabuf_v1        *dmabuf;
     struct wl_shm        *shm;
+    struct zxdg_output_manager_v1     *xdg_output_mgr;  /* logical output positions */
 
     /* input grab (grab.c): seat + the three managers that let us lock the real
      * pointer, read its raw motion, and inject a cursor onto the arc. */
@@ -185,7 +187,7 @@ struct mirage {
 
     /* transient output discovery: outputs we've bound but not classified */
     struct { struct wl_output *wl; std::string name; std::string desc;
-             int32_t w, h; bool done; } pending[16];
+             int32_t x, y, w, h; bool done; } pending[16];
     int n_pending;
 
     mirage_config cfg;
@@ -201,6 +203,13 @@ struct mirage {
      * is held. gaze_have gates it off until the first head-tracked frame. */
     float gaze_yaw, gaze_pitch;
     bool  gaze_have;
+
+    /* entity cursor (grab.c): mirage's own pointer in the wall. grab tracks its 2D
+     * desktop position, confines it to the virtual screens, and publishes which
+     * screen it's over + the normalized spot on it, so render can draw a reticle
+     * and (later) dispatch by entity kind. cursor_screen < 0 = over no screen. */
+    int   cursor_screen;
+    float cursor_u, cursor_v;
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */
