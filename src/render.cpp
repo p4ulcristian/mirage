@@ -4,7 +4,9 @@
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
+#include <vector>
 
+#include "stb_truetype.h"
 #include <wayland-egl.h>
 
 /* profiling timing helper: milliseconds between two monotonic samples. */
@@ -177,7 +179,7 @@ static void build_curved_mesh(struct mirage *m, screen_t *s) {
 
     const int cols = 64;
     int verts = (cols + 1) * 2;
-    GLfloat *buf = malloc((size_t)verts * 5 * sizeof(GLfloat));
+    std::vector<GLfloat> buf((size_t)verts * 5);
     int k = 0;
     for (int ci = 0; ci <= cols; ci++) {
         float u   = (float)ci / (float)cols;
@@ -189,9 +191,8 @@ static void build_curved_mesh(struct mirage *m, screen_t *s) {
     }
     glGenBuffers(1, &s->mesh_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, s->mesh_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf.data(), GL_STATIC_DRAW);
     s->mesh_verts = verts;
-    free(buf);
 }
 
 /* Same screen as build_curved_mesh but FLAT: a single quad tangent to the
@@ -319,119 +320,117 @@ void render_rebuild_meshes(struct mirage *m) {
     }
 }
 
-/* ---- status plaque text ---------------------------------------------------
- * A 5x7 bitmap font, just the glyphs the "GAZE: ON/OFF" label needs. Each glyph
- * is 7 rows; the low 5 bits of each byte are the pixels, MSB (bit 4) leftmost.
- * We rasterise a whole string into an RGBA texture once at init (two of them:
- * ON in green, OFF in grey), then draw it on a quad below the centre screen. */
-#define GLYPH_W 5
-#define GLYPH_H 7
-static const unsigned char *glyph_rows(char ch) {
-    static const unsigned char A[] = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
-    static const unsigned char B[] = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
-    static const unsigned char C[] = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
-    static const unsigned char D[] = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
-    static const unsigned char E[] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
-    static const unsigned char F[] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
-    static const unsigned char G[] = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
-    static const unsigned char H[] = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
-    static const unsigned char I[] = {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E};
-    static const unsigned char J[] = {0x07,0x02,0x02,0x02,0x02,0x12,0x0C};
-    static const unsigned char K[] = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
-    static const unsigned char L[] = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
-    static const unsigned char M[] = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
-    static const unsigned char N[] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
-    static const unsigned char O[] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
-    static const unsigned char P[] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
-    static const unsigned char Q[] = {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
-    static const unsigned char R[] = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
-    static const unsigned char S[] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
-    static const unsigned char T[] = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
-    static const unsigned char U[] = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
-    static const unsigned char V[] = {0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
-    static const unsigned char W[] = {0x11,0x11,0x11,0x15,0x15,0x15,0x0A};
-    static const unsigned char X[] = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
-    static const unsigned char Y[] = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
-    static const unsigned char Z[] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
-    static const unsigned char CO[] = {0x00,0x04,0x04,0x00,0x04,0x04,0x00}; /* colon */
-    static const unsigned char PL[] = {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}; /* plus  */
-    static const unsigned char MI[] = {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}; /* minus */
-    static const unsigned char SP[] = {0,0,0,0,0,0,0};                    /* space */
-    static const unsigned char D0[] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
-    static const unsigned char D1[] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
-    static const unsigned char D2[] = {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
-    static const unsigned char D3[] = {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E};
-    static const unsigned char D4[] = {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02};
-    static const unsigned char D5[] = {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E};
-    static const unsigned char D6[] = {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E};
-    static const unsigned char D7[] = {0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
-    static const unsigned char D8[] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
-    static const unsigned char D9[] = {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C};
-    switch (ch) {
-    case 'A': return A; case 'B': return B; case 'C': return C;
-    case 'D': return D; case 'E': return E; case 'F': return F;
-    case 'G': return G; case 'H': return H; case 'I': return I;
-    case 'J': return J; case 'K': return K; case 'L': return L;
-    case 'M': return M; case 'N': return N; case 'O': return O;
-    case 'P': return P; case 'Q': return Q; case 'R': return R;
-    case 'S': return S; case 'T': return T; case 'U': return U;
-    case 'V': return V; case 'W': return W; case 'X': return X;
-    case 'Y': return Y; case 'Z': return Z;
-    case ':': return CO; case '+': return PL; case '-': return MI;
-    case '0': return D0; case '1': return D1; case '2': return D2;
-    case '3': return D3; case '4': return D4; case '5': return D5;
-    case '6': return D6; case '7': return D7; case '8': return D8;
-    case '9': return D9;
-    default:  return SP;
-    }
+/* ---- status plaque text (stb_truetype) -------------------------------------
+ * Real TTF glyphs rasterised into an RGBA plaque texture: a monospace HUD font
+ * (assets/hud.ttf, override with $MIRAGE_FONT), antialiased, foreground glyphs
+ * over the dark plaque. One texture is baked per label (GAZE/FPS/cheat-sheet/
+ * clock) and the callers are unchanged. Replaces the old hand-rolled 5x7 bitmap
+ * font - this gives lowercase, any glyph, and smooth edges. */
+#define HUD_PX   44      /* glyph cell pixel height                 */
+#define HUD_PAD  8       /* plaque border (px)                      */
+#define HUD_LGAP 6       /* extra px between stacked lines          */
+
+struct HudFont {
+    bool ok = false;
+    stbtt_fontinfo info{};
+    std::vector<unsigned char> data;
+    float scale = 0.0f;
+    int   ascent_px = 0, line_h = 0, advance_px = 0;
+};
+
+/* Load the HUD font once (cached). Monospace, so one advance width fits all. */
+static const HudFont &hud_font(void) {
+    static HudFont F = [] {
+        HudFont f;
+        const char *paths[] = { getenv("MIRAGE_FONT"), "assets/hud.ttf",
+            "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf" };
+        for (const char *p : paths) {
+            if (!p || !*p) continue;
+            FILE *fp = fopen(p, "rb");
+            if (!fp) continue;
+            fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+            if (n > 0) {
+                f.data.resize((size_t)n);
+                if (fread(f.data.data(), 1, (size_t)n, fp) == (size_t)n &&
+                    stbtt_InitFont(&f.info, f.data.data(),
+                                   stbtt_GetFontOffsetForIndex(f.data.data(), 0)))
+                    f.ok = true;
+            }
+            fclose(fp);
+            if (f.ok) { fprintf(stderr, "render: HUD font %s\n", p); break; }
+        }
+        if (!f.ok) { fprintf(stderr, "render: no HUD font found (text disabled)\n"); return f; }
+        f.scale = stbtt_ScaleForPixelHeight(&f.info, (float)HUD_PX);
+        int asc, desc, gap; stbtt_GetFontVMetrics(&f.info, &asc, &desc, &gap);
+        f.ascent_px = (int)(asc * f.scale + 0.5f);
+        f.line_h    = (int)((asc - desc) * f.scale + 0.5f);
+        int adv, lsb; stbtt_GetCodepointHMetrics(&f.info, '0', &adv, &lsb);  /* monospace */
+        f.advance_px = (int)(adv * f.scale + 0.5f);
+        return f;
+    }();
+    return F;
 }
 
-/* Rasterise `str` into a fresh RGBA texture. PX = pixels per font cell; text in
- * fg over a dark plaque background. Stores the (shared) pixel dims in R. */
+/* Pixel height of a `lines`-line plaque (matches bake_label's vertical layout,
+ * so bake_clock can size the banner without baking first). */
+static int hud_plaque_h(int lines) {
+    const HudFont &f = hud_font();
+    return HUD_PAD*2 + lines*f.line_h + (lines > 1 ? lines-1 : 0)*HUD_LGAP;
+}
+
+/* Rasterise `str` (may contain '\n') into a fresh RGBA texture: fg glyphs over a
+ * dark plaque. Monospace, so stacked lines column-align. Stores dims in *ow,*oh. */
 static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
-    const int PX = 5, PAD = 6, GAP = 1, LGAP = 3;   /* LGAP: blank font rows between lines */
-    /* Measure: tallest is the line count, widest is the longest line (chars). */
+    const HudFont &f = hud_font();
     int lines = 1, cur = 0, maxlen = 0;
     for (const char *p = str; *p; p++) {
         if (*p == '\n') { if (cur > maxlen) maxlen = cur; cur = 0; lines++; }
         else cur++;
     }
     if (cur > maxlen) maxlen = cur;
-    int tw = PAD*2 + maxlen*GLYPH_W*PX + (maxlen > 0 ? maxlen-1 : 0)*GAP*PX;
-    int th = PAD*2 + lines*GLYPH_H*PX + (lines-1)*LGAP*PX;
-    unsigned char *px = malloc((size_t)tw*th*4);
+    int adv = f.ok ? f.advance_px : 1;
+    int tw = HUD_PAD*2 + maxlen*adv;
+    int th = hud_plaque_h(lines);
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
+    std::vector<unsigned char> px((size_t)tw*th*4);
     const unsigned char bg[3] = {14, 18, 34};
     unsigned char fc[3] = { (unsigned char)(fg[0]*255), (unsigned char)(fg[1]*255),
                             (unsigned char)(fg[2]*255) };
     for (int i = 0; i < tw*th; i++) {
         px[i*4+0] = bg[0]; px[i*4+1] = bg[1]; px[i*4+2] = bg[2]; px[i*4+3] = 255;
     }
-    int line = 0, col = 0;
-    for (const char *p = str; *p; p++) {
-        if (*p == '\n') { line++; col = 0; continue; }
-        const unsigned char *g = glyph_rows(*p);
-        int ox = PAD + col*(GLYPH_W+GAP)*PX;
-        int oy = PAD + line*(GLYPH_H+LGAP)*PX;
-        for (int gy = 0; gy < GLYPH_H; gy++)
-            for (int gx = 0; gx < GLYPH_W; gx++) {
-                if (!(g[gy] & (1 << (GLYPH_W-1-gx)))) continue;
-                for (int yy = 0; yy < PX; yy++)
-                    for (int xx = 0; xx < PX; xx++) {
-                        int x = ox + gx*PX + xx, y = oy + gy*PX + yy;
-                        unsigned char *p2 = &px[(y*tw + x)*4];
-                        p2[0] = fc[0]; p2[1] = fc[1]; p2[2] = fc[2]; p2[3] = 255;
+    if (f.ok) {
+        int line = 0, col = 0;
+        for (const char *p = str; *p; p++) {
+            if (*p == '\n') { line++; col = 0; continue; }
+            int baseline = HUD_PAD + line*(f.line_h + HUD_LGAP) + f.ascent_px;
+            int penx     = HUD_PAD + col*adv;
+            int gw, gh, gx, gy;
+            unsigned char *bmp = stbtt_GetCodepointBitmap(&f.info, f.scale, f.scale,
+                                     (unsigned char)*p, &gw, &gh, &gx, &gy);
+            if (bmp) {
+                for (int yy = 0; yy < gh; yy++)
+                    for (int xx = 0; xx < gw; xx++) {
+                        int x = penx + gx + xx, y = baseline + gy + yy;
+                        if (x < 0 || y < 0 || x >= tw || y >= th) continue;
+                        unsigned int cov = bmp[yy*gw + xx];
+                        unsigned char *o = &px[((size_t)y*tw + x)*4];
+                        for (int kk = 0; kk < 3; kk++)
+                            o[kk] = (unsigned char)((bg[kk]*(255u-cov) + fc[kk]*cov) / 255u);
                     }
+                stbtt_FreeBitmap(bmp, nullptr);
             }
-        col++;
+            col++;
+        }
     }
     GLuint tex; glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    free(px);
     if (ow) *ow = tw;
     if (oh) *oh = th;
     return tex;
@@ -452,9 +451,10 @@ static int clock_key_now(void) {
 
 #define CLOCK_BAR_H 0.5f   /* target banner height (m): a slim bar, not a tower */
 
-/* Rasterise the current local time as "HH:MM:SS" over "WED JUN 12" in warm amber. The
- * font is uppercase-only, so the date line is upper-cased. Both lines are centred
- * (leading + trailing spaces) to a width N chosen so that build_clock_banner's
+/* Rasterise the current local time as "HH:MM:SS" over "WED JUN 12" in warm amber.
+ * The date line is upper-cased for a blocky look (drop the toupper for mixed
+ * case - the TTF font has lowercase now). Both lines are centred (leading +
+ * trailing spaces) to a width N chosen so that build_clock_banner's
  * aspect-preserving height lands at ~CLOCK_BAR_H across the wall's full arc - i.e.
  * the bar spans the whole curve while the digits stay square and centred on it. */
 static GLuint bake_clock(struct mirage *m, int *ow, int *oh) {
@@ -465,13 +465,16 @@ static GLuint bake_clock(struct mirage *m, int *ow, int *oh) {
     strftime(l2, sizeof l2, "%a %b %d", &lt);
     for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
 
-    /* Banner width L = d * arc; bake_label gives tw = 30N+7, th = 97 (2 lines). The
-     * banner height = L * th/tw, so to hit CLOCK_BAR_H we want tw = L*th/CLOCK_BAR_H,
-     * i.e. N = (that - 7)/30. */
+    /* Banner width L = d * arc; a monospace 2-line plaque measures
+     * tw = 2*HUD_PAD + N*advance, th = hud_plaque_h(2). The banner height is
+     * L * th/tw, so to hit CLOCK_BAR_H we want tw = L*th/CLOCK_BAR_H, i.e.
+     * N = (that - 2*HUD_PAD)/advance. */
     float yaw_c, ang, top;
     layout_wall_extent(m, &yaw_c, &ang, &top);
-    float L  = m->cfg.screen_distance_m * (ang > 0.0f ? ang : 1.0f);
-    int   N  = (int)((L * 97.0f / CLOCK_BAR_H - 7.0f) / 30.0f + 0.5f);
+    float L   = m->cfg.screen_distance_m * (ang > 0.0f ? ang : 1.0f);
+    int   th2 = hud_plaque_h(2);
+    int   aw  = hud_font().advance_px > 0 ? hud_font().advance_px : 1;
+    int   N   = (int)((L * (float)th2 / CLOCK_BAR_H - 2.0f*HUD_PAD) / (float)aw + 0.5f);
     int   l1n = (int)strlen(l1), l2n = (int)strlen(l2);
     int   wid = l2n > l1n ? l2n : l1n;
     if (N < wid) N = wid;
@@ -508,7 +511,7 @@ static void build_clock_banner(struct mirage *m) {
 
     const int cols = 64;
     int verts = (cols + 1) * 2;
-    GLfloat *buf = malloc((size_t)verts * 5 * sizeof(GLfloat));
+    std::vector<GLfloat> buf((size_t)verts * 5);
     int k = 0;
     for (int ci = 0; ci <= cols; ci++) {
         float u   = (float)ci / (float)cols;
@@ -520,9 +523,8 @@ static void build_clock_banner(struct mirage *m) {
     }
     glGenBuffers(1, &R.clock_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, R.clock_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf.data(), GL_STATIC_DRAW);
     R.clock_verts = verts;
-    free(buf);
 }
 
 /* ---- HDRI environment dome ---------------------------------------------------
@@ -541,10 +543,11 @@ static unsigned char *load_hdri_rgb8(const char *path, int *ow, int *oh) {
         }
     if (w <= 0 || h <= 0) { fprintf(stderr, "hdri: bad/RLE .hdr %s\n", path); fclose(f); return NULL; }
     size_t n = (size_t)w * h;
-    unsigned char *rgbe = malloc(n * 4), *out = malloc(n * 3);
-    if (!rgbe || !out || fread(rgbe, 4, n, f) != n) {
+    std::vector<unsigned char> rgbe(n * 4);
+    unsigned char *out = (unsigned char*)malloc(n * 3);   /* returned; caller frees */
+    if (!out || fread(rgbe.data(), 4, n, f) != n) {
         fprintf(stderr, "hdri: short read %s\n", path);
-        free(rgbe); free(out); fclose(f); return NULL;
+        free(out); fclose(f); return NULL;
     }
     fclose(f);
     for (size_t i = 0; i < n; i++) {
@@ -556,7 +559,6 @@ static unsigned char *load_hdri_rgb8(const char *path, int *ow, int *oh) {
             out[i*3 + c] = (unsigned char)(sqrtf(v) * 255.0f + 0.5f);
         }
     }
-    free(rgbe);
     *ow = w; *oh = h;
     return out;
 }
@@ -567,7 +569,7 @@ static void build_dome(void) {
     const int NLAT = 32, NLON = 64;
     const float Rr = 50.0f;
     int verts = NLAT * NLON * 6;
-    GLfloat *buf = malloc((size_t)verts * 3 * sizeof(GLfloat));
+    std::vector<GLfloat> buf((size_t)verts * 3);
     int k = 0;
     for (int i = 0; i < NLAT; i++) {
         float a0 = -(float)M_PI/2 + (float)M_PI * i     / NLAT;
@@ -586,9 +588,8 @@ static void build_dome(void) {
     }
     glGenBuffers(1, &R.dome_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, R.dome_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*3*sizeof(GLfloat)), buf, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*3*sizeof(GLfloat)), buf.data(), GL_STATIC_DRAW);
     R.dome_verts = verts;
-    free(buf);
 }
 
 /* Build the dome program, load the HDRI into a texture, and build the sphere.
@@ -629,32 +630,29 @@ static void hdri_init(struct mirage *m) {
     fprintf(stderr, "hdri: dome ready (%dx%d, %s)\n", w, h, m->cfg.hdri_path);
 }
 
-bool render_init(struct mirage *m) {
+mirage_status render_init(struct mirage *m) {
     EGLint major = 0, minor = 0;   /* EGL version, logged below */
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
-    if (m->edpy == EGL_NO_DISPLAY) { fprintf(stderr, "render: no EGL display\n"); return false; }
-    if (!eglInitialize(m->edpy, &major, &minor)) {
-        fprintf(stderr, "render: eglInitialize failed\n"); return false;
-    }
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-        fprintf(stderr, "render: eglBindAPI failed\n"); return false;
-    }
+    if (m->edpy == EGL_NO_DISPLAY) return std::unexpected("no EGL display");
+    if (!eglInitialize(m->edpy, &major, &minor))
+        return std::unexpected("eglInitialize failed");
+    if (!eglBindAPI(EGL_OPENGL_ES_API))
+        return std::unexpected("eglBindAPI failed");
     m->ecfg = choose_config(m->edpy);
-    if (!m->ecfg) { fprintf(stderr, "render: no matching EGL config\n"); return false; }
+    if (!m->ecfg) return std::unexpected("no matching EGL config");
 
     const EGLint ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     m->ectx = eglCreateContext(m->edpy, m->ecfg, EGL_NO_CONTEXT, ctx_attrs);
-    if (m->ectx == EGL_NO_CONTEXT) { fprintf(stderr, "render: no context\n"); return false; }
+    if (m->ectx == EGL_NO_CONTEXT) return std::unexpected("no EGL context");
 
     m->egl_window = wl_egl_window_create(m->surface, m->glasses_w, m->glasses_h);
-    if (!m->egl_window) { fprintf(stderr, "render: egl_window failed\n"); return false; }
+    if (!m->egl_window) return std::unexpected("egl_window create failed");
     m->esurf = eglCreateWindowSurface(m->edpy, m->ecfg,
                                       (EGLNativeWindowType)m->egl_window, NULL);
-    if (m->esurf == EGL_NO_SURFACE) { fprintf(stderr, "render: window surface failed\n"); return false; }
+    if (m->esurf == EGL_NO_SURFACE) return std::unexpected("window surface failed");
 
-    if (!eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx)) {
-        fprintf(stderr, "render: makeCurrent failed\n"); return false;
-    }
+    if (!eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx))
+        return std::unexpected("eglMakeCurrent failed");
     /* Present every vblank with vsync on. glasses.sh sets the panel mode, so one
      * vblank = the panel period and this hardware-locks us to the refresh (GPU draw
      * is <1ms, so every frame lands with time to spare). NB interval 2 ("every 2nd
@@ -664,7 +662,7 @@ bool render_init(struct mirage *m) {
 
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);
     GLuint fs = compile(GL_FRAGMENT_SHADER, FRAG_SRC);
-    if (!vs || !fs) return false;
+    if (!vs || !fs) return std::unexpected("shader compile failed");
     R.prog = glCreateProgram();
     glAttachShader(R.prog, vs);
     glAttachShader(R.prog, fs);
@@ -674,7 +672,7 @@ bool render_init(struct mirage *m) {
     GLint ok = 0; glGetProgramiv(R.prog, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[1024]; glGetProgramInfoLog(R.prog, sizeof log, NULL, log);
-        fprintf(stderr, "render: link failed: %s\n", log); return false;
+        return std::unexpected(std::string("program link failed: ") + log);
     }
     glDeleteShader(vs); glDeleteShader(fs);
 
@@ -721,7 +719,7 @@ bool render_init(struct mirage *m) {
 
     fprintf(stderr, "render: EGL %d.%d, GL_RENDERER=%s\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
-    return true;
+    return {};
 }
 
 /* placeholder tints for screens with no capture yet */

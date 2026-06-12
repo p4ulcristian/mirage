@@ -95,38 +95,38 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
                        const char *iface, uint32_t ver) {
     (void)d;
     if (!strcmp(iface, wl_compositor_interface.name)) {
-        M.compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
+        M.compositor = (struct wl_compositor*)wl_registry_bind(r, name, &wl_compositor_interface, 4);
     } else if (!strcmp(iface, ext_output_image_capture_source_manager_v1_interface.name)) {
-        M.capture_src_mgr = wl_registry_bind(r, name,
+        M.capture_src_mgr = (struct ext_output_image_capture_source_manager_v1*)wl_registry_bind(r, name,
             &ext_output_image_capture_source_manager_v1_interface, 1);
     } else if (!strcmp(iface, ext_image_copy_capture_manager_v1_interface.name)) {
-        M.copy_capture_mgr = wl_registry_bind(r, name,
+        M.copy_capture_mgr = (struct ext_image_copy_capture_manager_v1*)wl_registry_bind(r, name,
             &ext_image_copy_capture_manager_v1_interface, 1);
     } else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name)) {
-        M.dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface,
+        M.dmabuf = (struct zwp_linux_dmabuf_v1*)wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface,
                                     ver < 3 ? ver : 3);
     } else if (!strcmp(iface, wl_shm_interface.name)) {
-        M.shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
+        M.shm = (struct wl_shm*)wl_registry_bind(r, name, &wl_shm_interface, 1);
     } else if (!strcmp(iface, wl_seat_interface.name)) {
-        M.seat = wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
+        M.seat = (struct wl_seat*)wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
     } else if (!strcmp(iface, zwp_pointer_constraints_v1_interface.name)) {
-        M.pointer_constraints = wl_registry_bind(r, name,
+        M.pointer_constraints = (struct zwp_pointer_constraints_v1*)wl_registry_bind(r, name,
                                   &zwp_pointer_constraints_v1_interface, 1);
     } else if (!strcmp(iface, zwp_relative_pointer_manager_v1_interface.name)) {
-        M.rel_pointer_mgr = wl_registry_bind(r, name,
+        M.rel_pointer_mgr = (struct zwp_relative_pointer_manager_v1*)wl_registry_bind(r, name,
                                   &zwp_relative_pointer_manager_v1_interface, 1);
     } else if (!strcmp(iface, zwlr_virtual_pointer_manager_v1_interface.name)) {
         /* v2 required for create_virtual_pointer_with_output */
-        M.vpointer_mgr = wl_registry_bind(r, name,
+        M.vpointer_mgr = (struct zwlr_virtual_pointer_manager_v1*)wl_registry_bind(r, name,
                                   &zwlr_virtual_pointer_manager_v1_interface,
                                   ver < 2 ? ver : 2);
     } else if (!strcmp(iface, xdg_wm_base_interface.name)) {
-        g_wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, ver < 4 ? ver : 4);
+        g_wm_base = (struct xdg_wm_base*)wl_registry_bind(r, name, &xdg_wm_base_interface, ver < 4 ? ver : 4);
         xdg_wm_base_add_listener(g_wm_base, &WM_BASE_LISTENER, NULL);
     } else if (!strcmp(iface, wl_output_interface.name)) {
         if (M.n_pending < 16) {
             int idx = M.n_pending++;
-            struct wl_output *o = wl_registry_bind(r, name, &wl_output_interface, 4);
+            struct wl_output *o = (struct wl_output*)wl_registry_bind(r, name, &wl_output_interface, 4);
             M.pending[idx].wl = o;
             wl_output_add_listener(o, &OUTPUT_LISTENER, (void*)(intptr_t)idx);
         }
@@ -246,8 +246,8 @@ int main(void) {
         return 1;
     }
 
-    if (!render_init(&M))  { fprintf(stderr, "mirage: render_init failed\n");  return 1; }
-    if (!capture_init(&M)) { fprintf(stderr, "mirage: capture_init failed\n"); return 1; }
+    if (auto r = render_init(&M);  !r) { fprintf(stderr, "mirage: render_init: %s\n",  r.error().c_str()); return 1; }
+    if (auto r = capture_init(&M); !r) { fprintf(stderr, "mirage: capture_init: %s\n", r.error().c_str()); return 1; }
     if (M.seat) M.pointer = wl_seat_get_pointer(M.seat);
     grab_init(&M);
 

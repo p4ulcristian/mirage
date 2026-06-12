@@ -15,6 +15,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <expected>
+#include <string>
+
 #include <wayland-client.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -209,11 +212,16 @@ struct mirage {
 #define MIRAGE_ZOOM_MIN 0.5f
 #define MIRAGE_ZOOM_MAX 4.0f
 
+/* Init result: success, or a human-readable reason the step failed. main()
+ * prints the reason and exits, so the message travels with the failure instead
+ * of each call site printing its own. */
+using mirage_status = std::expected<void, std::string>;
+
 /* config.c */
 void mirage_config_defaults(mirage_config *c);
 
 /* render.c - EGL/GLES scene rendering */
-bool render_init(struct mirage *m);
+mirage_status render_init(struct mirage *m);
 void render_frame(struct mirage *m, quat head);   /* 3D head-tracked arc      */
 void render_finish(struct mirage *m);
 /* (re)build every screen's mesh + slab from the current cfg; call after a layout
@@ -225,7 +233,7 @@ int  layouts_load(mirage_layouts *L, const char *path); /* parse file -> registr
 void layouts_switch(struct mirage *m, int idx);         /* apply layout idx, flag a mesh rebuild */
 
 /* capture.c - wlr-screencopy into GL textures */
-bool capture_init(struct mirage *m);     /* opens drm/gbm                */
+mirage_status capture_init(struct mirage *m);  /* opens drm/gbm           */
 void capture_begin_frame(struct mirage *m); /* kick a capture per screen */
 bool capture_poll(struct mirage *m);     /* true when all frames settled */
 void capture_finish(struct mirage *m);

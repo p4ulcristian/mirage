@@ -4,8 +4,14 @@
 #   make posedump   build just the pose test tool (no wayland/GL needed)
 #   make protocols  generate wayland protocol glue only
 #   make clean
+#
+# mirage's own sources are C++ (gnu++23); the wayland-scanner-generated protocol
+# glue stays C (its headers self-guard with extern "C", so the C++ TUs link to
+# the C-compiled interface symbols cleanly). The rayneo bridge is a separate C
+# tool, built untouched.
 
 CC      ?= cc
+CXX     ?= c++
 SCANNER ?= wayland-scanner
 PKGCONF ?= pkg-config
 
@@ -29,15 +35,24 @@ PROTO_SRC := $(PROTO_NAMES:%=build/proto/%-protocol.c)
 PROTO_OBJ := $(PROTO_SRC:build/proto/%.c=build/obj/%.o)
 
 RENDER_PKGS := wayland-client wayland-egl wayland-cursor egl glesv2 gbm libdrm libinput
-CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc -Ibuild/proto -pthread \
-           $(shell $(PKGCONF) --cflags $(RENDER_PKGS))
-LDLIBS  := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
+PKG_CFLAGS  := $(shell $(PKGCONF) --cflags $(RENDER_PKGS))
+OPT     ?= -O2 -g
+WARN    := -Wall -Wextra -Wno-missing-field-initializers
+INC     := -Isrc -Ibuild/proto
+COMMON  := $(OPT) -D_GNU_SOURCE $(WARN) $(INC) -pthread $(PKG_CFLAGS)
 
-# ---- core mirage objects (wayland + GL) ----
-MIRAGE_SRC := src/main.c src/pose.c src/capture.c src/render.c \
-              src/layout.c src/grab.c src/config.c src/layouts.c
-MIRAGE_OBJ := $(MIRAGE_SRC:src/%.c=build/obj/%.o) $(PROTO_OBJ)
+# C++ flags for mirage's own sources; C flags for the generated protocol glue.
+CXXFLAGS ?= -std=gnu++23
+CXXFLAGS += $(COMMON)
+CFLAGS   ?= -std=c11
+CFLAGS   += $(COMMON)
+LDLIBS   := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
+
+# ---- core mirage objects (wayland + GL), now C++ ----
+MIRAGE_SRC := src/main.cpp src/pose.cpp src/capture.cpp src/render.cpp \
+              src/layout.cpp src/grab.cpp src/config.cpp src/layouts.cpp \
+              src/stb_truetype_impl.cpp
+MIRAGE_OBJ := $(MIRAGE_SRC:src/%.cpp=build/obj/%.o) $(PROTO_OBJ)
 
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o
@@ -53,10 +68,10 @@ rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/ma
 	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
 
 mirage: $(MIRAGE_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 mirage-posedump: $(POSEDUMP_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ -lm -pthread
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lm -pthread
 
 # protocol codegen
 build/proto/%-client-protocol.h: %.xml | build/proto
@@ -64,16 +79,16 @@ build/proto/%-client-protocol.h: %.xml | build/proto
 build/proto/%-protocol.c: %.xml | build/proto
 	$(SCANNER) private-code $< $@
 
-# compile generated protocol code
+# compile generated protocol code (stays C)
 build/obj/%.o: build/proto/%.c | build/obj
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# compile our sources; depend on generated headers so codegen runs first, and on
-# our own headers so a struct-layout change (e.g. mirage.h) rebuilds everything
-# that includes it - mismatched object layouts cause silent memory corruption.
-SRC_HDR := $(wildcard src/*.h)
-build/obj/%.o: src/%.c $(PROTO_HDR) $(SRC_HDR) | build/obj
-	$(CC) $(CFLAGS) -c -o $@ $<
+# compile our sources (C++); depend on generated headers so codegen runs first,
+# and on our own headers so a struct-layout change (e.g. mirage.h) rebuilds
+# everything that includes it - mismatched object layouts corrupt memory.
+SRC_HDR := $(wildcard src/*.h) $(wildcard src/*.hpp)
+build/obj/%.o: src/%.cpp $(PROTO_HDR) $(SRC_HDR) | build/obj
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 build/proto build/obj:
 	mkdir -p $@

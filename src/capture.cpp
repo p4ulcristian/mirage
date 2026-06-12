@@ -1,4 +1,5 @@
 #include "mirage.h"
+#include "handle.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,13 +86,13 @@ static void se_dmabuf_format(void *d, struct ext_image_copy_capture_session_v1 *
     if (c->got_fmt && !prefer) return;
     c->fmt = format;
     c->n_mods = 0;
-    const uint64_t *p = mods->data;
+    const uint64_t *p = (const uint64_t*)mods->data;
     int n = (int)(mods->size / sizeof(uint64_t));
     for (int i = 0; i < n && c->n_mods < MAX_MODS; i++) c->mods[c->n_mods++] = p[i];
     c->got_fmt = true;
 }
 static void se_done(void *d, struct ext_image_copy_capture_session_v1 *s) {
-    (void)s; screen_t *sc = d; struct con *c = &g_con[sc->index];
+    (void)s; screen_t *sc = (screen_t*)d; struct con *c = &g_con[sc->index];
     /* Ready only with a size AND a usable (non-zero) dmabuf format. Some headless
      * outputs occasionally come up advertising an empty format (fourcc 0, no
      * modifiers) - it can't be imported as a dmabuf, and arming it would attach an
@@ -113,7 +114,7 @@ static void se_done(void *d, struct ext_image_copy_capture_session_v1 *s) {
     }
 }
 static void se_stopped(void *d, struct ext_image_copy_capture_session_v1 *s) {
-    (void)s; screen_t *sc = d; sc->session_ready = false;
+    (void)s; screen_t *sc = (screen_t*)d; sc->session_ready = false;
     fprintf(stderr, "capture[%s]: session stopped\n", sc->name);
 }
 static const struct ext_image_copy_capture_session_v1_listener SESSION_LISTENER = {
@@ -134,7 +135,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     /* Allocate honouring the compositor's advertised modifiers (so it can import
      * our buffer for a tiled, zero-copy damage copy). Fall back to a plain
      * RENDERING bo, then LINEAR, if the modifier set can't be satisfied. */
-    struct gbm_bo *bo = NULL;
+    struct gbm_bo *raw_bo = NULL;
     if (c->n_mods > 0) {
         /* drop DRM_FORMAT_MOD_INVALID from the list - mixing it with real
          * modifiers is rejected by gbm. */
@@ -142,37 +143,41 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
         for (int i = 0; i < c->n_mods; i++)
             if (c->mods[i] != DRM_FORMAT_MOD_INVALID) real[nr++] = c->mods[i];
         if (nr > 0)
-            bo = gbm_bo_create_with_modifiers(m->gbm, c->cap_w, c->cap_h, c->fmt,
-                                              real, nr);
+            raw_bo = gbm_bo_create_with_modifiers(m->gbm, c->cap_w, c->cap_h, c->fmt,
+                                                  real, nr);
     }
-    if (!bo) bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt, GBM_BO_USE_RENDERING);
-    if (!bo) bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt,
-                                GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
-    if (!bo) { fprintf(stderr, "capture[%s]: gbm_bo_create failed\n", s->name); return false; }
+    if (!raw_bo) raw_bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt, GBM_BO_USE_RENDERING);
+    if (!raw_bo) raw_bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt,
+                                        GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+    if (!raw_bo) { fprintf(stderr, "capture[%s]: gbm_bo_create failed\n", s->name); return false; }
 
-    s->bo         = bo;
+    /* From here on every resource lives in a move-only RAII local: any early
+     * return below frees the partial buffer automatically, so the reuse guard at
+     * the top can never hand back a half-built buffer (the bug that once attached
+     * an invalid buffer and killed the whole client). They're released into the
+     * screen only on the success path; capture_finish still frees them there. */
+    own::GbmBo bo(raw_bo);
+    own::Fd    fd(gbm_bo_get_fd(bo.get()));
+
     s->y_invert   = false;  /* upright by default; fr_transform flips only for 180 */
     s->width      = (int32_t)c->cap_w;     /* buffer size is authoritative */
     s->height     = (int32_t)c->cap_h;
     s->drm_format = c->fmt;
-    s->dmabuf_fd  = gbm_bo_get_fd(bo);
-    s->stride     = gbm_bo_get_stride(bo);
-    s->modifier   = gbm_bo_get_modifier(bo);
+    s->stride     = gbm_bo_get_stride(bo.get());
+    s->modifier   = gbm_bo_get_modifier(bo.get());
 
     /* wl_buffer via linux-dmabuf */
     struct zwp_linux_buffer_params_v1 *params =
         zwp_linux_dmabuf_v1_create_params(m->dmabuf);
-    zwp_linux_buffer_params_v1_add(params, s->dmabuf_fd, 0, 0, s->stride,
+    zwp_linux_buffer_params_v1_add(params, fd.get(), 0, 0, s->stride,
                                    (uint32_t)(s->modifier >> 32),
                                    (uint32_t)(s->modifier & 0xffffffff));
-    s->buffer = zwp_linux_buffer_params_v1_create_immed(
-        params, s->width, s->height, s->drm_format, 0);
+    own::WlBuffer buffer(zwp_linux_buffer_params_v1_create_immed(
+        params, s->width, s->height, s->drm_format, 0));
     zwp_linux_buffer_params_v1_destroy(params);
-    if (!s->buffer) {
+    if (!buffer) {
         fprintf(stderr, "capture[%s]: create wl_buffer failed\n", s->name);
-        gbm_bo_destroy(s->bo); s->bo = NULL;
-        close(s->dmabuf_fd);   s->dmabuf_fd = 0;
-        return false;
+        return false;   /* bo + fd auto-freed */
     }
 
     /* EGLImage from the same dmabuf, bound to a GL texture */
@@ -180,7 +185,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     attrs[a++] = EGL_WIDTH;                     attrs[a++] = s->width;
     attrs[a++] = EGL_HEIGHT;                    attrs[a++] = s->height;
     attrs[a++] = EGL_LINUX_DRM_FOURCC_EXT;      attrs[a++] = (EGLint)s->drm_format;
-    attrs[a++] = EGL_DMA_BUF_PLANE0_FD_EXT;     attrs[a++] = s->dmabuf_fd;
+    attrs[a++] = EGL_DMA_BUF_PLANE0_FD_EXT;     attrs[a++] = fd.get();
     attrs[a++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attrs[a++] = 0;
     attrs[a++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;  attrs[a++] = (EGLint)s->stride;
     if (s->modifier != DRM_FORMAT_MOD_INVALID) {
@@ -196,13 +201,16 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     if (s->image == EGL_NO_IMAGE_KHR) {
         fprintf(stderr, "capture[%s]: eglCreateImageKHR failed (fmt %.4s mod %llx)\n",
                 s->name, (char*)&s->drm_format, (unsigned long long)s->modifier);
-        /* Drop the partial buffer so the reuse guard at the top doesn't later hand
-         * back a buffer with no image and arm_frame attach an invalid one. */
-        wl_buffer_destroy(s->buffer); s->buffer = NULL;
-        gbm_bo_destroy(s->bo);        s->bo = NULL;
-        close(s->dmabuf_fd);          s->dmabuf_fd = 0;
-        return false;
+        return false;   /* bo + fd + buffer auto-freed */
     }
+
+    /* Success: hand the now-complete buffer set to the screen (capture_finish
+     * frees it). release() relinquishes ownership so the locals' destructors
+     * leave it alone. */
+    s->bo        = bo.release();
+    s->dmabuf_fd = fd.release();
+    s->buffer    = buffer.release();
+
     glGenTextures(1, &s->tex);
     glBindTexture(GL_TEXTURE_2D, s->tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -221,7 +229,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
 
 /* ---- frame listener ---- */
 static void fr_transform(void *d, struct ext_image_copy_capture_frame_v1 *f, uint32_t t) {
-    (void)f; screen_t *s = d;
+    (void)f; screen_t *s = (screen_t*)d;
     /* ext-image-copy-capture delivers the buffer already upright (NORMAL), unlike
      * wlr-screencopy's bottom-up Y_INVERT convention - so DON'T flip for NORMAL;
      * only a 180 / flipped-180 transform needs the vertical flip. */
@@ -239,7 +247,7 @@ static void fr_ready(void *d, struct ext_image_copy_capture_frame_v1 *f) {
     (void)f; ((screen_t*)d)->frame_state = 2;
 }
 static void fr_failed(void *d, struct ext_image_copy_capture_frame_v1 *f, uint32_t reason) {
-    (void)f; screen_t *s = d; s->frame_state = 3;
+    (void)f; screen_t *s = (screen_t*)d; s->frame_state = 3;
     static int logged[MIRAGE_MAX_SCREENS] = {0};
     if (s->index >= 0 && s->index < MIRAGE_MAX_SCREENS && !logged[s->index]++)
         fprintf(stderr, "capture[%s]: frame FAILED reason=%u\n", s->name, reason);
@@ -273,25 +281,21 @@ static void arm_frame(struct mirage *m, screen_t *s) {
     s->frame_state = 1;
 }
 
-bool capture_init(struct mirage *m) {
+mirage_status capture_init(struct mirage *m) {
     m->drm_fd = open_render_node();
-    if (m->drm_fd < 0) { fprintf(stderr, "capture: no DRM render node\n"); return false; }
+    if (m->drm_fd < 0) return std::unexpected("no DRM render node");
     m->gbm = gbm_create_device(m->drm_fd);
-    if (!m->gbm) { fprintf(stderr, "capture: gbm_create_device failed\n"); return false; }
+    if (!m->gbm) return std::unexpected("gbm_create_device failed");
 
-    p_eglCreateImageKHR  = (void*)eglGetProcAddress("eglCreateImageKHR");
-    p_eglDestroyImageKHR = (void*)eglGetProcAddress("eglDestroyImageKHR");
+    p_eglCreateImageKHR  = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    p_eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
     p_glEGLImageTargetTexture2DOES =
-        (void*)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    if (!p_eglCreateImageKHR || !p_glEGLImageTargetTexture2DOES) {
-        fprintf(stderr, "capture: dmabuf EGLImage import not available\n");
-        return false;
-    }
-    if (!m->capture_src_mgr || !m->copy_capture_mgr) {
-        fprintf(stderr, "capture: ext-image-copy-capture not advertised "
-                "(needs Hyprland 0.52+/KWin 6.6+/Mutter 49+)\n");
-        return false;
-    }
+        (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!p_eglCreateImageKHR || !p_glEGLImageTargetTexture2DOES)
+        return std::unexpected("dmabuf EGLImage import not available");
+    if (!m->capture_src_mgr || !m->copy_capture_mgr)
+        return std::unexpected("ext-image-copy-capture not advertised "
+                               "(needs Hyprland 0.52+/KWin 6.6+/Mutter 49+)");
 
     if (has_gl_ext("GL_EXT_texture_filter_anisotropic")) {
         GLfloat amax = 1.0f;
@@ -314,7 +318,7 @@ bool capture_init(struct mirage *m) {
         ext_image_capture_source_v1_destroy(src);   /* session keeps its own ref */
         ext_image_copy_capture_session_v1_add_listener(s->session, &SESSION_LISTENER, s);
     }
-    return true;
+    return {};
 }
 
 /* Tear down and re-create one output's capture session from scratch. Used when a

@@ -85,7 +85,7 @@ static grab_state *GS(struct mirage *m) { return (grab_state*)m->grab; }
  * the keyboard is opened WITHOUT a grab - we only observe it for the Super
  * modifier, so typing and compositor binds keep working. */
 static int li_open(const char *path, int flags, void *u) {
-    grab_state *g = u;
+    grab_state *g = (grab_state*)u;
     int fd = open(path, flags);
     if (fd < 0) return -errno;
     bool is_kbd = false;
@@ -458,7 +458,7 @@ bool grab_init(struct mirage *m) {
         fprintf(stderr, "grab: virtual-pointer unavailable; Super+G disabled\n");
         return true;
     }
-    grab_state *g = calloc(1, sizeof *g);
+    grab_state *g = (grab_state*)calloc(1, sizeof *g);
     m->grab = g;
     g->m = m;
     /* Trackpad cursor speed. Tuned for the RAW (unaccelerated) deltas we read in
