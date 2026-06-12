@@ -32,6 +32,7 @@ exist at config-load), so this is necessarily imperative, not a declarative
 not the mirage binary - mirage stays a generic Wayland client.
 """
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -39,21 +40,26 @@ import time
 
 ORIGIN_X, ORIGIN_Y, REFRESH = 8000, 0, 60
 
-# Each panel: its 2D desktop rect (w, h, x, y - x/y relative to the origin) plus
-# its spot on the 3D arc (d3). 2D rects below form a gap-free rectangle.
+# Each panel is ONLY its 2D grid cell (w, h, x, y; x/y relative to the origin).
+# The cells form a gap-free rectangle - that's the entire source of truth. The 3D
+# arc placement is projected from the cell below, so there are no separate arc /
+# lift / col numbers to keep in sync.
 PANELS = [
-    dict(name="VIRT1", w=4080, h=1748, x=0,    y=0,    role="21:9 banner",
-         d3=dict(yaw=0.0, lift=1.85, arc=88)),                 # free-placed, spans the wall
-    dict(name="VIRT2", w=1080, h=2160, x=0,    y=1748, role="left portrait",
-         d3=dict(col=0, arc=23, lift=0.41)),
-    dict(name="VIRT3", w=1920, h=1080, x=1080, y=1748, role="centre top 16:9",
-         d3=dict(col=1, arc=40, lift=0.41)),
-    dict(name="VIRT4", w=1920, h=1080, x=1080, y=2828, role="centre bottom 16:9",
-         d3=dict(col=1, arc=40, lift=0.41)),
-    dict(name="VIRT5", w=1080, h=2160, x=3000, y=1748, role="right portrait",
-         d3=dict(col=2, arc=23, lift=0.41)),
+    dict(name="VIRT1", w=4080, h=1748, x=0,    y=0,    role="21:9 banner"),
+    dict(name="VIRT2", w=1080, h=2160, x=0,    y=1748, role="left portrait"),
+    dict(name="VIRT3", w=1920, h=1080, x=1080, y=1748, role="centre top 16:9"),
+    dict(name="VIRT4", w=1920, h=1080, x=1080, y=2828, role="centre bottom 16:9"),
+    dict(name="VIRT5", w=1080, h=2160, x=3000, y=1748, role="right portrait"),
 ]
-ACTIVE, DISTANCE, CENTER_COL, SPACING, SLAB = "theater", 2.0, 1, 0.0, 0.05
+ACTIVE, DISTANCE, SLAB = "theater", 2.0, 0.05
+
+# Projection of the 2D masonry onto the cylinder. WALL_ARC_DEG is the total
+# angular width of the grid; EYE_Y is the masonry y (px) that sits at eye level
+# (lift 0). The grid is gapless and the projection is uniform (square pixels, and
+# each VIRT output's resolution == its cell, so capture aspect == cell aspect), so
+# the arc tiling is gapless too - by construction, not by hand-tuning.
+WALL_ARC_DEG = 86.0
+EYE_Y = 3368            # centre of the bottom 16:9 row -> the mains sit at eye level
 
 
 def hypr(*args):
@@ -86,21 +92,30 @@ def create():
         print("  %-6s %dx%d at %d,%d  (%s)" % (p["name"], p["w"], p["h"], x, y, p["role"]))
 
 
+def project(p, x0, y0, Wt, k):
+    """Project one cell onto the cylinder -> (yaw_deg, arc_deg, lift_m), all
+    free-placed. k = metres per masonry pixel on the wall."""
+    cx = (p["x"] - x0) + p["w"] / 2.0
+    yaw = math.degrees((Wt / 2.0 - cx) * k / DISTANCE)       # +yaw = viewer's left
+    arc = math.degrees(p["w"] * k / DISTANCE)
+    lift = (EYE_Y - (p["y"] - y0) - p["h"] / 2.0) * k        # masonry y down -> lift up
+    return yaw, arc, lift
+
+
 def emit_layout():
-    """Print the mirage arc layout (TOML) derived from the same PANELS."""
+    """Project the 2D masonry onto the cylinder and print the mirage layout (TOML).
+    Gapless in 2D -> gapless on the arc, derived entirely from PANELS."""
+    x0 = min(p["x"] for p in PANELS)
+    y0 = min(p["y"] for p in PANELS)
+    Wt = max(p["x"] + p["w"] for p in PANELS) - x0
+    k = math.radians(WALL_ARC_DEG) * DISTANCE / Wt           # metres per masonry px
     out = [f'active = "{ACTIVE}"', '', '[[layout]]', f'name       = "{ACTIVE}"',
            f'distance   = {DISTANCE}', 'geometry   = "cylinder"',
-           f'slab_depth = {SLAB}', f'spacing    = {SPACING}',
-           f'center_col = {CENTER_COL}', 'screens = [']
+           f'slab_depth = {SLAB}', 'spacing    = 0.0', 'screens = [']
     for i, p in enumerate(PANELS, 1):
-        d = p["d3"]
-        parts = [f"n = {i}"]
-        if "col" in d:
-            parts.append(f"col = {d['col']}")
-        if "yaw" in d:
-            parts.append(f"yaw = {d['yaw']}")
-        parts += [f"arc = {d['arc']}", f"lift = {d['lift']}"]
-        out.append("  { %s },  # %s" % (", ".join(parts), p["role"]))
+        yaw, arc, lift = project(p, x0, y0, Wt, k)
+        out.append("  { n = %d, yaw = %.2f, arc = %.1f, lift = %.3f },  # %s"
+                   % (i, yaw, arc, lift, p["role"]))
     out.append("]")
     print("\n".join(out))
 
