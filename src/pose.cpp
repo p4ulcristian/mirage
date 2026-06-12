@@ -11,6 +11,7 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <print>
 
 #define DEG2RAD(d) ((d) * (float)(M_PI / 180.0))
 
@@ -134,7 +135,7 @@ static int open_udp(int port) {
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr*)&a, sizeof a) < 0) {
-        fprintf(stderr, "pose: bind udp %d failed: %s\n", port, strerror(errno));
+        std::print(stderr, "pose: bind udp {} failed: {}\n", port, strerror(errno));
         close(fd);
         return -1;
     }
@@ -167,7 +168,7 @@ static int open_unix_dgram(const char *path) {
     strncpy(a.sun_path, path, sizeof a.sun_path - 1);
     unlink(path);
     if (bind(fd, (struct sockaddr*)&a, sizeof a) < 0) {
-        fprintf(stderr, "pose: bind unix %s failed: %s\n", path, strerror(errno));
+        std::print(stderr, "pose: bind unix {} failed: {}\n", path, strerror(errno));
         close(fd);
         return -1;
     }
@@ -205,7 +206,7 @@ static void *reader_thread(void *arg) {
         case POSE_OPENTRACK_UDP: run_opentrack();   break;
         case POSE_JSON_SOCKET:   run_json_socket();  break;
         case POSE_BREEZY_SHM:
-            fprintf(stderr, "pose: breezy shm backend not yet implemented\n");
+            std::print(stderr, "pose: breezy shm backend not yet implemented\n");
             break;
     }
     return NULL;

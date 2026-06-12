@@ -41,6 +41,8 @@
 
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
+#include <print>
+
 #define GRAB_MAX MIRAGE_MAX_SCREENS
 #define MAX_KBD  8           /* how many keyboards we observe for the Super key */
 
@@ -112,7 +114,7 @@ static const struct libinput_interface LI_IFACE = {
 static int uinput_open(void) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        fprintf(stderr, "grab: scroll disabled - open /dev/uinput: %s "
+        std::print(stderr, "grab: scroll disabled - open /dev/uinput: {} "
                 "(add yourself to the device ACL / 'input' group)\n", strerror(errno));
         return -1;
     }
@@ -127,7 +129,7 @@ static int uinput_open(void) {
     us.id.product = 0x5c01;
     snprintf(us.name, sizeof us.name, "mirage virtual scroll");
     if (ioctl(fd, UI_DEV_SETUP, &us) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
-        fprintf(stderr, "grab: scroll disabled - uinput setup: %s\n", strerror(errno));
+        std::print(stderr, "grab: scroll disabled - uinput setup: {}\n", strerror(errno));
         close(fd);
         return -1;
     }
@@ -261,7 +263,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 if (t - g->last_super_ms < 350u) {
                     pose_recenter();
                     g->last_super_ms = 0;  /* consume, so a third tap re-arms */
-                    fprintf(stderr, "grab: recentered\n");
+                    std::print(stderr, "grab: recentered\n");
                 } else {
                     g->last_super_ms = t;
                 }
@@ -290,7 +292,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->m->cfg.gaze_cursor = !g->m->cfg.gaze_cursor;
                     g->gaze_prev_valid = false;   /* reseed delta on next frame */
                     g->last_alt_ms = 0;    /* consume, so a third tap re-arms */
-                    fprintf(stderr, "grab: gaze cursor %s\n",
+                    std::print(stderr, "grab: gaze cursor {}\n",
                             g->m->cfg.gaze_cursor ? "ON" : "OFF");
                 } else {
                     g->last_alt_ms = t;
@@ -455,7 +457,7 @@ static void detect_trackpad(grab_state *g) {
 /* ---- lifecycle ---- */
 bool grab_init(struct mirage *m) {
     if (!m->vpointer_mgr || !m->seat) {
-        fprintf(stderr, "grab: virtual-pointer unavailable; Super+G disabled\n");
+        std::print(stderr, "grab: virtual-pointer unavailable; Super+G disabled\n");
         return true;
     }
     grab_state *g = (grab_state*)calloc(1, sizeof *g);
@@ -510,10 +512,10 @@ bool grab_init(struct mirage *m) {
     g->cols = ncols; g->rows = 1;          /* retained only for the motion cap */
     g->strip_w = xrun; g->strip_h = canvasH;
     g->gx = g->strip_w / 2.0; g->gy = g->strip_h / 2.0;
-    fprintf(stderr, "grab: ready (%d screens in %d cols, canvas %dx%d, trackpad %s, %d keyboard(s):",
+    std::print(stderr, "grab: ready ({} screens in {} cols, canvas {}x{}, trackpad {}, {} keyboard(s):",
             g->n, ncols, g->strip_w, g->strip_h, g->dev, g->n_kbd);
-    for (int i = 0; i < g->n_kbd; i++) fprintf(stderr, " %s", g->kbd[i]);
-    fprintf(stderr, ").\n");
+    for (int i = 0; i < g->n_kbd; i++) std::print(stderr, " {}", g->kbd[i]);
+    std::print(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
      * from the first frame - no Super+G toggle needed. */
     grab_toggle(m);
@@ -525,10 +527,10 @@ void grab_toggle(struct mirage *m) {
     if (!g) return;
     if (!g->active) {
         g->li = libinput_path_create_context(&LI_IFACE, g);
-        if (!g->li) { fprintf(stderr, "grab: libinput context failed\n"); return; }
+        if (!g->li) { std::print(stderr, "grab: libinput context failed\n"); return; }
         struct libinput_device *dev = libinput_path_add_device(g->li, g->dev);
         if (!dev) {
-            fprintf(stderr, "grab: cannot open trackpad %s (permission? or "
+            std::print(stderr, "grab: cannot open trackpad {} (permission? or "
                     "name-match auto-detect picked the wrong device)\n", g->dev);
             libinput_unref(g->li); g->li = NULL; return;
         }
@@ -548,20 +550,20 @@ void grab_toggle(struct mirage *m) {
         for (int i = 0; i < g->n_kbd; i++)
             if (libinput_path_add_device(g->li, g->kbd[i])) kbd_ok++;
         if (kbd_ok == 0)
-            fprintf(stderr, "grab: note - no keyboard observed; Cmd+scroll zoom disabled\n");
+            std::print(stderr, "grab: note - no keyboard observed; Cmd+scroll zoom disabled\n");
         if (g->uifd < 0) g->uifd = uinput_open();   /* real wheel for scroll */
         g->scroll_acc = 0.0;
         g->super = false;
         g->alt   = false;
         g->active = true;
         push_cursor(g);
-        fprintf(stderr, "grab: capture ON (trackpad grabbed%s)\n",
+        std::print(stderr, "grab: capture ON (trackpad grabbed{})\n",
                 g->uifd >= 0 ? ", scroll via uinput" : ", scroll unavailable");
     } else {
         if (g->li) { libinput_unref(g->li); g->li = NULL; }   /* ungrabs device */
         if (g->uifd >= 0) { uinput_close(g->uifd); g->uifd = -1; }
         g->active = false;
-        fprintf(stderr, "grab: capture OFF\n");
+        std::print(stderr, "grab: capture OFF\n");
     }
     wl_display_flush(m->display);
 }

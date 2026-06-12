@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <print>
 
 static volatile int stop = 0;
 static void on_sig(int s) { (void)s; stop = 1; }
@@ -45,10 +46,10 @@ int main(int argc, char **argv) {
     signal(SIGTERM, on_sig);
 
     if (pose_start(&cfg) != 0) {
-        fprintf(stderr, "failed to start pose backend\n");
+        std::print(stderr, "failed to start pose backend\n");
         return 1;
     }
-    fprintf(stderr, "listening for pose (%s)... move your head; Ctrl-C to quit\n",
+    std::print(stderr, "listening for pose ({})... move your head; Ctrl-C to quit\n",
             cfg.backend == POSE_OPENTRACK_UDP ? "OpenTrack UDP" : "JSON socket");
 
     int ticks = 0;
@@ -58,14 +59,14 @@ int main(int argc, char **argv) {
         float y, p, r;
         quat_to_ypr_deg(q, &y, &p, &r);
         uint32_t age = pose_age_ms();
-        printf("\r%s  quat[% .3f % .3f % .3f % .3f]  ypr[% 7.2f % 7.2f % 7.2f]  age=%5ums  ",
+        std::print("\r{}  quat[{: .3f} {: .3f} {: .3f} {: .3f}]  ypr[{: 7.2f} {: 7.2f} {: 7.2f}]  age={:5}ms  ",
                pose_has_signal() ? "SIGNAL" : "  ----",
                q.w, q.x, q.y, q.z, y, p, r,
-               age == UINT32_MAX ? 0 : age);
+               age == UINT32_MAX ? 0u : age);
         fflush(stdout);
-        if (++ticks % 50 == 0) printf("\n");
+        if (++ticks % 50 == 0) std::print("\n");
     }
-    printf("\n");
+    std::print("\n");
     pose_stop();
     return 0;
 }

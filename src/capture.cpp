@@ -10,6 +10,9 @@
 #include <gbm.h>
 #include <drm_fourcc.h>
 
+#include <print>
+#include <string_view>
+
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
@@ -58,7 +61,7 @@ static int open_render_node(void) {
         char path[64];
         snprintf(path, sizeof path, "/dev/dri/renderD%d", n);
         int fd = open(path, O_RDWR | O_CLOEXEC);
-        if (fd >= 0) { fprintf(stderr, "capture: using %s\n", path); return fd; }
+        if (fd >= 0) { std::print(stderr, "capture: using {}\n", path); return fd; }
     }
     return -1;
 }
@@ -102,20 +105,21 @@ static void se_done(void *d, struct ext_image_copy_capture_session_v1 *s) {
     if (c->got_size && c->got_fmt && c->fmt != 0) {
         sc->session_ready = true;
         c->empty_fmt = false;
-        fprintf(stderr, "capture[%s]: session ready %ux%u fmt %.4s (%d modifiers)\n",
-                sc->name, c->cap_w, c->cap_h, (char*)&c->fmt, c->n_mods);
+        std::print(stderr, "capture[{}]: session ready {}x{} fmt {} ({} modifiers)\n",
+                sc->name, c->cap_w, c->cap_h,
+                std::string_view((const char*)&c->fmt, 4), c->n_mods);
     } else if (c->got_size && c->got_fmt && c->fmt == 0) {
         /* Empty format - flag it so capture_begin_frame re-creates the session
          * once the output has actually composited a frame (see resession). */
         c->empty_fmt = true;
         if (c->retries == 0)
-            fprintf(stderr, "capture[%s]: empty dmabuf format (output not composited "
+            std::print(stderr, "capture[{}]: empty dmabuf format (output not composited "
                     "yet); will retry the session\n", sc->name);
     }
 }
 static void se_stopped(void *d, struct ext_image_copy_capture_session_v1 *s) {
     (void)s; screen_t *sc = (screen_t*)d; sc->session_ready = false;
-    fprintf(stderr, "capture[%s]: session stopped\n", sc->name);
+    std::print(stderr, "capture[{}]: session stopped\n", sc->name);
 }
 static const struct ext_image_copy_capture_session_v1_listener SESSION_LISTENER = {
     .buffer_size   = se_buffer_size,
@@ -149,7 +153,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     if (!raw_bo) raw_bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt, GBM_BO_USE_RENDERING);
     if (!raw_bo) raw_bo = gbm_bo_create(m->gbm, c->cap_w, c->cap_h, c->fmt,
                                         GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
-    if (!raw_bo) { fprintf(stderr, "capture[%s]: gbm_bo_create failed\n", s->name); return false; }
+    if (!raw_bo) { std::print(stderr, "capture[{}]: gbm_bo_create failed\n", s->name); return false; }
 
     /* From here on every resource lives in a move-only RAII local: any early
      * return below frees the partial buffer automatically, so the reuse guard at
@@ -176,7 +180,7 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
         params, s->width, s->height, s->drm_format, 0));
     zwp_linux_buffer_params_v1_destroy(params);
     if (!buffer) {
-        fprintf(stderr, "capture[%s]: create wl_buffer failed\n", s->name);
+        std::print(stderr, "capture[{}]: create wl_buffer failed\n", s->name);
         return false;   /* bo + fd auto-freed */
     }
 
@@ -199,8 +203,9 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     s->image = p_eglCreateImageKHR(m->edpy, EGL_NO_CONTEXT,
                                    EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
     if (s->image == EGL_NO_IMAGE_KHR) {
-        fprintf(stderr, "capture[%s]: eglCreateImageKHR failed (fmt %.4s mod %llx)\n",
-                s->name, (char*)&s->drm_format, (unsigned long long)s->modifier);
+        std::print(stderr, "capture[{}]: eglCreateImageKHR failed (fmt {} mod {:x})\n",
+                s->name, std::string_view((const char*)&s->drm_format, 4),
+                (unsigned long long)s->modifier);
         return false;   /* bo + fd + buffer auto-freed */
     }
 
@@ -221,8 +226,9 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, g_aniso);
     p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, s->image);
 
-    fprintf(stderr, "capture[%s]: %dx%d fmt %.4s mod %llx stride %u -> tex %u\n",
-            s->name, s->width, s->height, (char*)&s->drm_format,
+    std::print(stderr, "capture[{}]: {}x{} fmt {} mod {:x} stride {} -> tex {}\n",
+            s->name, s->width, s->height,
+            std::string_view((const char*)&s->drm_format, 4),
             (unsigned long long)s->modifier, s->stride, s->tex);
     return true;
 }
@@ -250,11 +256,11 @@ static void fr_failed(void *d, struct ext_image_copy_capture_frame_v1 *f, uint32
     (void)f; screen_t *s = (screen_t*)d; s->frame_state = 3;
     static int logged[MIRAGE_MAX_SCREENS] = {0};
     if (s->index >= 0 && s->index < MIRAGE_MAX_SCREENS && !logged[s->index]++)
-        fprintf(stderr, "capture[%s]: frame FAILED reason=%u\n", s->name, reason);
+        std::print(stderr, "capture[{}]: frame FAILED reason={}\n", s->name, reason);
     if (reason == EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
         /* our buffer no longer matches; drop it so it's re-allocated from fresh
          * constraints on the next session done. */
-        fprintf(stderr, "capture[%s]: buffer constraints changed, re-allocating\n", s->name);
+        std::print(stderr, "capture[{}]: buffer constraints changed, re-allocating\n", s->name);
         s->session_ready = false;
     }
 }
@@ -301,7 +307,7 @@ mirage_status capture_init(struct mirage *m) {
         GLfloat amax = 1.0f;
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
         g_aniso = amax > 2.0f ? 2.0f : amax;
-        fprintf(stderr, "capture: anisotropic filtering up to %.0fx\n", g_aniso);
+        std::print(stderr, "capture: anisotropic filtering up to {:.0f}x\n", g_aniso);
     }
 
     /* One persistent capture session per virtual output. Constraints arrive
@@ -352,7 +358,7 @@ void capture_begin_frame(struct mirage *m) {
         if (c->empty_fmt && !s->session_ready) {
             if (++c->retry_ticks >= 30 && c->retries < 40) {
                 c->retry_ticks = 0; c->retries++;
-                fprintf(stderr, "capture[%s]: re-creating session (retry %d)\n",
+                std::print(stderr, "capture[{}]: re-creating session (retry {})\n",
                         s->name, c->retries);
                 resession(m, s);
             }

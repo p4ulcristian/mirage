@@ -31,6 +31,7 @@
 #include <string_view>
 #include <algorithm>
 #include <cctype>
+#include <print>
 
 /* Parse a friendly geometry name ("cylinder"/"flat") through magic_enum: match
  * the lowercased, GEOM_-stripped enum name, so adding a geometry needs no edit
@@ -89,8 +90,8 @@ int layouts_load(mirage_layouts *L, const char *path) {
     try {
         tbl = toml::parse_file(path);
     } catch (const toml::parse_error &e) {
-        fprintf(stderr, "layouts: parse error in %s: %s\n", path,
-                std::string(e.description()).c_str());
+        std::print(stderr, "layouts: parse error in {}: {}\n", path,
+                   std::string(e.description()));
         return 0;
     }
 
@@ -101,7 +102,7 @@ int layouts_load(mirage_layouts *L, const char *path) {
             const toml::table *t = node.as_table();
             if (!t) continue;
             if (L->n >= MIRAGE_MAX_LAYOUTS) {
-                fprintf(stderr, "layouts: too many layouts (max %d)\n", MIRAGE_MAX_LAYOUTS);
+                std::print(stderr, "layouts: too many layouts (max {})\n", MIRAGE_MAX_LAYOUTS);
                 break;
             }
             int cur = L->n++;
@@ -133,5 +134,5 @@ void layouts_switch(struct mirage *m, int idx) {
     m->cfg = L->l[idx].cfg;
     m->cfg.gaze_cursor = gaze;
     m->layout_dirty = true;
-    fprintf(stderr, "layouts: switched to %d (%s)\n", idx + 1, L->l[idx].name);
+    std::print(stderr, "layouts: switched to {} ({})\n", idx + 1, L->l[idx].name);
 }

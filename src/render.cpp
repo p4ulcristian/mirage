@@ -5,6 +5,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <vector>
+#include <print>
 
 #include "stb_truetype.h"
 #include <wayland-egl.h>
@@ -131,7 +132,7 @@ static GLuint compile(GLenum type, const char *src) {
     if (!ok) {
         char log[1024];
         glGetShaderInfoLog(s, sizeof log, NULL, log);
-        fprintf(stderr, "render: shader compile failed: %s\n", log);
+        std::print(stderr, "render: shader compile failed: {}\n", log);
         glDeleteShader(s);
         return 0;
     }
@@ -357,9 +358,9 @@ static const HudFont &hud_font(void) {
                     f.ok = true;
             }
             fclose(fp);
-            if (f.ok) { fprintf(stderr, "render: HUD font %s\n", p); break; }
+            if (f.ok) { std::print(stderr, "render: HUD font {}\n", p); break; }
         }
-        if (!f.ok) { fprintf(stderr, "render: no HUD font found (text disabled)\n"); return f; }
+        if (!f.ok) { std::print(stderr, "render: no HUD font found (text disabled)\n"); return f; }
         f.scale = stbtt_ScaleForPixelHeight(&f.info, (float)HUD_PX);
         int asc, desc, gap; stbtt_GetFontVMetrics(&f.info, &asc, &desc, &gap);
         f.ascent_px = (int)(asc * f.scale + 0.5f);
@@ -534,19 +535,19 @@ static void build_clock_banner(struct mirage *m) {
  * to linear. Returns a malloc'd w*h*3 buffer (caller frees) or NULL on failure. */
 static unsigned char *load_hdri_rgb8(const char *path, int *ow, int *oh) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "hdri: cannot open %s\n", path); return NULL; }
+    if (!f) { std::print(stderr, "hdri: cannot open {}\n", path); return NULL; }
     char line[256];
     int w = 0, h = 0;
     while (fgets(line, sizeof line, f))         /* skip header to the "-Y h +X w" line */
         if (line[0] == '-' && (line[1] == 'Y' || line[1] == 'y')) {
             sscanf(line, "-Y %d +X %d", &h, &w); break;
         }
-    if (w <= 0 || h <= 0) { fprintf(stderr, "hdri: bad/RLE .hdr %s\n", path); fclose(f); return NULL; }
+    if (w <= 0 || h <= 0) { std::print(stderr, "hdri: bad/RLE .hdr {}\n", path); fclose(f); return NULL; }
     size_t n = (size_t)w * h;
     std::vector<unsigned char> rgbe(n * 4);
     unsigned char *out = (unsigned char*)malloc(n * 3);   /* returned; caller frees */
     if (!out || fread(rgbe.data(), 4, n, f) != n) {
-        fprintf(stderr, "hdri: short read %s\n", path);
+        std::print(stderr, "hdri: short read {}\n", path);
         free(out); fclose(f); return NULL;
     }
     fclose(f);
@@ -598,7 +599,7 @@ static void hdri_init(struct mirage *m) {
     if (!m->cfg.hdri_on) return;
     int w, h;
     unsigned char *px = load_hdri_rgb8(m->cfg.hdri_path, &w, &h);
-    if (!px) { fprintf(stderr, "hdri: disabled (load failed)\n"); return; }
+    if (!px) { std::print(stderr, "hdri: disabled (load failed)\n"); return; }
 
     glGenTextures(1, &R.hdri_tex);
     glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
@@ -618,7 +619,7 @@ static void hdri_init(struct mirage *m) {
     glBindAttribLocation(R.dome_prog, 0, "aPos");
     glLinkProgram(R.dome_prog);
     GLint ok = 0; glGetProgramiv(R.dome_prog, GL_LINK_STATUS, &ok);
-    if (!ok) { fprintf(stderr, "hdri: dome link failed\n"); R.dome_prog = 0; return; }
+    if (!ok) { std::print(stderr, "hdri: dome link failed\n"); R.dome_prog = 0; return; }
     glDeleteShader(vs); glDeleteShader(fs);
     R.dMVP       = glGetUniformLocation(R.dome_prog, "uMVP");
     R.dExposure  = glGetUniformLocation(R.dome_prog, "uExposure");
@@ -627,7 +628,7 @@ static void hdri_init(struct mirage *m) {
     R.dSat       = glGetUniformLocation(R.dome_prog, "uSaturation");
     R.dTex       = glGetUniformLocation(R.dome_prog, "uTex");
     build_dome();
-    fprintf(stderr, "hdri: dome ready (%dx%d, %s)\n", w, h, m->cfg.hdri_path);
+    std::print(stderr, "hdri: dome ready ({}x{}, {})\n", w, h, m->cfg.hdri_path);
 }
 
 mirage_status render_init(struct mirage *m) {
@@ -717,7 +718,7 @@ mirage_status render_init(struct mirage *m) {
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
 
-    fprintf(stderr, "render: EGL %d.%d, GL_RENDERER=%s\n", major, minor,
+    std::print(stderr, "render: EGL {}.{}, GL_RENDERER={}\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
     return {};
 }

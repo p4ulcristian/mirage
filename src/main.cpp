@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <poll.h>
+#include <print>
 
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "ext-image-copy-capture-v1-client-protocol.h"
@@ -182,9 +183,9 @@ static int classify_outputs(void) {
             }
         }
     }
-    fprintf(stderr, "mirage: glasses=%s (%dx%d) [%s]; %d virtual screens\n",
-            M.glasses_name.c_str(), M.glasses_w, M.glasses_h,
-            M.glasses_desc.c_str(), M.n_screen);
+    std::print(stderr, "mirage: glasses={} ({}x{}) [{}]; {} virtual screens\n",
+            M.glasses_name, M.glasses_w, M.glasses_h,
+            M.glasses_desc, M.n_screen);
     return M.n_screen > 0 ? 0 : -1;
 }
 
@@ -199,7 +200,7 @@ int main(void) {
       if (!lp || !*lp) lp = "layouts.conf";
       if (layouts_load(&M.layouts, lp) > 0) {
           M.cfg = M.layouts.l[M.layouts.active].cfg;
-          fprintf(stderr, "mirage: loaded %d layout(s) from %s, active '%s'\n",
+          std::print(stderr, "mirage: loaded {} layout(s) from {}, active '{}'\n",
                   M.layouts.n, lp, M.layouts.l[M.layouts.active].name);
       } }
 
@@ -209,17 +210,17 @@ int main(void) {
     signal(SIGHUP,  on_smooth);     /* A/B the pose smoothing filter (perf diag) */
 
     M.display = wl_display_connect(NULL);
-    if (!M.display) { fprintf(stderr, "mirage: cannot connect to wayland\n"); return 1; }
+    if (!M.display) { std::print(stderr, "mirage: cannot connect to wayland\n"); return 1; }
     M.registry = wl_display_get_registry(M.display);
     wl_registry_add_listener(M.registry, &REGISTRY_LISTENER, NULL);
     wl_display_roundtrip(M.display);   /* globals */
     wl_display_roundtrip(M.display);   /* output name/desc/mode events */
 
     if (!M.compositor || !g_wm_base || !M.capture_src_mgr || !M.copy_capture_mgr || !M.dmabuf) {
-        fprintf(stderr, "mirage: missing required wayland globals "
-                "(compositor=%p xdg_wm_base=%p capture_src=%p copy_capture=%p dmabuf=%p)\n",
-                (void*)M.compositor, (void*)g_wm_base,
-                (void*)M.capture_src_mgr, (void*)M.copy_capture_mgr, (void*)M.dmabuf);
+        std::print(stderr, "mirage: missing required wayland globals "
+                "(compositor={} xdg_wm_base={} capture_src={} copy_capture={} dmabuf={})\n",
+                (const void*)M.compositor, (const void*)g_wm_base,
+                (const void*)M.capture_src_mgr, (const void*)M.copy_capture_mgr, (const void*)M.dmabuf);
         return 1;
     }
     if (classify_outputs() != 0) return 1;
@@ -243,12 +244,12 @@ int main(void) {
     while (!M.configured && wl_display_dispatch(M.display) >= 0) { /* wait config */ }
     if (g_win_cfg_w > 0) { M.glasses_w = g_win_cfg_w; M.glasses_h = g_win_cfg_h; }
     if (M.glasses_w <= 0 || M.glasses_h <= 0) {
-        fprintf(stderr, "mirage: bad glasses size %dx%d\n", M.glasses_w, M.glasses_h);
+        std::print(stderr, "mirage: bad glasses size {}x{}\n", M.glasses_w, M.glasses_h);
         return 1;
     }
 
-    if (auto r = render_init(&M);  !r) { fprintf(stderr, "mirage: render_init: %s\n",  r.error().c_str()); return 1; }
-    if (auto r = capture_init(&M); !r) { fprintf(stderr, "mirage: capture_init: %s\n", r.error().c_str()); return 1; }
+    if (auto r = render_init(&M);  !r) { std::print(stderr, "mirage: render_init: {}\n",  r.error()); return 1; }
+    if (auto r = capture_init(&M); !r) { std::print(stderr, "mirage: capture_init: {}\n", r.error()); return 1; }
     if (M.seat) M.pointer = wl_seat_get_pointer(M.seat);
     grab_init(&M);
 
@@ -260,9 +261,9 @@ int main(void) {
                        .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
                        .sign_yaw = 1.0f, .sign_pitch = 1.0f, .sign_roll = 1.0f };
     if (pose_start(&pc) != 0)
-        fprintf(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
+        std::print(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
 
-    fprintf(stderr, "mirage: running. Ctrl-C to quit.\n");
+    std::print(stderr, "mirage: running. Ctrl-C to quit.\n");
     M.running = true;
     struct timespec fps_t0; clock_gettime(CLOCK_MONOTONIC, &fps_t0);
     struct timespec frame_prev = fps_t0;   /* for per-frame interval timing */
@@ -313,7 +314,7 @@ int main(void) {
          * fps). Catch it loudly instead of pretending to render. */
         int derr = wl_display_get_error(M.display);
         if (derr) {
-            fprintf(stderr, "mirage: wayland connection error (%d) - surface is "
+            std::print(stderr, "mirage: wayland connection error ({}) - surface is "
                     "no longer presented; exiting.\n", derr);
             M.running = false;
             break;
@@ -321,7 +322,7 @@ int main(void) {
 
         if (g_smooth_toggle) {
             bool on = pose_toggle_smoothing(); g_smooth_toggle = 0;
-            fprintf(stderr, "mirage: pose smoothing %s\n",
+            std::print(stderr, "mirage: pose smoothing {}\n",
                     on ? "ON (filtered)" : "OFF (raw passthrough)");
         }
         grab_pump(&M);   /* drain trackpad motion/buttons while captured */
@@ -331,7 +332,7 @@ int main(void) {
         static bool centered = false;
         if (!centered && pose_has_signal()) { pose_recenter(); centered = true; }
         if (g_recenter) { pose_recenter(); g_recenter = 0;
-                          fprintf(stderr, "mirage: recentered\n"); }
+                          std::print(stderr, "mirage: recentered\n"); }
         quat head = pose_has_signal() ? pose_latest() : q_identity();
         render_frame(&M, head);
         wl_display_flush(M.display);
@@ -356,8 +357,8 @@ int main(void) {
                 M.fps = (float)(fps_frames / dt);   /* publish for the in-scene HUD */
                 double phz = pose_take_sample_count() / dt;
                 uint32_t age = pose_age_ms();
-                fprintf(stderr, "mirage: %.1f fps | worst %.1f ms | hitches %ld | pose %.0f Hz, "
-                        "age %u ms%s\n", fps_frames / dt, worst_ms * 1000.0, hitch_count, phz,
+                std::print(stderr, "mirage: {:.1f} fps | worst {:.1f} ms | hitches {} | pose {:.0f} Hz, "
+                        "age {} ms{}\n", fps_frames / dt, worst_ms * 1000.0, hitch_count, phz,
                         age, pose_smoothing_enabled() ? "" : " | SMOOTHING OFF");
                 hitch_count = 0; hitch_ms_sum = 0; (void)hitch_ms_sum;
                 fps_t0 = now; fps_frames = 0; worst_ms = 0.0;
@@ -365,7 +366,7 @@ int main(void) {
         }
     }
 
-    fprintf(stderr, "\nmirage: shutting down\n");
+    std::print(stderr, "\nmirage: shutting down\n");
     pose_stop();
     capture_finish(&M);
     grab_destroy(&M);
