@@ -67,7 +67,7 @@ echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
 hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
 
 echo "[glasses] virtual screens + head tracking..."
-bash "$HERE/scripts/setup-displays.sh" >/dev/null 2>&1 || true
+python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
 bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
 
 # Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
