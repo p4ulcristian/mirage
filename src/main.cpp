@@ -64,8 +64,7 @@ static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y,
         int32_t tr) {
     (void)o;(void)x;(void)y;(void)pw;(void)ph;(void)sp;(void)tr;
     int idx = (int)(intptr_t)d;
-    snprintf(M.pending[idx].desc, sizeof M.pending[idx].desc, "%s %s",
-             make ? make : "", model ? model : "");
+    M.pending[idx].desc = std::string(make ? make : "") + " " + (model ? model : "");
 }
 static void out_mode(void *d, struct wl_output *o, uint32_t flags,
         int32_t w, int32_t h, int32_t refresh) {
@@ -79,11 +78,11 @@ static void out_done(void *d, struct wl_output *o) {
 static void out_scale(void *d, struct wl_output *o, int32_t s) { (void)d;(void)o;(void)s; }
 static void out_name(void *d, struct wl_output *o, const char *name) {
     (void)o; int idx = (int)(intptr_t)d;
-    snprintf(M.pending[idx].name, sizeof M.pending[idx].name, "%s", name);
+    if (name) M.pending[idx].name = name;
 }
 static void out_description(void *d, struct wl_output *o, const char *desc) {
     (void)o; int idx = (int)(intptr_t)d;
-    if (desc) snprintf(M.pending[idx].desc, sizeof M.pending[idx].desc, "%s", desc);
+    if (desc) M.pending[idx].desc = desc;
 }
 static const struct wl_output_listener OUTPUT_LISTENER = {
     .geometry = out_geometry, .mode = out_mode, .done = out_done,
@@ -146,20 +145,21 @@ static int classify_outputs(void) {
      * usable on the laptop. */
     int glasses = -1;
     for (int i = 0; i < M.n_pending; i++) {
-        const char *n = M.pending[i].name, *de = M.pending[i].desc;
-        if (strstr(de, M.cfg.glasses_match) || strstr(n, M.cfg.glasses_match)
-            || strstr(de, "RayNeo")) {
+        const std::string &n = M.pending[i].name, &de = M.pending[i].desc;
+        if (de.find(M.cfg.glasses_match) != std::string::npos ||
+            n.find(M.cfg.glasses_match)  != std::string::npos ||
+            de.find("RayNeo")            != std::string::npos) {
             glasses = i; break;
         }
     }
     if (glasses >= 0) {
-        M.glasses_out = M.pending[glasses].wl;
-        snprintf(M.glasses_name, sizeof M.glasses_name, "%s", M.pending[glasses].name);
-        snprintf(M.glasses_desc, sizeof M.glasses_desc, "%s", M.pending[glasses].desc);
+        M.glasses_out  = M.pending[glasses].wl;
+        M.glasses_name = M.pending[glasses].name;
+        M.glasses_desc = M.pending[glasses].desc;
         M.glasses_w = M.pending[glasses].w;
         M.glasses_h = M.pending[glasses].h;
     } else {
-        snprintf(M.glasses_name, sizeof M.glasses_name, "windowed");
+        M.glasses_name = "windowed";
         M.glasses_w = WIN_W; M.glasses_h = WIN_H;
     }
 
@@ -167,7 +167,7 @@ static int classify_outputs(void) {
     for (int pass = 1; pass <= MIRAGE_MAX_SCREENS; pass++) {
         char want[16]; snprintf(want, sizeof want, "VIRT%d", pass);
         for (int i = 0; i < M.n_pending; i++) {
-            if (!strcmp(M.pending[i].name, want) && M.n_screen < MIRAGE_MAX_SCREENS) {
+            if (M.pending[i].name == want && M.n_screen < MIRAGE_MAX_SCREENS) {
                 screen_t *s = &M.screen[M.n_screen];
                 memset(s, 0, sizeof *s);
                 s->wl = M.pending[i].wl;
@@ -183,7 +183,8 @@ static int classify_outputs(void) {
         }
     }
     fprintf(stderr, "mirage: glasses=%s (%dx%d) [%s]; %d virtual screens\n",
-            M.glasses_name, M.glasses_w, M.glasses_h, M.glasses_desc, M.n_screen);
+            M.glasses_name.c_str(), M.glasses_w, M.glasses_h,
+            M.glasses_desc.c_str(), M.n_screen);
     return M.n_screen > 0 ? 0 : -1;
 }
 

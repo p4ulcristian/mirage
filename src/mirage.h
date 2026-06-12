@@ -162,8 +162,8 @@ struct mirage {
 
     /* glasses output + render surface */
     struct wl_output *glasses_out;
-    char     glasses_name[32];
-    char     glasses_desc[128];
+    std::string glasses_name;
+    std::string glasses_desc;
     int32_t  glasses_w, glasses_h;
     struct wl_surface             *surface;
     struct wl_egl_window          *egl_window;
@@ -184,7 +184,7 @@ struct mirage {
     int      n_screen;
 
     /* transient output discovery: outputs we've bound but not classified */
-    struct { struct wl_output *wl; char name[32]; char desc[128];
+    struct { struct wl_output *wl; std::string name; std::string desc;
              int32_t w, h; bool done; } pending[16];
     int n_pending;
 
