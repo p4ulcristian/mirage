@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <gbm.h>
 #include <wayland-client.h>
+#include <GLES2/gl2.h>
 
 /* namespace `own` = owning handles. (Not `mirage` - that name is taken by the
  * `struct mirage` app-state, and a namespace can't share it.) */
@@ -70,6 +71,57 @@ public:
     explicit operator bool() const { return buf_ != nullptr; }
     struct wl_buffer *release() { struct wl_buffer *b = buf_; buf_ = nullptr; return b; }
     void reset() { if (buf_) wl_buffer_destroy(buf_); buf_ = nullptr; }
+};
+
+/* ---- GL object handles ------------------------------------------------------
+ * Each implicitly converts to its GLuint name, so existing call sites
+ * (glUseProgram(prog), glBindBuffer(.., vbo), glBindTexture(.., tex), if(tex)...)
+ * are unchanged; only creation (gen()/create()) and the move-assign-frees-old
+ * pattern differ. These live in long-lived globals, so reset() them in
+ * *_finish while the GL context is still current - never let a destructor run
+ * after eglTerminate. */
+class GlBuffer {
+    GLuint id_ = 0;
+public:
+    GlBuffer() = default;
+    ~GlBuffer() { if (id_) glDeleteBuffers(1, &id_); }
+    GlBuffer(GlBuffer &&o) noexcept : id_(o.id_) { o.id_ = 0; }
+    GlBuffer &operator=(GlBuffer &&o) noexcept { reset(); id_ = o.id_; o.id_ = 0; return *this; }
+    GlBuffer(const GlBuffer &) = delete;
+    GlBuffer &operator=(const GlBuffer &) = delete;
+    operator GLuint() const { return id_; }
+    GLuint *put() { reset(); return &id_; }     /* for glGenBuffers(1, x.put()) */
+    void gen() { glGenBuffers(1, put()); }
+    void reset() { if (id_) glDeleteBuffers(1, &id_); id_ = 0; }
+};
+
+class GlTexture {
+    GLuint id_ = 0;
+public:
+    GlTexture() = default;
+    ~GlTexture() { if (id_) glDeleteTextures(1, &id_); }
+    GlTexture(GlTexture &&o) noexcept : id_(o.id_) { o.id_ = 0; }
+    GlTexture &operator=(GlTexture &&o) noexcept { reset(); id_ = o.id_; o.id_ = 0; return *this; }
+    GlTexture(const GlTexture &) = delete;
+    GlTexture &operator=(const GlTexture &) = delete;
+    operator GLuint() const { return id_; }
+    GLuint *put() { reset(); return &id_; }
+    void gen() { glGenTextures(1, put()); }
+    void reset() { if (id_) glDeleteTextures(1, &id_); id_ = 0; }
+};
+
+class GlProgram {
+    GLuint id_ = 0;
+public:
+    GlProgram() = default;
+    ~GlProgram() { if (id_) glDeleteProgram(id_); }
+    GlProgram(GlProgram &&o) noexcept : id_(o.id_) { o.id_ = 0; }
+    GlProgram &operator=(GlProgram &&o) noexcept { reset(); id_ = o.id_; o.id_ = 0; return *this; }
+    GlProgram(const GlProgram &) = delete;
+    GlProgram &operator=(const GlProgram &) = delete;
+    operator GLuint() const { return id_; }
+    void create() { reset(); id_ = glCreateProgram(); }
+    void reset() { if (id_) glDeleteProgram(id_); id_ = 0; }
 };
 
 } // namespace own

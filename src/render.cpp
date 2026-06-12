@@ -1,4 +1,5 @@
 #include "mirage.h"
+#include "handle.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,31 +87,33 @@ static const char *DOME_FRAG =
     "}\n";
 
 static struct {
-    GLuint prog;
+    own::GlProgram prog;
     GLint  aPos, aUV;
     GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
-    GLuint vbo;
+    own::GlBuffer vbo;
 
     /* HDRI environment dome */
-    GLuint dome_prog, dome_vbo, hdri_tex;
+    own::GlProgram dome_prog;
+    own::GlBuffer  dome_vbo;
+    own::GlTexture hdri_tex;
     int    dome_verts;
     GLint  dMVP, dExposure, dIntensity, dBlack, dSat, dTex;
 
     /* "GAZE: ON/OFF" status plaque below the centre screen (baked text textures,
      * drawn on the unit QUAD via R.prog). */
-    GLuint label_on, label_off;
+    own::GlTexture label_on, label_off;
     int    label_w, label_h;
     /* live FPS plaque: re-baked only when the integer value changes */
-    GLuint label_fps;
+    own::GlTexture label_fps;
     int    fps_w, fps_h, fps_val;
     /* static multi-line shortcut cheat-sheet, baked once at init */
-    GLuint label_help;
+    own::GlTexture label_help;
     int    help_w, help_h;
     /* big clock banner, hung above the wall on the same curve. Geometry (clock_vbo)
      * is static, built with the meshes; only the baked HH:MM + date texture changes,
      * and only when the minute rolls over (clock_key = last-baked minute-of-year). */
-    GLuint clock_vbo;   int clock_verts;
-    GLuint label_clock; int clock_w, clock_h, clock_key;
+    own::GlBuffer clock_vbo;   int clock_verts;
+    own::GlTexture label_clock; int clock_w, clock_h, clock_key;
     float  clock_yaw, clock_lift;
 } R;
 
@@ -290,7 +293,7 @@ static void build_slab_mesh(struct mirage *m, screen_t *s) {
  * and again whenever a layout switch changes arcs/geometry/distance; old VBOs are
  * released first so a repeated switch doesn't leak GPU buffers. Needs a live ctx. */
 static void   build_clock_banner(struct mirage *m); /* clock banner: defined below */
-static GLuint bake_clock(struct mirage *m, int *ow, int *oh);
+static own::GlTexture bake_clock(struct mirage *m, int *ow, int *oh);
 static int    clock_key_now(void);
 
 void render_rebuild_meshes(struct mirage *m) {
@@ -314,7 +317,6 @@ void render_rebuild_meshes(struct mirage *m) {
      * it first for the new extent, then build the mesh. No-op until the clock has
      * been baked once (clock_w == 0 on the first call, from render_init). */
     if (R.clock_w > 0) {
-        if (R.label_clock) glDeleteTextures(1, &R.label_clock);
         R.label_clock = bake_clock(m, &R.clock_w, &R.clock_h);
         R.clock_key   = clock_key_now();
         build_clock_banner(m);
@@ -381,7 +383,7 @@ static int hud_plaque_h(int lines) {
 
 /* Rasterise `str` (may contain '\n') into a fresh RGBA texture: fg glyphs over a
  * dark plaque. Monospace, so stacked lines column-align. Stores dims in *ow,*oh. */
-static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
+static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, int *oh) {
     const HudFont &f = hud_font();
     int lines = 1, cur = 0, maxlen = 0;
     for (const char *p = str; *p; p++) {
@@ -425,7 +427,7 @@ static GLuint bake_label(const char *str, const float fg[3], int *ow, int *oh) {
             col++;
         }
     }
-    GLuint tex; glGenTextures(1, &tex);
+    own::GlTexture tex; tex.gen();
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -458,7 +460,7 @@ static int clock_key_now(void) {
  * trailing spaces) to a width N chosen so that build_clock_banner's
  * aspect-preserving height lands at ~CLOCK_BAR_H across the wall's full arc - i.e.
  * the bar spans the whole curve while the digits stay square and centred on it. */
-static GLuint bake_clock(struct mirage *m, int *ow, int *oh) {
+static own::GlTexture bake_clock(struct mirage *m, int *ow, int *oh) {
     time_t tt = time(NULL);
     struct tm lt; localtime_r(&tt, &lt);
     char l1[16], l2[16];
@@ -496,7 +498,7 @@ static GLuint bake_clock(struct mirage *m, int *ow, int *oh) {
  * aspect so the digits aren't stretched, hung a margin above the wall's top edge.
  * Needs R.clock_w/clock_h from a prior bake_clock(); a no-op before that. */
 static void build_clock_banner(struct mirage *m) {
-    if (R.clock_vbo) { glDeleteBuffers(1, &R.clock_vbo); R.clock_vbo = 0; }
+    R.clock_vbo.reset();
     R.clock_verts = 0;
     if (R.clock_w <= 0 || R.clock_h <= 0) return;        /* texture not baked yet */
 
@@ -522,7 +524,7 @@ static void build_clock_banner(struct mirage *m) {
         buf[k++]=x; buf[k++]= h*0.5f; buf[k++]=z; buf[k++]=u; buf[k++]=0.0f; /* top */
         buf[k++]=x; buf[k++]=-h*0.5f; buf[k++]=z; buf[k++]=u; buf[k++]=1.0f; /* bottom */
     }
-    glGenBuffers(1, &R.clock_vbo);
+    R.clock_vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.clock_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*5*sizeof(GLfloat)), buf.data(), GL_STATIC_DRAW);
     R.clock_verts = verts;
@@ -587,7 +589,7 @@ static void build_dome(void) {
             #undef DV
         }
     }
-    glGenBuffers(1, &R.dome_vbo);
+    R.dome_vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.dome_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts*3*sizeof(GLfloat)), buf.data(), GL_STATIC_DRAW);
     R.dome_verts = verts;
@@ -601,7 +603,7 @@ static void hdri_init(struct mirage *m) {
     unsigned char *px = load_hdri_rgb8(m->cfg.hdri_path, &w, &h);
     if (!px) { std::print(stderr, "hdri: disabled (load failed)\n"); return; }
 
-    glGenTextures(1, &R.hdri_tex);
+    R.hdri_tex.gen();
     glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -613,13 +615,13 @@ static void hdri_init(struct mirage *m) {
     GLuint vs = compile(GL_VERTEX_SHADER, DOME_VERT);
     GLuint fs = compile(GL_FRAGMENT_SHADER, DOME_FRAG);
     if (!vs || !fs) return;
-    R.dome_prog = glCreateProgram();
+    R.dome_prog.create();
     glAttachShader(R.dome_prog, vs);
     glAttachShader(R.dome_prog, fs);
     glBindAttribLocation(R.dome_prog, 0, "aPos");
     glLinkProgram(R.dome_prog);
     GLint ok = 0; glGetProgramiv(R.dome_prog, GL_LINK_STATUS, &ok);
-    if (!ok) { std::print(stderr, "hdri: dome link failed\n"); R.dome_prog = 0; return; }
+    if (!ok) { std::print(stderr, "hdri: dome link failed\n"); R.dome_prog.reset(); return; }
     glDeleteShader(vs); glDeleteShader(fs);
     R.dMVP       = glGetUniformLocation(R.dome_prog, "uMVP");
     R.dExposure  = glGetUniformLocation(R.dome_prog, "uExposure");
@@ -664,7 +666,7 @@ mirage_status render_init(struct mirage *m) {
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);
     GLuint fs = compile(GL_FRAGMENT_SHADER, FRAG_SRC);
     if (!vs || !fs) return std::unexpected("shader compile failed");
-    R.prog = glCreateProgram();
+    R.prog.create();
     glAttachShader(R.prog, vs);
     glAttachShader(R.prog, fs);
     glBindAttribLocation(R.prog, 0, "aPos");
@@ -686,7 +688,7 @@ mirage_status render_init(struct mirage *m) {
     R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
     R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
 
-    glGenBuffers(1, &R.vbo);
+    R.vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof QUAD, QUAD, GL_STATIC_DRAW);
 
@@ -938,7 +940,6 @@ void render_frame(struct mirage *m, quat head) {
             if (fv < 0)   fv = 0;
             if (fv > 999) fv = 999;
             if (fv != R.fps_val) {
-                if (R.label_fps) glDeleteTextures(1, &R.label_fps);
                 char buf[16]; snprintf(buf, sizeof buf, "FPS %d", fv);
                 const float fc[3] = {0.62f, 0.78f, 0.95f};   /* cool blue */
                 R.label_fps = bake_label(buf, fc, &R.fps_w, &R.fps_h);
@@ -988,7 +989,6 @@ void render_frame(struct mirage *m, quat head) {
     if (R.clock_verts > 0) {
         int key = clock_key_now();
         if (key != R.clock_key || !R.label_clock) {
-            if (R.label_clock) glDeleteTextures(1, &R.label_clock);
             int ow, oh;
             R.label_clock = bake_clock(m, &ow, &oh);
             if (ow != R.clock_w || oh != R.clock_h) {    /* aspect changed -> remesh */
@@ -1037,6 +1037,18 @@ void render_frame(struct mirage *m, quat head) {
 
 void render_finish(struct mirage *m) {
     if (m->edpy == EGL_NO_DISPLAY) return;
+    /* Free every GL object while the context is still current - the RAII handles
+     * in R would otherwise destruct at static-destruction time, after the
+     * eglTerminate below, on a dead context. Also drop the per-screen meshes
+     * (built here, not by capture). */
+    R.prog.reset();   R.vbo.reset();
+    R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
+    R.label_on.reset(); R.label_off.reset(); R.label_fps.reset();
+    R.label_help.reset(); R.clock_vbo.reset(); R.label_clock.reset();
+    for (int i = 0; i < m->n_screen; i++) {
+        if (m->screen[i].mesh_vbo) { glDeleteBuffers(1, &m->screen[i].mesh_vbo); m->screen[i].mesh_vbo = 0; }
+        if (m->screen[i].slab_vbo) { glDeleteBuffers(1, &m->screen[i].slab_vbo); m->screen[i].slab_vbo = 0; }
+    }
     eglMakeCurrent(m->edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (m->esurf != EGL_NO_SURFACE) eglDestroySurface(m->edpy, m->esurf);
     if (m->ectx  != EGL_NO_CONTEXT) eglDestroyContext(m->edpy, m->ectx);
