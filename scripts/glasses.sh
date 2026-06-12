@@ -35,7 +35,7 @@ WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
 
 restore() {
     echo "[glasses] restoring desktop..."
-    bash "$HERE/scripts/sweep.sh" restore >/dev/null 2>&1 || true
+    python3 "$HERE/scripts/sweep.py" restore >/dev/null 2>&1 || true
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
     bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
     if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
@@ -80,7 +80,7 @@ if [ "$WAYBAR_UP" = 1 ]; then
 fi
 
 echo "[glasses] sweeping your windows onto the virtual screens..."
-bash "$HERE/scripts/sweep.sh" sweep 2>&1 | sed 's/^/  [sweep] /' || true
+python3 "$HERE/scripts/sweep.py" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
 echo "[glasses] launching mirage fullscreen on $GLASSES (trackpad capture is always on; Super+Shift+Q quits)"
 ./mirage >/tmp/mirage.log 2>&1

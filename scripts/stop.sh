@@ -40,7 +40,7 @@ restore_windows() {
     # arc layout for next launch, then puts each window back on its original
     # workspace). Falls back to the workspace-level sweep when there's no snapshot.
     if [ -f /tmp/mirage-sweep.json ]; then
-        bash "$HERE/scripts/sweep.sh" restore || true
+        python3 "$HERE/scripts/sweep.py" restore || true
         return
     fi
 
