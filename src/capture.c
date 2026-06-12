@@ -40,6 +40,11 @@ static struct con {
     uint64_t mods[MAX_MODS];        /* modifiers offered for that fourcc     */
     int      n_mods;
     bool     got_size, got_fmt;
+    /* Startup race: we create all sessions at once, but an output whose swapchain
+     * isn't composited yet advertises an empty format. Rather than give up on it,
+     * re-create the session a few times until a real format arrives. */
+    bool     empty_fmt;             /* last `done` had a 0 fourcc            */
+    int      retry_ticks, retries;  /* throttle + cap the re-session loop    */
 } g_con[MIRAGE_MAX_SCREENS];
 
 static bool has_gl_ext(const char *name) {
@@ -87,10 +92,24 @@ static void se_dmabuf_format(void *d, struct ext_image_copy_capture_session_v1 *
 }
 static void se_done(void *d, struct ext_image_copy_capture_session_v1 *s) {
     (void)s; screen_t *sc = d; struct con *c = &g_con[sc->index];
-    if (c->got_size && c->got_fmt) {
+    /* Ready only with a size AND a usable (non-zero) dmabuf format. Some headless
+     * outputs occasionally come up advertising an empty format (fourcc 0, no
+     * modifiers) - it can't be imported as a dmabuf, and arming it would attach an
+     * invalid buffer, which the compositor punishes with a fatal protocol error
+     * that kills the WHOLE client. So we leave that one screen un-ready (it shows
+     * its placeholder); the others, and the rest of the app, carry on. */
+    if (c->got_size && c->got_fmt && c->fmt != 0) {
         sc->session_ready = true;
+        c->empty_fmt = false;
         fprintf(stderr, "capture[%s]: session ready %ux%u fmt %.4s (%d modifiers)\n",
                 sc->name, c->cap_w, c->cap_h, (char*)&c->fmt, c->n_mods);
+    } else if (c->got_size && c->got_fmt && c->fmt == 0) {
+        /* Empty format - flag it so capture_begin_frame re-creates the session
+         * once the output has actually composited a frame (see resession). */
+        c->empty_fmt = true;
+        if (c->retries == 0)
+            fprintf(stderr, "capture[%s]: empty dmabuf format (output not composited "
+                    "yet); will retry the session\n", sc->name);
     }
 }
 static void se_stopped(void *d, struct ext_image_copy_capture_session_v1 *s) {
@@ -149,7 +168,12 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     s->buffer = zwp_linux_buffer_params_v1_create_immed(
         params, s->width, s->height, s->drm_format, 0);
     zwp_linux_buffer_params_v1_destroy(params);
-    if (!s->buffer) { fprintf(stderr, "capture[%s]: create wl_buffer failed\n", s->name); return false; }
+    if (!s->buffer) {
+        fprintf(stderr, "capture[%s]: create wl_buffer failed\n", s->name);
+        gbm_bo_destroy(s->bo); s->bo = NULL;
+        close(s->dmabuf_fd);   s->dmabuf_fd = 0;
+        return false;
+    }
 
     /* EGLImage from the same dmabuf, bound to a GL texture */
     EGLint attrs[32]; int a = 0;
@@ -172,6 +196,11 @@ static bool ensure_buffer(struct mirage *m, screen_t *s) {
     if (s->image == EGL_NO_IMAGE_KHR) {
         fprintf(stderr, "capture[%s]: eglCreateImageKHR failed (fmt %.4s mod %llx)\n",
                 s->name, (char*)&s->drm_format, (unsigned long long)s->modifier);
+        /* Drop the partial buffer so the reuse guard at the top doesn't later hand
+         * back a buffer with no image and arm_frame attach an invalid one. */
+        wl_buffer_destroy(s->buffer); s->buffer = NULL;
+        gbm_bo_destroy(s->bo);        s->bo = NULL;
+        close(s->dmabuf_fd);          s->dmabuf_fd = 0;
         return false;
     }
     glGenTextures(1, &s->tex);
@@ -288,9 +317,43 @@ bool capture_init(struct mirage *m) {
     return true;
 }
 
+/* Tear down and re-create one output's capture session from scratch. Used when a
+ * session came up with an empty format (its output wasn't composited yet at
+ * startup): a fresh session re-queries the constraints, and by now the swapchain
+ * exists, so the compositor advertises a real format. Resets the cached con. */
+static void resession(struct mirage *m, screen_t *s) {
+    struct con *c = &g_con[s->index];
+    if (s->frame)   { ext_image_copy_capture_frame_v1_destroy(s->frame);     s->frame = NULL; }
+    if (s->session) { ext_image_copy_capture_session_v1_destroy(s->session); s->session = NULL; }
+    c->got_size = c->got_fmt = c->empty_fmt = false;
+    c->fmt = 0; c->n_mods = 0;
+    s->frame_state = 0;
+
+    struct ext_image_capture_source_v1 *src =
+        ext_output_image_capture_source_manager_v1_create_source(m->capture_src_mgr, s->wl);
+    s->session = ext_image_copy_capture_manager_v1_create_session(
+        m->copy_capture_mgr, src,
+        EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS);
+    ext_image_capture_source_v1_destroy(src);
+    ext_image_copy_capture_session_v1_add_listener(s->session, &SESSION_LISTENER, s);
+}
+
 void capture_begin_frame(struct mirage *m) {
     for (int i = 0; i < m->n_screen; i++) {
         screen_t *s = &m->screen[i];
+        struct con *c = &g_con[i];
+        /* An output that advertised an empty format: re-create its session every
+         * ~half second (this runs on the throttled capture tick), up to a cap, until
+         * a real format arrives. Cheap, and it self-heals the startup race. */
+        if (c->empty_fmt && !s->session_ready) {
+            if (++c->retry_ticks >= 30 && c->retries < 40) {
+                c->retry_ticks = 0; c->retries++;
+                fprintf(stderr, "capture[%s]: re-creating session (retry %d)\n",
+                        s->name, c->retries);
+                resession(m, s);
+            }
+            continue;
+        }
         if (!s->session_ready || s->frame) continue;   /* not ready / in flight */
         arm_frame(m, s);
     }
