@@ -7,6 +7,7 @@ typedef struct {
 
 const char *rayneo_magcal_default_path(void);
 int  rayneo_magcal_load(rayneo_magcal *cal, const char *path);
+int  rayneo_magcal_save(const rayneo_magcal *cal, const char *path);  /* makes parent dirs */
 void rayneo_magcal_identity(rayneo_magcal *cal);
 void rayneo_magcal_apply(const rayneo_magcal *cal,
                          const float in[3], float out[3]);

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 const char *rayneo_magcal_default_path(void)
 {
@@ -45,4 +46,28 @@ void rayneo_magcal_apply(const rayneo_magcal *cal,
         out[i] = 0.0f;
         for (int j = 0; j < 3; j++) out[i] += cal->scale[i][j] * tmp[j];
     }
+}
+
+/* mkdir -p for every parent component of `path` (the file itself is not created). */
+static void mkdir_parents(const char *path)
+{
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *p = tmp + 1; *p; p++)
+        if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
+}
+
+int rayneo_magcal_save(const rayneo_magcal *cal, const char *path)
+{
+    mkdir_parents(path);
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    float buf[12];
+    for (int i = 0; i < 3; i++) buf[i] = cal->bias[i];
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            buf[3 + r*3 + c] = cal->scale[r][c];
+    int ok = fwrite(buf, sizeof(float), 12, f) == 12;
+    fclose(f);
+    return ok ? 0 : -1;
 }

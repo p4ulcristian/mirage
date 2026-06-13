@@ -7,6 +7,7 @@
  * angles in degrees). mirage's default pose backend reads exactly this.
  *
  *   sudo ./rayneo-bridge                 # 9-axis if calibrated, else 6-axis
+ *   sudo ./rayneo-bridge --calibrate     # ONE-TIME: wave the figure-8, save magcal
  *   ./rayneo-bridge --port 4242 --6axis  # (no sudo if 99-rayneo.rules installed)
  *   ./rayneo-bridge --dev /dev/hidraw3
  */
@@ -35,8 +36,81 @@ static double now_sec(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+/* Magnetometer calibration (the figure-8). The raw magnetometer reads an offset,
+ * stretched ellipsoid instead of a sphere centred on zero - hard-iron shifts the
+ * centre, soft-iron stretches the axes. We sweep the glasses through every
+ * orientation, capture the per-axis min/max, then store the centre as the bias and
+ * an axis-gain matrix that equalises the three ranges (a diagonal soft-iron fit -
+ * enough to make heading absolute and kill yaw drift). Writes the magcal file the
+ * bridge loads on its next normal run. */
+static int do_calibrate(rayneo_dev *d, const char *cal_path)
+{
+    fprintf(stderr,
+        "\n=== magnetometer calibration ===\n"
+        "Slowly wave the glasses through a big figure-8, rolling and tilting them so\n"
+        "they point in EVERY direction (up, down, left, right, upside-down). Keep\n"
+        "moving for about 25 seconds.\n\n");
+
+    float mn[3] = {  1e30f,  1e30f,  1e30f };
+    float mx[3] = { -1e30f, -1e30f, -1e30f };
+    const double DUR = 25.0;
+    double t0 = now_sec(), last = 0.0;
+    long got = 0;
+
+    while (g_run) {
+        double t = now_sec(), elapsed = t - t0;
+        if (elapsed >= DUR) break;
+        rayneo_imu s;
+        if (rayneo_read_imu(d, &s, 200) <= 0) continue;
+        for (int k = 0; k < 3; k++) {
+            if (s.mag[k] < mn[k]) mn[k] = s.mag[k];
+            if (s.mag[k] > mx[k]) mx[k] = s.mag[k];
+        }
+        got++;
+        if (t - last >= 0.4) {
+            last = t;
+            fprintf(stderr, "\r  %3d%%  keep waving...  spans  x=%.0f y=%.0f z=%.0f    ",
+                    (int)(elapsed / DUR * 100.0),
+                    mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]);
+            fflush(stderr);
+        }
+    }
+    fprintf(stderr, "\n");
+    if (got < 200) {
+        fprintf(stderr, "calibration: only %ld samples - aborted, nothing saved.\n", got);
+        return -1;
+    }
+
+    float rng[3], avg = 0.0f;
+    for (int k = 0; k < 3; k++) { rng[k] = (mx[k] - mn[k]) * 0.5f; avg += rng[k]; }
+    avg /= 3.0f;
+    for (int k = 0; k < 3; k++) {
+        if (avg < 1e-3f || rng[k] < avg * 0.3f) {
+            fprintf(stderr, "calibration: uneven coverage (spans %.0f %.0f %.0f). Wave it in\n"
+                    "ALL directions - especially the ones that felt awkward - and retry. Not saved.\n",
+                    rng[0]*2, rng[1]*2, rng[2]*2);
+            return -1;
+        }
+    }
+
+    rayneo_magcal cal;
+    rayneo_magcal_identity(&cal);
+    for (int k = 0; k < 3; k++) {
+        cal.bias[k]     = (mx[k] + mn[k]) * 0.5f;   /* hard-iron: ellipsoid centre */
+        cal.scale[k][k] = avg / rng[k];             /* soft-iron: equalise axis gains */
+    }
+    if (rayneo_magcal_save(&cal, cal_path) != 0) {
+        fprintf(stderr, "calibration: could not write %s\n", cal_path);
+        return -1;
+    }
+    fprintf(stderr, "calibration: saved to %s\n"
+            "Done! Start mirage normally - the bridge now runs 9-axis (absolute heading,\n"
+            "no yaw drift).\n", cal_path);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    int port = 4242, force6 = 0, verbose = 0;
+    int port = 4242, force6 = 0, verbose = 0, calibrate = 0;
     const char *dev_path = NULL, *cal_path = NULL, *host = "127.0.0.1";
     /* beta: Madgwick gain. Lower = trust gyro more = steadier (less accel
      * chasing), at the cost of slower gravity re-alignment. 0.05 was visibly
@@ -53,9 +127,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--beta") && i+1 < argc) beta = atof(argv[++i]);
         else if (!strcmp(argv[i], "--deadband") && i+1 < argc) deadband_dps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--6axis")) force6 = 1;
+        else if (!strcmp(argv[i], "--calibrate")) calibrate = 1;
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v")) verbose = 1;
         else { fprintf(stderr, "usage: %s [--port N] [--dev /dev/hidrawN] "
-                       "[--6axis] [--beta F] [--deadband DPS] [--cal PATH] "
+                       "[--6axis] [--calibrate] [--beta F] [--deadband DPS] [--cal PATH] "
                        "[--host IP] [-v]\n", argv[0]); return 2; }
     }
     const float deadband_rad = deadband_dps * (float)(M_PI / 180.0);
@@ -89,6 +164,16 @@ int main(int argc, char **argv) {
 
     if (rayneo_enable_imu(d) != 0) { perror("enable imu"); rayneo_close(d); return 1; }
 
+    /* One-time magnetometer calibration: sweep the figure-8, save, exit. After this
+     * a normal run picks up the file and fuses 9-axis (no more yaw drift). */
+    if (calibrate) {
+        int rc = do_calibrate(d, cal_path);
+        rayneo_disable_imu(d);
+        rayneo_close(d);
+        close(fd);
+        return rc == 0 ? 0 : 1;
+    }
+
     rayneo_magcal cal;
     int use9 = 0;
     if (!force6 && rayneo_magcal_load(&cal, cal_path) == 0) {
@@ -97,7 +182,7 @@ int main(int argc, char **argv) {
     } else {
         rayneo_magcal_identity(&cal);
         fprintf(stderr, "rayneo-bridge: 6-axis fusion (yaw will drift; run "
-                        "`rayneo-track --calibrate` for absolute heading)\n");
+                        "`sudo ./rayneo-bridge --calibrate` once for absolute heading)\n");
     }
 
     rayneo_ahrs ahrs;
