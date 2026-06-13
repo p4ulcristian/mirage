@@ -57,9 +57,13 @@ MIRAGE_OBJ := $(MIRAGE_SRC:src/%.cpp=build/obj/%.o) $(PROTO_OBJ)
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o
 
-.PHONY: all posedump protocols bridge clean
-all: mirage mirage-posedump
+# ---- calibration pre-flight tool (no wayland/GL) ----
+CAL_OBJ := build/obj/tool_cal.o build/obj/pose.o build/obj/profile.o build/obj/config.o
+
+.PHONY: all posedump cal protocols bridge clean
+all: mirage mirage-posedump mirage-cal
 posedump: mirage-posedump
+cal: mirage-cal
 bridge: rayneo-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
 
@@ -71,6 +75,9 @@ mirage: $(MIRAGE_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 mirage-posedump: $(POSEDUMP_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lm -pthread
+
+mirage-cal: $(CAL_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lm -pthread
 
 # protocol codegen
@@ -94,4 +101,4 @@ build/proto build/obj:
 	mkdir -p $@
 
 clean:
-	rm -rf build mirage mirage-posedump
+	rm -rf build mirage mirage-posedump mirage-cal

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# mirage-run: one-shot launcher.
+#   1. create + position the virtual displays (setup_displays.py)
+#   2. first run only: open the calibration pre-flight (mirage-cal)
+#   3. launch mirage
+#
+# Re-calibrate any time with:  ./mirage-cal   (or delete the profile and re-run)
+# Skip the display step with:  MIRAGE_NO_SETUP=1 ./scripts/mirage-run
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PROFILE="${MIRAGE_PROFILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mirage/profile.toml}"
+
+# 1. virtual displays (needs Hyprland; don't hard-fail if they already exist)
+if [ -z "${MIRAGE_NO_SETUP:-}" ]; then
+    echo "mirage-run: setting up virtual displays..."
+    python3 scripts/setup_displays.py || echo "mirage-run: display setup skipped/failed (continuing)"
+fi
+
+# 2. first-run calibration
+if [ ! -f "$PROFILE" ]; then
+    echo "mirage-run: no calibration profile at $PROFILE — starting mirage-cal."
+    echo "            (put the glasses' tracker streaming first; press 's' to save, 'q' to finish.)"
+    ./mirage-cal
+fi
+
+# 3. go
+echo "mirage-run: launching mirage."
+exec ./mirage "$@"
