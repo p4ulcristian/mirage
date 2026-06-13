@@ -9,20 +9,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PROFILE="${MIRAGE_PROFILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mirage/profile.toml}"
-
 # 1. virtual displays (needs Hyprland; don't hard-fail if they already exist)
 if [ -z "${MIRAGE_NO_SETUP:-}" ]; then
     echo "mirage-run: setting up virtual displays..."
     python3 scripts/setup_displays.py || echo "mirage-run: display setup skipped/failed (continuing)"
 fi
 
-# 2. first-run calibration
-if [ ! -f "$PROFILE" ]; then
-    echo "mirage-run: no calibration profile at $PROFILE — starting mirage-cal."
-    echo "            (put the glasses' tracker streaming first; press 's' to save, 'q' to finish.)"
-    ./mirage-cal
-fi
+# 2. first-run calibration (opens a terminal for mirage-cal if we have none)
+bash scripts/calibrate-if-needed.sh
 
 # 3. go
 echo "mirage-run: launching mirage."

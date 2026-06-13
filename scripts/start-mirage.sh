@@ -39,6 +39,10 @@ if pgrep -x mirage >/dev/null; then
 fi
 
 bash "$HERE/scripts/keybinds.sh"
+# First run only: open the calibration pre-flight (mirage-cal). We're launched
+# from a shortcut with no terminal of our own, so this pops a terminal window for
+# the TUI and blocks until you save + quit. No-op once a profile exists.
+bash "$HERE/scripts/calibrate-if-needed.sh"
 # notify BEFORE glasses.sh - it runs mirage in the foreground and blocks here
 # until you quit, then restores the desktop.
 notify "Started — double-Cmd recenter · Super+Shift+Q quit (trackpad capture is always on)"
