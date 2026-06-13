@@ -223,8 +223,8 @@ int main(int argc, char **argv) {
             rayneo_imu g = s;
             g.gyro_rad[0] = g.gyro_rad[1] = g.gyro_rad[2] = 0.0f;
             float saved = ahrs.beta;
-            ahrs.beta = 10.0f;
-            for (int it = 0; it < 200; it++) rayneo_ahrs_update(&ahrs, &g, 0.01f);
+            ahrs.beta = 2.0f;   /* moderate: converges onto gravity without overshoot */
+            for (int it = 0; it < 400; it++) rayneo_ahrs_update(&ahrs, &g, 0.01f);
             ahrs.beta = saved;
             seeded = 1;
         }
