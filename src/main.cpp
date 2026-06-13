@@ -193,6 +193,17 @@ int main(void) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
 
+    /* device/tracking/optics calibration: overlay profile.toml on the defaults and
+     * stash the result, so it can be re-stamped after every layout switch (layouts
+     * snapshot the whole config). No file yet = first run, defaults stand. */
+    { std::string pp = profile_default_path();
+      int np = profile_load(pp.c_str(), &M.cfg);
+      M.calib = M.cfg;
+      M.have_profile = true;
+      if (np > 0)
+          std::print(stderr, "mirage: loaded {} calibration key(s) from {}\n", np, pp);
+    }
+
     /* named layouts: if layouts.conf is present, apply the active one over the
      * hardcoded defaults. Toggle between them at runtime with Alt+1/2/3 (grab.c).
      * Path overridable via $MIRAGE_LAYOUTS; otherwise the cwd's layouts.conf. */
@@ -200,6 +211,7 @@ int main(void) {
       if (!lp || !*lp) lp = "layouts.conf";
       if (layouts_load(&M.layouts, lp) > 0) {
           M.cfg = M.layouts.l[M.layouts.active].cfg;
+          profile_apply(&M.cfg, &M.calib);   /* keep calibration over the layout */
           std::print(stderr, "mirage: loaded {} layout(s) from {}, active '{}'\n",
                   M.layouts.n, lp, M.layouts.l[M.layouts.active].name);
       } }

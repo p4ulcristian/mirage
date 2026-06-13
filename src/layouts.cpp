@@ -133,6 +133,7 @@ void layouts_switch(struct mirage *m, int idx) {
     L->active = idx;
     m->cfg = L->l[idx].cfg;
     m->cfg.gaze_cursor = gaze;
+    if (m->have_profile) profile_apply(&m->cfg, &m->calib);   /* keep calibration */
     m->layout_dirty = true;
     std::print(stderr, "layouts: switched to {} ({})\n", idx + 1, L->l[idx].name);
 }

@@ -190,6 +190,11 @@ struct mirage {
     int n_pending;
 
     mirage_config cfg;
+    /* device/tracking/optics calibration (profile.cpp): the calibrated values,
+     * stashed so they can be re-stamped onto cfg after a layout switch (layouts
+     * snapshot the whole config and would otherwise wipe them). */
+    mirage_config calib;
+    bool  have_profile;
     float zoom;       /* view zoom (Super+scroll); 1.0 = default, clamped       */
     float fps;        /* last measured throughput, published by the main loop (HUD) */
     /* perf profiling (dormant; set profile=true to enable): split a frame into pure
@@ -232,6 +237,14 @@ using mirage_status = std::expected<void, std::string>;
 
 /* config.c */
 void mirage_config_defaults(mirage_config *c);
+
+/* profile.c - persisted device/tracking/optics calibration (profile.toml), loaded
+ * over the compiled defaults and re-stamped after layout switches (calibration is
+ * per-rig and global, not per-layout). Written by the mirage-cal pre-flight tool. */
+std::string profile_default_path();                       /* $MIRAGE_PROFILE / XDG path */
+int  profile_load(const char *path, mirage_config *c);    /* overlay present keys; count */
+bool profile_save(const char *path, const mirage_config *c);
+void profile_apply(mirage_config *dst, const mirage_config *src);  /* copy calib fields */
 
 /* render.c - EGL/GLES scene rendering */
 mirage_status render_init(struct mirage *m);
