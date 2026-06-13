@@ -59,6 +59,7 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
     c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
+    c->pose_drift_tau    = 1.0f;   /* cancel 6-axis heading creep when still (s); 0 = off */
     c->yaw_gain          = 8.0f;   /* >1 amplifies head yaw: the scene swings faster than the head, so the
                                     * side screens need less neck turn. 1.0 = 1:1 world-fixed (nailed in
                                     * space like a real monitor). (Verified direction empirically via the

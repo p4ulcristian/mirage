@@ -70,6 +70,33 @@ static inline quat q_nlerp(quat a, quat b, float t) {
     return q_norm(r);
 }
 
+/* Scale the rotation ANGLE of q by s about its own axis (q^s). s=1 is identity,
+ * s=0 collapses to no rotation. Posture-independent — no euler decomposition, so
+ * it has no gimbal-lock singularity (unlike scaling yaw/pitch separately). */
+static inline quat q_scale_angle(quat q, float s) {
+    if (q.w < 0.0f) { q.w=-q.w; q.x=-q.x; q.y=-q.y; q.z=-q.z; } /* short way */
+    if (q.w > 1.0f) q.w = 1.0f;
+    float half = acosf(q.w);                 /* half-angle theta/2 */
+    float sh   = sinf(half);
+    if (sh < 1e-6f) return q_identity();     /* ~no rotation: nothing to scale */
+    vec3 axis = v3(q.x/sh, q.y/sh, q.z/sh);
+    float nh  = half * s;                    /* scaled half-angle */
+    float snh = sinf(nh);
+    return (quat){cosf(nh), axis.x*snh, axis.y*snh, axis.z*snh};
+}
+
+/* Swing-twist decomposition: split q into a rotation ABOUT `axis` (twist) and the
+ * remaining rotation that carries `axis` to its new direction (swing), such that
+ * q = swing * twist. For a head looking down -Z, twist is roll and swing is the
+ * combined yaw+pitch look direction. Gimbal-lock-free everywhere except a 180-deg
+ * swing (looking dead backwards), which normal head motion never reaches. */
+static inline void q_swing_twist(quat q, vec3 axis, quat *swing, quat *twist) {
+    float d = q.x*axis.x + q.y*axis.y + q.z*axis.z;  /* project rot axis onto it */
+    quat t = q_norm((quat){q.w, axis.x*d, axis.y*d, axis.z*d});
+    *twist = t;
+    *swing = q_norm(q_mul(q, q_conj(t)));            /* q = swing * twist */
+}
+
 /* Build a quaternion from intrinsic yaw(Y)->pitch(X)->roll(Z) euler in radians.
  * Matches OpenTrack's yaw/pitch/roll semantics. */
 static inline quat q_from_euler_ypr(float yaw, float pitch, float roll) {

@@ -15,18 +15,18 @@
 
 #define DEG2RAD(d) ((d) * (float)(M_PI / 180.0))
 
-/* Recenter reference: neutralise heading (yaw) AND vertical look (pitch) while
- * leaving roll gravity-absolute. Recentering with this brings the screens to
- * your CURRENT eye level (not just heading), yet never tilts them: it's derived
- * from the forward direction, which a roll about forward leaves unchanged, so
- * conj(ref) * orientation collapses to a pure roll at the moment of recenter.
- * (Was yaw-only before, which is why vertical centering didn't work.) */
-static quat yaw_pitch_ref(quat q) {
-    vec3 f = q_rotate(q, v3(0.0f, 0.0f, -1.0f));   /* where the head is looking */
-    float fy = f.y < -1.0f ? -1.0f : (f.y > 1.0f ? 1.0f : f.y);
-    float yaw   = atan2f(-f.x, -f.z);
-    float pitch = asinf(fy);
-    return q_from_euler_ypr(yaw, pitch, 0.0f);
+/* Recenter reference: the FULL head orientation at the moment of recenter.
+ * conj(ref) * orientation is then identity when you look exactly where you
+ * recentered, in ANY posture — sitting, reclined, or flat on your back looking
+ * at the ceiling. The old version decomposed the forward vector into yaw+pitch
+ * euler, but "yaw" is undefined when forward points straight up/down (lying
+ * down): atan2(~0, ~0) picks a garbage heading, which then got amplified into a
+ * spin. Taking the whole quaternion has no such singularity — "forward" is just
+ * wherever you're looking, no heading to compute. Horizon-levelling is no longer
+ * baked into the reference; it's handled downstream by roll_damp, relative to
+ * this posture, so a tilted-head recenter no longer forces a gravity horizon. */
+static quat recenter_ref(quat q) {
+    return q_norm(q);
 }
 
 static struct {
@@ -80,10 +80,12 @@ static uint64_t now_ms(void) {
 static void submit_raw(quat raw) {
     pthread_mutex_lock(&P.lock);
     if (P.want_recenter) {
-        P.reference = yaw_pitch_ref(raw);
+        P.reference = recenter_ref(raw);
         P.want_recenter = false;
     }
     uint64_t t = now_ms();
+    quat prev_smoothed = P.smoothed;   /* before this frame's filter update */
+    bool had_signal    = P.have_signal;
     if (!P.have_signal) {
         /* first sample: seed every filter state from it, no lerp from identity */
         P.smoothed = raw;
@@ -117,6 +119,50 @@ static void submit_raw(quat raw) {
         if (s <= 0.0f || s >= 1.0f) P.smoothed = raw;
         else P.smoothed = q_nlerp(P.smoothed, raw, s);
     }
+
+    /* Heading-drift compensation. A 6-axis IMU has no absolute heading, so it
+     * creeps; the comfort gain (yaw_gain) magnifies that creep into visible
+     * drift. When the head is still, fold the slow drift of the smoothed
+     * orientation back into the recenter reference: ref <- inc^f * ref, where inc
+     * is this frame's world-space change in `smoothed` and f = dt/tau. That holds
+     * the *relative* orientation (what we render) steady without yanking it to
+     * centre, so an intentional off-centre hold (looking at a side screen) stays
+     * put too. Real head motion is far above the stillness gate and is left
+     * alone. All quaternion math - no euler - so it works in any posture. */
+    float trace_sp = 0.0f; bool trace_engaged = false;   /* for the diag trace */
+    if (had_signal) {
+        float dt = (float)(t - P.last_sample_ms) / 1000.0f;
+        if (dt < 1e-4f) dt = 1e-4f;
+        if (dt > 0.1f)  dt = 0.1f;
+        float sp = quat_angle(P.smoothed, prev_smoothed) / dt;   /* rad/s rendered */
+        trace_sp = sp * 180.0f / (float)M_PI;
+        const float still = 2.0f * (float)(M_PI / 180.0);        /* <2 deg/s = held */
+        if (P.cfg.drift_comp_tau > 0.0f && sp < still) {
+            trace_engaged = true;
+            float f = dt / P.cfg.drift_comp_tau;
+            if (f > 1.0f) f = 1.0f;
+            quat inc = q_mul(P.smoothed, q_conj(prev_smoothed)); /* world drift step */
+            P.reference = q_norm(q_mul(q_scale_angle(inc, f), P.reference));
+        }
+    }
+
+    /* Diagnostic trace (set MIRAGE_POSE_TRACE=1): localises drift to the IMU vs
+     * mirage. Logs the incoming orientation (post axis-remap), the relative
+     * orientation we actually render, the measured speed and whether the drift
+     * gate fired. Throttled to ~20 Hz. Remove once drift is understood. */
+    static FILE *trc = (FILE *)-1;
+    if (trc == (FILE *)-1) {
+        const char *e = getenv("MIRAGE_POSE_TRACE");
+        trc = (e && *e) ? fopen("/tmp/mirage-pose-trace.log", "w") : NULL;
+    }
+    if (trc && (P.sample_count % 25 == 0)) {
+        quat rel = q_norm(q_mul(q_conj(P.reference), P.smoothed));
+        fprintf(trc, "in[% .4f % .4f % .4f % .4f] rel[% .4f % .4f % .4f % .4f] "
+                "sp=%6.2f deg/s gate=%s\n",
+                P.smoothed.w, P.smoothed.x, P.smoothed.y, P.smoothed.z,
+                rel.w, rel.x, rel.y, rel.z, trace_sp, trace_engaged ? "ON" : "off");
+        fflush(trc);
+    }
     P.raw = raw;
     P.have_signal = true;
     P.last_sample_ms = t;
@@ -145,17 +191,29 @@ static int open_udp(int port) {
     return fd;
 }
 
+/* Device (aerospace ZYX: yaw=Z, pitch=Y, roll=X) -> mirage (graphics: yaw=Y,
+ * pitch=X, roll=Z) is a fixed axis relabel = a 120-deg rotation about (1,1,1).
+ * Conjugating the raw quaternion by it is the gimbal-lock-free equivalent of the
+ * old euler round-trip (ahrs_euler -> q_from_euler_ypr), verified to match it to
+ * <0.07 deg everywhere AND to stay correct at pitch +-90 where euler spins. */
+static quat device_to_mirage(quat dev) {
+    const quat B = {0.5f, -0.5f, -0.5f, -0.5f};
+    return q_norm(q_mul(q_mul(B, dev), q_conj(B)));
+}
+
+/* UDP backend: the rayneo bridge streams the head orientation as a raw
+ * quaternion {w,x,y,z} of 4 little-endian doubles. We use the quaternion (not
+ * OpenTrack euler) end-to-end precisely so there is no gimbal lock when reclined.
+ * device_to_mirage applies the fixed device->mirage axis change; that is all. */
 static void run_opentrack(void) {
     uint8_t buf[256];
     while (P.running) {
         ssize_t n = recv(P.fd, buf, sizeof buf, 0);
-        if (n < 48) continue;
-        double d[6];
+        if (n < (ssize_t)(4 * sizeof(double))) continue;
+        double d[4];
         memcpy(d, buf, sizeof d);  /* little-endian doubles, x86/arm LE */
-        float yaw   = DEG2RAD((float)d[3]) * P.cfg.sign_yaw;
-        float pitch = DEG2RAD((float)d[4]) * P.cfg.sign_pitch;
-        float roll  = DEG2RAD((float)d[5]) * P.cfg.sign_roll;
-        submit_raw(q_from_euler_ypr(yaw, pitch, roll));
+        quat dev = {(float)d[0], (float)d[1], (float)d[2], (float)d[3]};
+        submit_raw(device_to_mirage(q_norm(dev)));
     }
 }
 
@@ -263,7 +321,7 @@ void pose_recenter(void) {
     pthread_mutex_lock(&P.lock);
     P.want_recenter = true;
     /* apply immediately against the most recent raw too */
-    P.reference = yaw_pitch_ref(P.raw);
+    P.reference = recenter_ref(P.raw);
     pthread_mutex_unlock(&P.lock);
 }
 

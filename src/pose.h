@@ -43,6 +43,12 @@ typedef struct {
     /* per-axis sign for OpenTrack euler input (+1 or -1); 0 treated as +1.
      * Lets you flip a device whose yaw/pitch/roll runs opposite to head motion. */
     float sign_yaw, sign_pitch, sign_roll;
+    /* Heading-drift compensation time constant (s); 0 = off. A 6-axis IMU has no
+     * absolute heading so it slowly creeps, and the comfort gain magnifies it.
+     * When the head is still, the recenter reference is leaked toward the current
+     * orientation with this tau, cancelling the creep while leaving real head
+     * motion (well above the stillness gate) untouched. ~1 s is a good default. */
+    float drift_comp_tau;
 } pose_config;
 
 /* Start the reader thread. Returns 0 on success, -1 on error. */

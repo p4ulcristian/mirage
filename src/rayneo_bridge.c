@@ -175,7 +175,12 @@ int main(int argc, char **argv) {
         float yaw, pitch, roll;
         rayneo_ahrs_euler(&ahrs, &yaw, &pitch, &roll);
 
-        double pkt[6] = { 0.0, 0.0, 0.0, yaw, pitch, roll };
+        /* Send the AHRS's native quaternion {w,x,y,z}. We deliberately do NOT
+         * use OpenTrack's euler {yaw,pitch,roll} wire format: euler goes singular
+         * at pitch +-90 deg (looking straight up/down, e.g. reclined) and spins
+         * the view. The quaternion carries the same orientation with no gimbal
+         * lock. (yaw/pitch/roll above are still computed for --verbose logging.) */
+        double pkt[4] = { ahrs.q[0], ahrs.q[1], ahrs.q[2], ahrs.q[3] };
         if (sendto(fd, pkt, sizeof pkt, 0, (struct sockaddr*)&dst, sizeof dst) < 0 && verbose)
             perror("sendto");
 
