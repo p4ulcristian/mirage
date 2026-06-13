@@ -110,6 +110,11 @@ static struct {
     /* static multi-line shortcut cheat-sheet, baked once at init */
     own::GlTexture label_help;
     int    help_w, help_h;
+    /* 3D pointer: a white arrow on black, drawn additively as a billboard at the
+     * cursor's wall direction (m->cursor_yaw/pitch). Black adds nothing on the
+     * additive optics, so only the arrow glows - over screens and in the gaps. */
+    own::GlTexture cursor_tex;
+    int    cursor_w, cursor_h;
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
@@ -608,6 +613,44 @@ static void hdri_init(struct mirage *m) {
     std::print(stderr, "hdri: dome ready ({}x{}, {})\n", w, h, m->cfg.hdri_path);
 }
 
+/* 3D pointer texture: a classic arrowhead (tip at top-left) filled white on a
+ * black, transparent-on-the-optics background. 2x2 supersampled for a clean edge.
+ * Drawn additively, so only the white arrow shows. Tip UV is CURSOR_TIP_U/V so the
+ * draw can anchor the tip - the hotspot you point with - exactly on the cursor. */
+static const float CURSOR_TIP_U = 0.10f, CURSOR_TIP_V = 0.08f;
+static own::GlTexture gen_cursor_tex(int *ow, int *oh) {
+    const int N = 64;
+    std::vector<unsigned char> px((size_t)N * N * 4, 0);
+    /* arrowhead triangle in pixel space (y down): tip, down-left heel, right point */
+    const float ax[3] = { CURSOR_TIP_U*N, 0.16f*N, 0.74f*N };
+    const float ay[3] = { CURSOR_TIP_V*N, 0.86f*N, 0.52f*N };
+    auto edge = [&](float fx, float fy, int a, int b) {
+        return (fx - ax[a]) * (ay[b] - ay[a]) - (fy - ay[a]) * (ax[b] - ax[a]);
+    };
+    for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) {
+        int cov = 0;
+        for (int sy = 0; sy < 2; sy++) for (int sx = 0; sx < 2; sx++) {
+            float fx = x + 0.25f + sx*0.5f, fy = y + 0.25f + sy*0.5f;
+            float e0 = edge(fx, fy, 0, 1), e1 = edge(fx, fy, 1, 2), e2 = edge(fx, fy, 2, 0);
+            bool in = (e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0);
+            if (in) cov++;
+        }
+        unsigned char val = (unsigned char)(cov * 255 / 4);
+        unsigned char *o = &px[((size_t)y*N + x) * 4];
+        o[0] = o[1] = o[2] = o[3] = val;          /* white arrow, black elsewhere */
+    }
+    own::GlTexture tex; tex.gen();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (ow) *ow = N;
+    if (oh) *oh = N;
+    return tex;
+}
+
 mirage_status render_init(struct mirage *m) {
     EGLint major = 0, minor = 0;   /* EGL version, logged below */
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
@@ -677,6 +720,7 @@ mirage_status render_init(struct mirage *m) {
       R.label_on  = bake_label("GAZE: ON ", on, &R.label_w, &R.label_h);   /* trailing space: same dims */
       R.label_off = bake_label("GAZE: OFF", off, &R.label_w, &R.label_h); }
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
+    R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
     /* static shortcut cheat-sheet, one multi-line plaque baked once */
     { const float hc[3] = {0.66f, 0.72f, 0.82f};
       R.label_help = bake_label(
@@ -721,14 +765,20 @@ void render_frame(struct mirage *m, quat head) {
     /* zoom narrows the field of view (zoom in = see less, bigger) */
     mat4 proj = m4_perspective((m->cfg.fov_deg / z) * (float)M_PI/180.0f, aspect, 0.05f, 600.0f);
 
-    /* Reshape the head orientation for comfort: amplify yaw so the side screens
-     * need less neck turn, and damp roll so the wall stays near-level when you
-     * look around (the glasses sit pitched on your nose, so a plain yaw injects
-     * roll - see q_to_euler_ypr). Identity when yaw_gain=1 and roll_damp=1. */
-    float yaw, pitch, roll;
-    q_to_euler_ypr(head, &yaw, &pitch, &roll);
-    head = q_from_euler_ypr(yaw * m->cfg.yaw_gain, pitch * m->cfg.pitch_gain,
-                            roll * m->cfg.roll_damp);
+    /* Reshape the head orientation for comfort, via a swing-twist split instead
+     * of euler yaw/pitch/roll. "Swing" is the look direction (combined yaw+pitch
+     * off the recenter forward); "twist" is roll about that forward. We amplify
+     * the swing so the side screens need less neck turn, and damp the twist so
+     * the wall stays level. This is gimbal-lock-free: the old euler version blew
+     * up when you looked near straight up/down (lying down), spinning the view.
+     * Swing only has a singularity looking dead backwards, which never happens.
+     * NOTE: yaw and pitch share one gain here (swing is isotropic); yaw_gain is
+     * used and should equal pitch_gain. Identity when look_gain=1, roll_damp=1. */
+    quat swing, twist;
+    q_swing_twist(head, v3(0.0f, 0.0f, -1.0f), &swing, &twist);
+    swing = q_scale_angle(swing, m->cfg.yaw_gain);
+    twist = q_scale_angle(twist, m->cfg.roll_damp);
+    head  = q_norm(q_mul(swing, twist));
 
     /* Reading-stability deadband. The comfort gains above amplify head tremor
      * 2.5-3x, so even a still head leaves text shimmering. We hold the last
@@ -963,6 +1013,44 @@ void render_frame(struct mirage *m, quat head) {
     for (auto &b : g_banners) {
         banner_refresh(b, m->cfg.screen_distance_m);
         banner_draw(b, vp);
+    }
+
+    /* 3D pointer: an arrow billboard at the cursor's wall direction (grab.c). It sits
+     * on the same cylinder as the screens - position = yaw rotation of (0,0,-d) plus
+     * a vertical d*tan(pitch) - so it faces the eye like the panels do. Drawn last,
+     * depth test OFF (always on top) and ADDITIVE (black bg adds nothing on the
+     * optics; only the white arrow glows), so it shows over screens and in the gaps.
+     * The quad is shifted so the arrow's TIP lands exactly on the cursor point. */
+    if (m->cursor_have && m->cursor_in_gap && R.cursor_tex) {
+        float d   = m->cfg.screen_distance_m;
+        float hgt = d * tanf(m->cursor_pitch);
+        float sz  = 0.055f;                       /* arrow size on the wall (m) */
+        mat4 place = m4_mul(m4_translate(v3(0.0f, hgt, 0.0f)),
+                            m4_from_quat(q_from_euler_ypr(m->cursor_yaw, 0, 0)));
+        /* tip offset: the quad spans [-0.5,0.5]; tip UV (u,v) sits at local
+         * (u-0.5, 0.5-v). Translate by its negative (scaled) so the tip is at -d. */
+        float tipx = -(CURSOR_TIP_U - 0.5f) * sz;
+        float tipy = -(0.5f - CURSOR_TIP_V) * sz;
+        mat4 local = m4_mul(m4_translate(v3(tipx, tipy, -d)), m4_scale(v3(sz, sz, 1.0f)));
+        mat4 mvp   = m4_mul(vp, m4_mul(place, local));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
+        glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+        glEnableVertexAttribArray(R.aPos);
+        glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+        glEnableVertexAttribArray(R.aUV);
+        glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, R.cursor_tex);
+        glUniform1i(R.uTex, 0);
+        glUniform1f(R.uHasTex, 1.0f);
+        glUniform1f(R.uYFlip, 0.0f);
+        glUniform1f(R.uSharpen, 0.0f);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
     }
 
     if (m->profile) {

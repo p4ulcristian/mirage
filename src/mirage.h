@@ -102,6 +102,7 @@ typedef struct {
     bool  pose_oneeuro;         /* use the One-Euro adaptive filter      */
     float pose_mincutoff;       /* One-Euro cutoff at rest (Hz)          */
     float pose_beta;            /* One-Euro speed coupling               */
+    float pose_drift_tau;       /* heading-drift cancel time const (s); 0=off */
     float yaw_gain;             /* head-yaw amplification (1 = 1:1)      */
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
@@ -201,6 +202,18 @@ struct mirage {
      * is held. gaze_have gates it off until the first head-tracked frame. */
     float gaze_yaw, gaze_pitch;
     bool  gaze_have;
+    /* 3D pointer (grab.c publishes the cursor's wall-space look direction each
+     * update; render.c draws an arrow billboard on the cylinder at this dir, so the
+     * pointer floats in the scene - visible over screens AND in the gaps). */
+    float cursor_yaw, cursor_pitch;
+    bool  cursor_have;
+    bool  cursor_in_gap;   /* cursor is between screens: draw the arrow (no desktop
+                            * cursor reaches the gaps); over a screen it stays hidden
+                            * so it doesn't duplicate the painted desktop pointer. */
+    float world_yaw;       /* horizontal rotation of the whole wall about the eye,
+                            * driven by drag-on-empty-space (grab.c). Added to every
+                            * screen's placement, so render + cursor picking spin as
+                            * one; the cursor's own direction stays in fixed space. */
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */
@@ -247,6 +260,18 @@ void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch
  * vertical lift of its centre (m), and its arc width (deg). Shared by render +
  * the cursor grid so both agree on an uneven, multi-column wall. */
 void layout_place(const struct mirage *m, int i, float *yaw, float *lift, float *arc_deg);
+/* Pointer pick (input twin of layout_model_matrix): which screen does a wall-space
+ * look direction (*yaw,*pitch, rad) land on, and where within it (u,v in 0..1; u=0
+ * left edge, v=0 top edge, in source-pixel orientation)? Returns the screen index.
+ * On a direct hit returns that screen with u,v inside it and *inside = true. In a
+ * gap it returns the NEAREST screen's edge pixel as the desktop-pointer injection
+ * target with *inside = false - WITHOUT moving the cursor, so the free cursor (and
+ * the 3D arrow drawn at its real dir) can roam the gaps. *inside (nullable) lets
+ * render draw the arrow only in the gaps, where the desktop cursor can't reach.
+ * Returns -1 only when there are no screens. Picks against the SAME placement
+ * render draws, so cursor and picture can never disagree about where a screen is. */
+int  layout_pick(const struct mirage *m, float yaw, float pitch,
+                 float *u, float *v, bool *inside);
 int  layout_num_cols(const struct mirage *m);          /* distinct yaw columns       */
 int  layout_screen_col(const struct mirage *m, int i); /* column index of screen i   */
 

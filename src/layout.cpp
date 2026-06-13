@@ -84,8 +84,8 @@ static float row_lift(const struct mirage *m, int col, int row) {
  *
  * +yaw rotates a screen to the viewer's LEFT, so the lowest column index lands
  * leftmost (matches layout_model_matrix / the cursor canvas). */
-void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out,
-                  float *arc_out) {
+static void layout_place_base(const struct mirage *m, int i, float *yaw_out,
+                              float *lift_out, float *arc_out) {
     const mirage_config *c = &m->cfg;
     float gap = c->arc_spacing_deg * (float)M_PI/180.0f;
     float arc_i = scr_arc(m, i);
@@ -158,6 +158,15 @@ void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out
     *lift_out = mylift;
 }
 
+/* Public placement = base placement + the world's horizontal rotation (drag-to-spin
+ * empty space, grab.c). One offset on every screen, so render and cursor picking
+ * rotate together; the cursor's own direction stays in fixed world space. */
+void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out,
+                  float *arc_out) {
+    layout_place_base(m, i, yaw_out, lift_out, arc_out);
+    *yaw_out += m->world_yaw;
+}
+
 /* Angular + vertical extent of the column-placed wall (free satellites excluded):
  * the yaw of its centre, its total angular width (rad), and the height of its top
  * edge (m) - the union of every column-placed screen's left/right yaw edges and
@@ -202,4 +211,60 @@ void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch
     layout_place(m, i, &y, &lift, &arc);
     *yaw   = y;
     *pitch = atan2f(lift, m->cfg.screen_distance_m);
+}
+
+/* Pointer pick - the input twin of layout_model_matrix. Screens sit on one cylinder
+ * of radius d about the eye, so a wall-space look direction (yaw,pitch) maps to a
+ * single point on that cylinder: azimuth = yaw, height = d*tan(pitch). Each screen is
+ * then an axis-aligned rect there - azimuth in [yaw_i +/- arc/2], height in
+ * [lift_i +/- H/2] - straight from layout_place, the same numbers render draws from.
+ *
+ * Pick = the screen that contains the point MOST CENTRALLY (largest edge margin), so
+ * an overlap or a seam resolves to the natural screen instead of whichever happened
+ * to be indexed first - that first-wins tie is exactly what stranded the side panel
+ * in the old flat-strip nearest-rect mapping. On a miss we snap to the nearest screen
+ * edge (distance measured in metres on the cylinder so azimuth and height compare on
+ * one scale) and write the clamped dir back, so the cursor sticks to the wall and can
+ * always slide into a neighbour. (Flat panels reuse the same azimuth/height rect; the
+ * curve->plane error is sub-degree at these arcs.) */
+int layout_pick(const struct mirage *m, float cyaw, float cpitch,
+                float *u_out, float *v_out, bool *inside_out) {
+    const mirage_config *c = &m->cfg;
+    int n = m->n_screen > 0 ? m->n_screen : c->screen_count;
+    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
+    if (inside_out) *inside_out = false;
+    if (n <= 0) return -1;
+    float d   = c->screen_distance_m;
+    float hgt = d * tanf(cpitch);
+
+    /* 1) direct hit: deepest-inside screen wins (no first-index bias on overlaps). */
+    int best = -1; float best_margin = -1e30f, bu = 0, bv = 0;
+    for (int i = 0; i < n; i++) {
+        float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
+        float aw = arc * (float)M_PI/180.0f, H = screen_height(m, i);
+        float u = (yaw + aw*0.5f - cyaw) / aw;   /* 0 = viewer-left edge, 1 = right */
+        float v = (lift + H*0.5f - hgt)  / H;    /* 0 = top edge,         1 = bottom */
+        if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) continue;
+        float margin = fminf(fminf(u, 1.0f - u), fminf(v, 1.0f - v));
+        if (margin > best_margin) { best_margin = margin; best = i; bu = u; bv = v; }
+    }
+    if (best >= 0) { *u_out = bu; *v_out = bv; if (inside_out) *inside_out = true; return best; }
+
+    /* 2) gap: the cursor stays free out here (the 3D arrow draws at its real dir).
+     * We only need an injection TARGET for the desktop pointer, so report the
+     * nearest screen's edge pixel - WITHOUT moving the cursor onto it. */
+    float bd = 1e30f, byaw = 0, blift = 0, baw = 0, bH = 0, bcaz = 0, bch = 0;
+    for (int i = 0; i < n; i++) {
+        float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
+        float aw = arc * (float)M_PI/180.0f, H = screen_height(m, i);
+        float caz = fminf(fmaxf(cyaw, yaw  - aw*0.5f), yaw  + aw*0.5f);
+        float chg = fminf(fmaxf(hgt,  lift - H*0.5f),  lift + H*0.5f);
+        float dx = (cyaw - caz) * d, dy = hgt - chg;        /* metres on the cylinder */
+        float dd = dx*dx + dy*dy;
+        if (dd < bd) { bd = dd; best = i;
+            byaw = yaw; blift = lift; baw = aw; bH = H; bcaz = caz; bch = chg; }
+    }
+    *u_out = (byaw + baw*0.5f - bcaz) / baw;
+    *v_out = (blift + bH*0.5f - bch)  / bH;
+    return best;
 }
