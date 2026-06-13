@@ -26,6 +26,8 @@ static volatile sig_atomic_t g_smooth_toggle = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
 static void on_recenter(int s) { (void)s; g_recenter = 1; }     /* SIGUSR1 */
 static void on_smooth(int s) { (void)s; g_smooth_toggle = 1; }  /* SIGHUP  */
+static volatile sig_atomic_t g_calib = 0;
+static void on_calib(int s) { (void)s; g_calib = 1; }           /* SIGUSR2: re-run wizard */
 
 /* mirage renders as a fullscreen xdg-shell window on the glasses (DP-1), which
  * Hyprland page-flips straight to the panel (direct scanout). The glasses output
@@ -198,10 +200,13 @@ int main(void) {
      * snapshot the whole config). No file yet = first run, defaults stand. */
     { std::string pp = profile_default_path();
       int np = profile_load(pp.c_str(), &M.cfg);
-      M.calib = M.cfg;
+      M.calib_cfg = M.cfg;
       M.have_profile = true;
       if (np > 0)
           std::print(stderr, "mirage: loaded {} calibration key(s) from {}\n", np, pp);
+      /* first run (no profile yet) -> full guided wizard; otherwise the quick
+       * "look forward, hold still" centre that runs every launch. */
+      calib_init(&M, np > 0);
     }
 
     /* named layouts: if layouts.conf is present, apply the active one over the
@@ -211,7 +216,7 @@ int main(void) {
       if (!lp || !*lp) lp = "layouts.conf";
       if (layouts_load(&M.layouts, lp) > 0) {
           M.cfg = M.layouts.l[M.layouts.active].cfg;
-          profile_apply(&M.cfg, &M.calib);   /* keep calibration over the layout */
+          profile_apply(&M.cfg, &M.calib_cfg);   /* keep calibration over the layout */
           std::print(stderr, "mirage: loaded {} layout(s) from {}, active '{}'\n",
                   M.layouts.n, lp, M.layouts.l[M.layouts.active].name);
       } }
@@ -219,6 +224,7 @@ int main(void) {
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGUSR1, on_recenter);   /* recenter head pose on demand (scriptable: pkill -USR1 mirage) */
+    signal(SIGUSR2, on_calib);      /* re-run the calibration wizard (pkill -USR2 mirage) */
     signal(SIGHUP,  on_smooth);     /* A/B the pose smoothing filter (perf diag) */
 
     M.display = wl_display_connect(NULL);
@@ -340,10 +346,10 @@ int main(void) {
         }
         grab_pump(&M);   /* drain trackpad motion/buttons while captured */
 
-        /* first time we get tracking, treat the current look direction as
-         * "straight ahead" so the centre screen lands in front of you. */
-        static bool centered = false;
-        if (!centered && pose_has_signal()) { pose_recenter(); centered = true; }
+        /* Centring is owned by the calibration overlay (calib.c): it waits for you
+         * to look forward and hold still, then recenters - the guided version of
+         * the old "recenter on first sample". SIGUSR2 re-opens the full wizard. */
+        if (g_calib) { calib_start_wizard(&M); g_calib = 0; }
         if (g_recenter) { pose_recenter(); g_recenter = 0;
                           std::print(stderr, "mirage: recentered\n"); }
         quat head = pose_has_signal() ? pose_latest() : q_identity();

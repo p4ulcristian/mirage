@@ -258,6 +258,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     }
     case LIBINPUT_EVENT_POINTER_MOTION: {
         struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
+        if (calib_active(g->m)) break;   /* freeze the cursor during calibration */
         /* RAW (unaccelerated) deltas: libinput's accelerated get_dx() shrinks
          * slow motion toward zero, so a slow drag stalls at a screen edge and
          * can't cross the 1920px cell into the next screen - you had to flick.
@@ -290,6 +291,10 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         uint32_t btn = libinput_event_pointer_get_button(p);
         uint32_t st  = libinput_event_pointer_get_button_state(p)
                        == LIBINPUT_BUTTON_STATE_PRESSED ? 1u : 0u;
+        if (calib_active(g->m)) {        /* calibration: a click advances the wizard */
+            if (btn == BTN_LEFT && st) calib_click(g->m);
+            break;
+        }
         /* Left-press on empty space (a gap) grabs the WORLD: the drag rotates it
          * around you (handled in MOTION) and no click reaches a screen. A press on a
          * panel clicks normally; the release that ends a world-grab is swallowed too,
@@ -312,6 +317,10 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         enum libinput_pointer_axis ax = LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
         if (!libinput_event_pointer_has_axis(p, ax)) break;
         double v = libinput_event_pointer_get_scroll_value(p, ax);
+        if (calib_active(g->m)) {        /* calibration: scroll resizes (FOV step) */
+            calib_scroll(g->m, v);
+            break;
+        }
         if (g->super) {                  /* Cmd+scroll -> telephoto zoom (not forwarded) */
             do_zoom(g, v);
             break;

@@ -141,6 +141,27 @@ typedef struct {
     int           active;   /* index currently applied to m->cfg                  */
 } mirage_layouts;
 
+/* In-glasses guided calibration overlay (calib.cpp): a head-locked panel that
+ * tells you what to do. Two cadences from ONE machine: the full wizard (first run
+ * - center, then tracking check, then FOV, then save) and the quick centre (every
+ * launch - just "look forward, hold still" -> recenter). */
+typedef enum {
+    CALIB_OFF = 0,
+    CALIB_CENTER,   /* hold still looking forward -> recenter            */
+    CALIB_TRACK,    /* look around, screens stay put -> click to go on   */
+    CALIB_FOV,      /* scroll to resize the screens -> click to save     */
+    CALIB_DONE,     /* brief "Ready" flash, then off                     */
+} calib_step;
+
+typedef struct {
+    calib_step step;
+    bool   wizard;     /* true = full first-run wizard; false = quick centre only */
+    float  still_t;    /* seconds the head has held still (CENTER step)           */
+    float  done_t;     /* DONE-flash countdown (s)                               */
+    quat   prev;       /* previous head sample, for the stillness speed          */
+    bool   have_prev;
+} calib_state;
+
 struct mirage {
     /* wayland globals */
     struct wl_display    *display;
@@ -193,8 +214,9 @@ struct mirage {
     /* device/tracking/optics calibration (profile.cpp): the calibrated values,
      * stashed so they can be re-stamped onto cfg after a layout switch (layouts
      * snapshot the whole config and would otherwise wipe them). */
-    mirage_config calib;
+    mirage_config calib_cfg;
     bool  have_profile;
+    calib_state calib;   /* in-glasses guided calibration overlay (calib.cpp) */
     float zoom;       /* view zoom (Super+scroll); 1.0 = default, clamped       */
     float fps;        /* last measured throughput, published by the main loop (HUD) */
     /* perf profiling (dormant; set profile=true to enable): split a frame into pure
@@ -245,6 +267,19 @@ std::string profile_default_path();                       /* $MIRAGE_PROFILE / X
 int  profile_load(const char *path, mirage_config *c);    /* overlay present keys; count */
 bool profile_save(const char *path, const mirage_config *c);
 void profile_apply(mirage_config *dst, const mirage_config *src);  /* copy calib fields */
+
+/* calib.c - in-glasses guided calibration overlay. calib_init picks the cadence
+ * (full wizard on first run, else quick centre); calib_update runs the state
+ * machine each frame from the head pose; click/scroll drive the wizard steps;
+ * render.c draws the head-locked panel from calib_text/calib_progress. */
+void calib_init(struct mirage *m, bool had_profile);
+void calib_start_wizard(struct mirage *m);   /* re-summon the full wizard (SIGUSR2) */
+void calib_update(struct mirage *m, quat head);
+bool calib_active(const struct mirage *m);
+void calib_click(struct mirage *m);          /* trackpad click: advance a wizard step */
+void calib_scroll(struct mirage *m, double v); /* FOV step: resize the screens        */
+const char *calib_text(const struct mirage *m);   /* current instruction (head-locked) */
+float calib_progress(const struct mirage *m);     /* 0..1 in CENTER, <0 = no bar        */
 
 /* render.c - EGL/GLES scene rendering */
 mirage_status render_init(struct mirage *m);

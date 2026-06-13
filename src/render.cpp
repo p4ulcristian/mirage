@@ -651,6 +651,66 @@ static own::GlTexture gen_cursor_tex(int *ow, int *oh) {
     return tex;
 }
 
+/* Head-locked calibration overlay: a panel pinned to the glasses (built with proj
+ * only - no head rotation - so it stays in front of you) showing the current
+ * instruction and, while centring, a stillness bar. Additive + depth-off, like the
+ * cursor arrow, so it floats over the scene without punching a black hole. */
+static void calib_draw(struct mirage *m, mat4 proj) {
+    if (!calib_active(m)) return;
+    const char *txt = calib_text(m);
+    if (!txt || !*txt) return;
+
+    static const char *cached = nullptr;          /* re-bake only on text change */
+    static own::GlTexture tex; static int tw = 0, th = 0;
+    if (txt != cached) {
+        const float fg[3] = {0.85f, 0.92f, 1.0f};
+        tex = bake_label(txt, fg, &tw, &th);
+        cached = txt;
+    }
+    if (!tex || th <= 0) return;
+
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glUniform1f(R.uYFlip, 0.0f);
+    glUniform1f(R.uSharpen, 0.0f);
+
+    const float dist = 1.2f;                      /* panel distance ahead (m) */
+    float H = 0.20f, W = H * ((float)tw / (float)th);
+    {   /* instruction text */
+        mat4 model = m4_mul(m4_translate(v3(0.0f, 0.08f, -dist)), m4_scale(v3(W, H, 1.0f)));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(proj, model).m);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform1i(R.uTex, 0);
+        glUniform1f(R.uHasTex, 1.0f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    float prog = calib_progress(m);
+    if (prog >= 0.0f) {                           /* stillness bar (CENTER step) */
+        const float barW = 0.5f, barH = 0.02f, y = -0.10f;
+        glUniform1f(R.uHasTex, 0.0f);
+        mat4 track = m4_mul(m4_translate(v3(0.0f, y, -dist)), m4_scale(v3(barW, barH, 1.0f)));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(proj, track).m);
+        glUniform3f(R.uColor, 0.10f, 0.12f, 0.16f);          /* faint full-width track */
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        float fw = barW * prog; if (fw < 1e-4f) fw = 1e-4f;
+        float x  = -barW*0.5f + fw*0.5f;                     /* left-anchor the fill */
+        mat4 fill = m4_mul(m4_translate(v3(x, y, -dist)), m4_scale(v3(fw, barH, 1.0f)));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(proj, fill).m);
+        glUniform3f(R.uColor, 0.45f, 0.62f, 0.95f);          /* bright fill */
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
 mirage_status render_init(struct mirage *m) {
     EGLint major = 0, minor = 0;   /* EGL version, logged below */
     m->edpy = eglGetDisplay((EGLNativeDisplayType)m->display);
@@ -814,6 +874,10 @@ void render_frame(struct mirage *m, quat head) {
         q_to_euler_ypr(head, &m->gaze_yaw, &m->gaze_pitch, &groll);
         m->gaze_have = true;
     }
+
+    /* drive the calibration overlay's state machine off the live head pose
+     * (stillness -> recenter, etc.); the panel itself is drawn at the end. */
+    calib_update(m, head);
 
     /* Neck model: the eye sits ahead of and above the neck pivot, so a head turn
      * sweeps the eye through an arc -> real translation -> motion parallax (near
@@ -1021,7 +1085,7 @@ void render_frame(struct mirage *m, quat head) {
      * depth test OFF (always on top) and ADDITIVE (black bg adds nothing on the
      * optics; only the white arrow glows), so it shows over screens and in the gaps.
      * The quad is shifted so the arrow's TIP lands exactly on the cursor point. */
-    if (m->cursor_have && m->cursor_in_gap && R.cursor_tex) {
+    if (m->cursor_have && m->cursor_in_gap && R.cursor_tex && !calib_active(m)) {
         float d   = m->cfg.screen_distance_m;
         float hgt = d * tanf(m->cursor_pitch);
         float sz  = 0.055f;                       /* arrow size on the wall (m) */
@@ -1052,6 +1116,9 @@ void render_frame(struct mirage *m, quat head) {
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
     }
+
+    /* calibration overlay last of all, head-locked, on top of the scene. */
+    calib_draw(m, proj);
 
     if (m->profile) {
         /* glFinish drains the GPU so rt0->tg is pure draw cost (texture sampling
