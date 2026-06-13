@@ -195,6 +195,7 @@ int main(int argc, char **argv) {
     uint32_t prev_tick = 0;
     long n = 0;
     int idle = 0;
+    int seeded = 0;                            /* AHRS seeded from gravity yet? */
     float gyro_bias[3] = {0.0f, 0.0f, 0.0f};   /* auto-zeroed gyro bias (rad/s) */
 
     while (g_run) {
@@ -210,6 +211,10 @@ int main(int argc, char **argv) {
             continue;
         }
         idle = 0;
+
+        /* Seed the orientation from the first gravity reading so pitch/roll start
+         * level-correct instead of sliding into place over several seconds. */
+        if (!seeded) { rayneo_ahrs_set_from_accel(&ahrs, s.accel); seeded = 1; }
 
         /* dt from the device tick (10 kHz / 0.1 ms units), which is far steadier
          * than wall-clock read timing (measured: tick jitters <0.3 ms, wall-clock
