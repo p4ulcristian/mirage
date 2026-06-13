@@ -52,6 +52,9 @@ typedef struct {
     bool super;                 /* Super held? (from the un-grabbed kbd)  */
     bool alt;                   /* Alt held? (gates the Alt+N layout combo) */
     bool world_drag;            /* left-press on empty space: drag spins the world */
+    double shake_pdx, shake_pdy;  /* previous motion vector (shake-to-gaze detector) */
+    int      shake_count;         /* recent direction reversals                      */
+    uint32_t shake_last_ms;       /* time of the last reversal                       */
 
     int   n;                    /* screen count                          */
 
@@ -262,17 +265,29 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         double rdx = libinput_event_pointer_get_dx_unaccelerated(p);
         double rdy = libinput_event_pointer_get_dy_unaccelerated(p);
 
-        /* Flick-to-gaze ("find my cursor"): a fast trackpad flick warps the cursor
-         * to where you're LOOKING (head gaze) - so a lost cursor snaps to the centre
-         * of view. Keep flicking and it rides your gaze; ease below the threshold
-         * and it's normal precise relative control. Doesn't fire mid world-drag. */
-        const double FLICK = 35.0;   /* raw units/event; tune for your trackpad */
-        if (!g->world_drag && g->m->gaze_have &&
-            (rdx*rdx + rdy*rdy) > FLICK*FLICK) {
-            g->cyaw   = g->m->gaze_yaw;
-            g->cpitch = g->m->gaze_pitch;
-            push_cursor(g);
-            break;
+        /* Shake-to-gaze ("find my cursor"): shake the cursor back and forth and it
+         * warps to where you're LOOKING (head gaze). We count rapid direction
+         * REVERSALS - the dot product of consecutive motion vectors going negative -
+         * so an ordinary fast move never triggers it; only a deliberate there-and-
+         * back-and-there shake does. Needs SHAKE_N reversals, each within GAP ms. */
+        const double MIN2 = 6.0*6.0;     /* ignore tiny jitter moves (raw units^2) */
+        const uint32_t GAP = 400;        /* max ms between reversals to keep counting */
+        const int SHAKE_N = 3;           /* reversals needed to fire */
+        if ((rdx*rdx + rdy*rdy) > MIN2) {
+            bool had_prev = (g->shake_pdx*g->shake_pdx + g->shake_pdy*g->shake_pdy) > MIN2;
+            if (had_prev && (rdx*g->shake_pdx + rdy*g->shake_pdy) < 0.0) {   /* reversed */
+                uint32_t t = now_ms();
+                g->shake_count = (t - g->shake_last_ms > GAP) ? 1 : g->shake_count + 1;
+                g->shake_last_ms = t;
+                if (g->shake_count >= SHAKE_N && !g->world_drag && g->m->gaze_have) {
+                    g->cyaw = g->m->gaze_yaw; g->cpitch = g->m->gaze_pitch;
+                    g->shake_count = 0;
+                    g->shake_pdx = rdx; g->shake_pdy = rdy;
+                    push_cursor(g);
+                    break;
+                }
+            }
+            g->shake_pdx = rdx; g->shake_pdy = rdy;
         }
 
         /* RAW (unaccelerated) deltas: libinput's accelerated get_dx() shrinks
