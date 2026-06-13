@@ -40,6 +40,8 @@ static struct {
     quat smoothed;   /* smoothed raw                              */
     quat reference;  /* recenter reference (conj applied on read) */
     float speed_lp;  /* low-passed angular speed (rad/s)          */
+    quat  dvel;      /* smoothed per-sample orientation step (for prediction) */
+    float sample_dt; /* EMA of the inter-sample period (s)        */
     bool have_signal;
     bool want_recenter;
     bool smooth_on;       /* runtime A/B toggle; raw passthrough when false  */
@@ -50,6 +52,7 @@ static struct {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
     .reference = {1,0,0,0},
+    .dvel = {1,0,0,0}, .sample_dt = 0.003f,
     .smooth_on = true,
     .fd = -1,
 };
@@ -170,6 +173,20 @@ static void submit_raw(quat raw) {
                 rel.w, rel.x, rel.y, rel.z, trace_sp, trace_engaged ? "ON" : "off");
         fflush(trc);
     }
+    /* Angular velocity for forward-prediction: the per-sample change in the
+     * smoothed orientation (world frame), lightly smoothed, stored as the increment
+     * quaternion plus its timestep. pose_predicted() extends this to the motion-to-
+     * photon horizon with q_scale_angle, so the wall stays nailed to the world while
+     * you turn (the difference between readable and smeary text in motion). */
+    if (had_signal) {
+        float vdt = (float)(t - P.last_sample_ms) / 1000.0f;
+        if (vdt < 1e-4f) vdt = 1e-4f;
+        if (vdt > 0.1f)  vdt = 0.1f;
+        quat dq = q_mul(P.smoothed, q_conj(prev_smoothed));   /* world-frame step */
+        P.dvel = q_nlerp(P.dvel, dq, 0.5f);                   /* light smoothing  */
+        P.sample_dt += 0.05f * (vdt - P.sample_dt);
+    }
+
     P.raw = raw;
     P.have_signal = true;
     P.last_sample_ms = t;
@@ -322,6 +339,27 @@ quat pose_latest(void) {
     quat out = q_norm(q_mul(q_conj(P.reference), P.smoothed));
     pthread_mutex_unlock(&P.lock);
     return out;
+}
+
+/* Like pose_latest, but extrapolated horizon_s seconds INTO THE FUTURE along the
+ * current angular velocity - so what we render matches where the head will be when
+ * the photons land, cancelling motion-to-photon latency. horizon_s <= 0 falls back
+ * to the present. The extrapolation is capped so a noisy velocity can't fling the
+ * view; when still, dvel ~ identity so this is a no-op. */
+quat pose_predicted(float horizon_s) {
+    pthread_mutex_lock(&P.lock);
+    quat smoothed = P.smoothed, ref = P.reference, dvel = P.dvel;
+    float sdt = P.sample_dt;
+    bool have = P.have_signal;
+    pthread_mutex_unlock(&P.lock);
+    if (!have) return q_identity();
+    if (horizon_s > 1e-4f && sdt > 1e-5f) {
+        float scale = horizon_s / sdt;
+        if (scale > 8.0f) scale = 8.0f;             /* cap forward extrapolation */
+        quat dq = q_scale_angle(dvel, scale);       /* per-sample step -> horizon */
+        smoothed = q_mul(dq, smoothed);             /* world-frame left-multiply  */
+    }
+    return q_norm(q_mul(q_conj(ref), smoothed));
 }
 
 void pose_recenter(void) {

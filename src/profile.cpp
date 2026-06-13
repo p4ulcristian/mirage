@@ -34,6 +34,7 @@
     F(f, pose_mincutoff)       \
     F(f, pose_beta)            \
     F(f, pose_drift_tau)       \
+    F(f, pose_predict_ms)      \
     F(f, yaw_gain)             \
     F(f, pitch_gain)           \
     F(f, roll_damp)            \

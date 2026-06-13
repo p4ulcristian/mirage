@@ -103,6 +103,7 @@ typedef struct {
     float pose_mincutoff;       /* One-Euro cutoff at rest (Hz)          */
     float pose_beta;            /* One-Euro speed coupling               */
     float pose_drift_tau;       /* heading-drift cancel time const (s); 0=off */
+    float pose_predict_ms;      /* forward-prediction horizon (ms); cancels motion-to-photon lag, 0=off */
     float yaw_gain;             /* head-yaw amplification (1 = 1:1)      */
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */

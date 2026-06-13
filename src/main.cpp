@@ -352,7 +352,8 @@ int main(void) {
         if (g_calib) { calib_start_wizard(&M); g_calib = 0; }
         if (g_recenter) { pose_recenter(); g_recenter = 0;
                           std::print(stderr, "mirage: recentered\n"); }
-        quat head = pose_has_signal() ? pose_latest() : q_identity();
+        quat head = pose_has_signal()
+                  ? pose_predicted(M.cfg.pose_predict_ms * 0.001f) : q_identity();
         render_frame(&M, head);
         wl_display_flush(M.display);
 

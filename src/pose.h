@@ -61,6 +61,11 @@ void pose_stop(void);
  * pose_recenter(). Returns identity until first packet arrives. */
 quat pose_latest(void);
 
+/* Same, but extrapolated horizon_s seconds ahead along the current angular
+ * velocity, to cancel motion-to-photon latency (the wall stays nailed to the world
+ * while you turn). horizon_s <= 0 == pose_latest(). */
+quat pose_predicted(float horizon_s);
+
 /* Set the current raw orientation as the new "looking straight ahead" zero. */
 void pose_recenter(void);
 
