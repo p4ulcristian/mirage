@@ -259,14 +259,30 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     case LIBINPUT_EVENT_POINTER_MOTION: {
         struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
         if (calib_active(g->m)) break;   /* freeze the cursor during calibration */
+        double rdx = libinput_event_pointer_get_dx_unaccelerated(p);
+        double rdy = libinput_event_pointer_get_dy_unaccelerated(p);
+
+        /* Flick-to-gaze ("find my cursor"): a fast trackpad flick warps the cursor
+         * to where you're LOOKING (head gaze) - so a lost cursor snaps to the centre
+         * of view. Keep flicking and it rides your gaze; ease below the threshold
+         * and it's normal precise relative control. Doesn't fire mid world-drag. */
+        const double FLICK = 35.0;   /* raw units/event; tune for your trackpad */
+        if (!g->world_drag && g->m->gaze_have &&
+            (rdx*rdx + rdy*rdy) > FLICK*FLICK) {
+            g->cyaw   = g->m->gaze_yaw;
+            g->cpitch = g->m->gaze_pitch;
+            push_cursor(g);
+            break;
+        }
+
         /* RAW (unaccelerated) deltas: libinput's accelerated get_dx() shrinks
          * slow motion toward zero, so a slow drag stalls at a screen edge and
          * can't cross the 1920px cell into the next screen - you had to flick.
          * The unaccelerated delta is linear in finger travel regardless of
          * speed (and regardless of whether the device exposes an accel config),
          * so boundaries cross at any speed. Our g->sens scales it. */
-        double dx = libinput_event_pointer_get_dx_unaccelerated(p) * g->sens;
-        double dy = libinput_event_pointer_get_dy_unaccelerated(p) * g->sens;
+        double dx = rdx * g->sens;
+        double dy = rdy * g->sens;
         if (g->world_drag) {
             /* Grabbed empty space: horizontal drag spins the whole world about the
              * eye (yaw only - vertical is ignored, so the wall stays level). The
