@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
      * One-Euro smoothing removes - so we get the firm hold without the shimmer that
      * made 0.05 feel bad on the bare signal. deadband: gyro rates below this (deg/s)
      * are noise when still; soft-subtracted so motion still starts from zero. */
-    float beta = 0.08f, deadband_dps = 0.30f;
+    float beta = 0.025f, deadband_dps = 0.30f;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--port") && i+1 < argc) port = atoi(argv[++i]);
@@ -214,9 +214,20 @@ int main(int argc, char **argv) {
         }
         idle = 0;
 
-        /* Seed the orientation from the first gravity reading so pitch/roll start
-         * level-correct instead of sliding into place over several seconds. */
-        if (!seeded) { rayneo_ahrs_set_from_accel(&ahrs, s.accel); seeded = 1; }
+        /* Seed to gravity on the first sample by running the fusion itself to
+         * convergence at high gain (gyro zeroed) - so pitch/roll START level-correct,
+         * in the filter's OWN convention (a hand-built seed risked a sign mismatch
+         * that fought the fusion). Yaw has no accel reference so it stays 0; mirage
+         * recenters it. One-time, instant. */
+        if (!seeded) {
+            rayneo_imu g = s;
+            g.gyro_rad[0] = g.gyro_rad[1] = g.gyro_rad[2] = 0.0f;
+            float saved = ahrs.beta;
+            ahrs.beta = 10.0f;
+            for (int it = 0; it < 200; it++) rayneo_ahrs_update(&ahrs, &g, 0.01f);
+            ahrs.beta = saved;
+            seeded = 1;
+        }
 
         /* dt from the device tick (10 kHz / 0.1 ms units), which is far steadier
          * than wall-clock read timing (measured: tick jitters <0.3 ms, wall-clock

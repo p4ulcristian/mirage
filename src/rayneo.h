@@ -28,7 +28,6 @@ int         rayneo_read_imu(rayneo_dev *d, rayneo_imu *out, int timeout_ms);
 void        rayneo_close(rayneo_dev *d);
 
 void rayneo_ahrs_init(rayneo_ahrs *a, float beta);
-void rayneo_ahrs_set_from_accel(rayneo_ahrs *a, const float accel[3]);  /* seed from gravity */
 void rayneo_ahrs_update(rayneo_ahrs *a, const rayneo_imu *s, float dt);
 void rayneo_ahrs_update9(rayneo_ahrs *a, const rayneo_imu *s,
                          const float mag[3], float dt);

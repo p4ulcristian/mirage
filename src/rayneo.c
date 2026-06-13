@@ -146,28 +146,6 @@ void rayneo_ahrs_init(rayneo_ahrs *a, float beta)
     a->beta = beta;
 }
 
-/* Seed the orientation from a gravity reading so pitch/roll START aligned with
- * "down" instead of at identity (level). Without this the filter begins thinking
- * the glasses are flat and slowly tips into place at the beta rate - a several-
- * second pitch/roll SLIDE every startup. Yaw is left at 0 (no absolute reference
- * in 6-axis; mirage recenters it anyway). q = shortest arc from earth +Z to the
- * measured gravity direction. */
-void rayneo_ahrs_set_from_accel(rayneo_ahrs *a, const float accel[3])
-{
-    float ax = accel[0], ay = accel[1], az = accel[2];
-    float n = sqrtf(ax*ax + ay*ay + az*az);
-    if (n < 1e-6f) return;                    /* no gravity to read; leave as is */
-    ax /= n; ay /= n; az /= n;
-    float w = 1.0f + az;                       /* 1 + cos(angle) between +Z and g */
-    if (w < 1e-6f) {                           /* gravity ~ -Z (upside down): 180 about X */
-        a->q[0] = 0.0f; a->q[1] = 1.0f; a->q[2] = 0.0f; a->q[3] = 0.0f;
-        return;
-    }
-    float q0 = w, q1 = -ay, q2 = ax, q3 = 0.0f;   /* (1+g.z, -g.y, g.x, 0) */
-    float qn = 1.0f / sqrtf(q0*q0 + q1*q1 + q2*q2 + q3*q3);
-    a->q[0] = q0*qn; a->q[1] = q1*qn; a->q[2] = q2*qn; a->q[3] = q3*qn;
-}
-
 /* 6-axis (gyro + accel only) */
 void rayneo_ahrs_update(rayneo_ahrs *a, const rayneo_imu *s, float dt)
 {
