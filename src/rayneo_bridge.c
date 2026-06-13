@@ -112,12 +112,14 @@ static int do_calibrate(rayneo_dev *d, const char *cal_path)
 int main(int argc, char **argv) {
     int port = 4242, force6 = 0, verbose = 0, calibrate = 0;
     const char *dev_path = NULL, *cal_path = NULL, *host = "127.0.0.1";
-    /* beta: Madgwick gain. Lower = trust gyro more = steadier (less accel
-     * chasing), at the cost of slower gravity re-alignment. 0.05 was visibly
-     * jittery on the head; 0.025 is calm and still self-levels fine.
-     * deadband: gyro rates below this (deg/s) are noise when the head is still;
-     * soft-subtracted so motion still starts smoothly from zero. */
-    float beta = 0.025f, deadband_dps = 0.30f;
+    /* beta: Madgwick gain = how hard the accelerometer pulls the orientation back
+     * toward gravity. Too LOW and pitch/roll slowly drift off "level" even with the
+     * head still (measured: ~1.4 deg/s pitch creep at 0.025). 0.08 holds level
+     * firmly; the raw accel jitter it adds is high-frequency, which mirage's
+     * One-Euro smoothing removes - so we get the firm hold without the shimmer that
+     * made 0.05 feel bad on the bare signal. deadband: gyro rates below this (deg/s)
+     * are noise when still; soft-subtracted so motion still starts from zero. */
+    float beta = 0.08f, deadband_dps = 0.30f;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--port") && i+1 < argc) port = atoi(argv[++i]);
