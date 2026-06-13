@@ -61,6 +61,14 @@ ACTIVE, DISTANCE, SLAB = "theater", 2.0, 0.05
 WALL_ARC_DEG = 86.0
 EYE_Y = 3368            # centre of the bottom 16:9 row -> the mains sit at eye level
 
+# Bezel gap: shrink each panel's arc uniformly about its centre, so the screens
+# sit apart with a visible gap between them on the arc WITHOUT moving (yaw/lift
+# unchanged) and WITHOUT touching the 2D desktop tiling - the cells stay a gapless
+# rectangle, so window-dragging is still seamless; only the on-glasses panels are
+# inset. Height follows arc (render derives it), so the inset is uniform on all
+# sides and aspect is preserved. 0 = gapless; 0.08 ~= an 8%-of-a-screen gap.
+GAP_FRAC = 0.08
+
 
 def hypr(*args):
     return json.loads(subprocess.check_output(["hyprctl", "-j", *args]))
@@ -97,7 +105,7 @@ def project(p, x0, y0, Wt, k):
     free-placed. k = metres per masonry pixel on the wall."""
     cx = (p["x"] - x0) + p["w"] / 2.0
     yaw = math.degrees((Wt / 2.0 - cx) * k / DISTANCE)       # +yaw = viewer's left
-    arc = math.degrees(p["w"] * k / DISTANCE)
+    arc = math.degrees(p["w"] * k / DISTANCE) * (1.0 - GAP_FRAC)  # inset for the gap
     lift = (EYE_Y - (p["y"] - y0) - p["h"] / 2.0) * k        # masonry y down -> lift up
     return yaw, arc, lift
 
