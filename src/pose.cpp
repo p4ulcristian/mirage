@@ -129,17 +129,24 @@ static void submit_raw(quat raw) {
      * centre, so an intentional off-centre hold (looking at a side screen) stays
      * put too. Real head motion is far above the stillness gate and is left
      * alone. All quaternion math - no euler - so it works in any posture. */
-    float trace_sp = 0.0f; bool trace_engaged = false;   /* for the diag trace */
-    if (had_signal) {
+    float trace_sp = P.speed_lp * 180.0f/(float)M_PI; bool trace_engaged = false;
+    if (had_signal && P.cfg.drift_comp_tau > 0.0f) {
         float dt = (float)(t - P.last_sample_ms) / 1000.0f;
         if (dt < 1e-4f) dt = 1e-4f;
         if (dt > 0.1f)  dt = 0.1f;
-        float sp = quat_angle(P.smoothed, prev_smoothed) / dt;   /* rad/s rendered */
-        trace_sp = sp * 180.0f / (float)M_PI;
-        const float still = 2.0f * (float)(M_PI / 180.0);        /* <2 deg/s = held */
-        if (P.cfg.drift_comp_tau > 0.0f && sp < still) {
-            trace_engaged = true;
-            float f = dt / P.cfg.drift_comp_tau;
+        /* Gate on the LOW-PASSED head speed (P.speed_lp), not one jittery frame:
+         * the old single-frame gate flickered off on sensor noise, so drift leaked
+         * straight through and the view never held. Engage SMOOTHLY - full hold
+         * when still, fading to nothing before a real head turn - so it locks the
+         * view dead-centre yet never fights you when you actually look around. */
+        const float STILL = 3.0f  * (float)(M_PI/180.0);   /* full hold below 3 deg/s */
+        const float MOVE  = 12.0f * (float)(M_PI/180.0);   /* fully released by 12     */
+        float w = (MOVE - P.speed_lp) / (MOVE - STILL);
+        if (w < 0.0f) w = 0.0f;
+        if (w > 1.0f) w = 1.0f;
+        trace_engaged = w > 0.0f;
+        if (w > 0.0f) {
+            float f = (dt / P.cfg.drift_comp_tau) * w;      /* leak rate, scaled by stillness */
             if (f > 1.0f) f = 1.0f;
             quat inc = q_mul(P.smoothed, q_conj(prev_smoothed)); /* world drift step */
             P.reference = q_norm(q_mul(q_scale_angle(inc, f), P.reference));
