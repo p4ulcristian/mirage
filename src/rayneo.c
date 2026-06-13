@@ -175,36 +175,36 @@ void rayneo_ahrs_update(rayneo_ahrs *a, const rayneo_imu *s, float dt)
     float gx = s->gyro_rad[0], gy = s->gyro_rad[1], gz = s->gyro_rad[2];
     float ax = s->accel[0],    ay = s->accel[1],    az = s->accel[2];
 
-    /* normalise accel */
+    /* Accel feedback = the Madgwick gradient (s0..s3), a 4-vector in quaternion
+     * space. It is subtracted from the quaternion DERIVATIVE below - ALL FOUR
+     * terms. The old code folded s1..s3 into the gyro and dropped s0, which only
+     * approximates gravity near identity; tilted, that correction no longer points
+     * at "down", so a still-but-tilted device drifted in pitch (~1.4 deg/s here).
+     * s stays 0 when there's no usable accel, so the step degrades to pure gyro. */
+    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
     float norm = sqrtf(ax*ax + ay*ay + az*az);
-    if (norm < 1e-6f) goto integrate;
-    norm = 1.0f / norm;
-    ax *= norm; ay *= norm; az *= norm;
+    if (norm > 1e-6f) {
+        norm = 1.0f / norm;
+        ax *= norm; ay *= norm; az *= norm;
 
-    /* gradient descent on f_g */
-    float _2q0 = 2.0f*q0, _2q1 = 2.0f*q1, _2q2 = 2.0f*q2, _2q3 = 2.0f*q3;
-    float _4q0 = 4.0f*q0, _4q1 = 4.0f*q1, _4q2 = 4.0f*q2;
-    float _8q1 = 8.0f*q1, _8q2 = 8.0f*q2;
-    float q0q0 = q0*q0, q1q1 = q1*q1, q2q2 = q2*q2, q3q3 = q3*q3;
+        float _2q0 = 2.0f*q0, _2q1 = 2.0f*q1, _2q2 = 2.0f*q2, _2q3 = 2.0f*q3;
+        float _4q0 = 4.0f*q0, _4q1 = 4.0f*q1, _4q2 = 4.0f*q2;
+        float _8q1 = 8.0f*q1, _8q2 = 8.0f*q2;
+        float q0q0 = q0*q0, q1q1 = q1*q1, q2q2 = q2*q2, q3q3 = q3*q3;
 
-    float s0 = _4q0*q2q2 + _2q2*ax + _4q0*q1q1 - _2q1*ay;
-    float s1 = _4q1*q3q3 - _2q3*ax + 4.0f*q0q0*q1 - _2q0*ay - _4q1 + _8q1*q1q1 + _8q1*q2q2 + _4q1*az;
-    float s2 = 4.0f*q0q0*q2 + _2q0*ax + _4q2*q3q3 - _2q3*ay - _4q2 + _8q2*q1q1 + _8q2*q2q2 + _4q2*az;
-    float s3 = 4.0f*q1q1*q3 - _2q1*ax + 4.0f*q2q2*q3 - _2q2*ay;
+        s0 = _4q0*q2q2 + _2q2*ax + _4q0*q1q1 - _2q1*ay;
+        s1 = _4q1*q3q3 - _2q3*ax + 4.0f*q0q0*q1 - _2q0*ay - _4q1 + _8q1*q1q1 + _8q1*q2q2 + _4q1*az;
+        s2 = 4.0f*q0q0*q2 + _2q0*ax + _4q2*q3q3 - _2q3*ay - _4q2 + _8q2*q1q1 + _8q2*q2q2 + _4q2*az;
+        s3 = 4.0f*q1q1*q3 - _2q1*ax + 4.0f*q2q2*q3 - _2q2*ay;
 
-    norm = 1.0f / sqrtf(s0*s0 + s1*s1 + s2*s2 + s3*s3);
-    s0 *= norm; s1 *= norm; s2 *= norm; s3 *= norm;
+        float sn = sqrtf(s0*s0 + s1*s1 + s2*s2 + s3*s3);
+        if (sn > 1e-9f) { sn = 1.0f/sn; s0 *= sn; s1 *= sn; s2 *= sn; s3 *= sn; }
+    }
 
-    gx -= a->beta * s1;
-    gy -= a->beta * s2;
-    gz -= a->beta * s3;
-    (void)s0;
-
-integrate:;
-    float qDot0 = 0.5f*(-q1*gx - q2*gy - q3*gz);
-    float qDot1 = 0.5f*( q0*gx + q2*gz - q3*gy);
-    float qDot2 = 0.5f*( q0*gy - q1*gz + q3*gx);
-    float qDot3 = 0.5f*( q0*gz + q1*gy - q2*gx);
+    float qDot0 = 0.5f*(-q1*gx - q2*gy - q3*gz) - a->beta*s0;
+    float qDot1 = 0.5f*( q0*gx + q2*gz - q3*gy) - a->beta*s1;
+    float qDot2 = 0.5f*( q0*gy - q1*gz + q3*gx) - a->beta*s2;
+    float qDot3 = 0.5f*( q0*gz + q1*gy - q2*gx) - a->beta*s3;
 
     q0 += qDot0 * dt; q1 += qDot1 * dt;
     q2 += qDot2 * dt; q3 += qDot3 * dt;
