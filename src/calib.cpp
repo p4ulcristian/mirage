@@ -17,22 +17,12 @@
 #include <ctime>
 #include <string>
 
-static const float STILL_DEG = 1.5f;   /* head slower than this (deg/s) = "still" */
-static const float HOLD_S    = 1.0f;   /* hold still this long to lock the centre */
-static const float DONE_S    = 1.3f;   /* how long the "Ready" flash lingers      */
+static const float CENTER_S = 1.2f;    /* fixed centring countdown (s)            */
+static const float DONE_S   = 0.9f;    /* how long the "Ready" flash lingers      */
 
 static double mono_s(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-/* angular speed (deg/s) between two head samples dt seconds apart */
-static float head_speed_deg(quat a, quat b, float dt) {
-    float d = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
-    if (d < 0.0f) d = -d;
-    if (d > 1.0f) d = 1.0f;
-    float ang = 2.0f * acosf(d) * 180.0f/(float)M_PI;   /* degrees moved */
-    return ang / (dt > 1e-4f ? dt : 1e-4f);
 }
 
 void calib_init(struct mirage *m, bool had_profile) {
@@ -60,6 +50,7 @@ static void after_center(struct mirage *m) {
 }
 
 void calib_update(struct mirage *m, quat head) {
+    (void)head;   /* centring is a timed countdown now, not orientation-gated */
     calib_state *c = &m->calib;
     if (c->step == CALIB_OFF) return;
 
@@ -72,12 +63,15 @@ void calib_update(struct mirage *m, quat head) {
     switch (c->step) {
     case CALIB_CENTER: {
         /* need a live head signal; until then, sit and wait (no false centre). */
-        if (!pose_has_signal()) { c->still_t = 0.0f; c->have_prev = false; return; }
-        if (!c->have_prev) { c->prev = head; c->have_prev = true; return; }
-        float sp = head_speed_deg(head, c->prev, dt > 0 ? dt : 1e-3f);
-        c->prev = head;
-        if (sp < STILL_DEG) c->still_t += dt; else c->still_t = 0.0f;
-        if (c->still_t >= HOLD_S) { c->still_t = 0.0f; after_center(m); }
+        if (!pose_has_signal()) { c->still_t = 0.0f; return; }
+        /* Fixed countdown, NOT a stillness gate: a 6-axis IMU's heading drifts, so
+         * the orientation never reads "still" even with your head dead-still - a
+         * stillness gate could never finish. Instead we pin the view to centre
+         * every frame while counting down (so the pre-recenter drift never shows),
+         * then lock it. You just look forward for ~1 s. */
+        pose_recenter();
+        c->still_t += dt;
+        if (c->still_t >= CENTER_S) { c->still_t = 0.0f; after_center(m); }
         break;
     }
     case CALIB_DONE:
@@ -131,7 +125,7 @@ const char *calib_text(const struct mirage *m) {
 
 float calib_progress(const struct mirage *m) {
     if (m->calib.step == CALIB_CENTER) {
-        float p = m->calib.still_t / HOLD_S;
+        float p = m->calib.still_t / CENTER_S;
         return p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
     }
     return -1.0f;
