@@ -39,8 +39,9 @@ restore() {
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
     bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
     if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
-        pkill -x waybar 2>/dev/null || true
-        setsid waybar >/dev/null 2>&1 & disown
+        # waybar is a systemd user service (Restart=always); restart it through
+        # systemd so we don't fight its supervisor or spawn a second instance.
+        systemctl --user restart waybar.service 2>/dev/null || true
     fi
 }
 trap restore EXIT INT TERM
@@ -74,8 +75,7 @@ bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
 # captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
 # rides along onto the wall - that's how you get your status bar inside mirage.
 if [ "$WAYBAR_UP" = 1 ]; then
-    pkill -x waybar 2>/dev/null || true
-    setsid waybar >/dev/null 2>&1 & disown
+    systemctl --user restart waybar.service 2>/dev/null || true
     sleep 0.5
 fi
 
