@@ -1029,22 +1029,25 @@ void render_frame(struct mirage *m, quat head) {
      * (stillness -> recenter, etc.); the panel itself is drawn at the end. */
     calib_update(m, head);
 
-    /* Neck model: the eye sits ahead of and above the neck pivot, so a head turn
-     * sweeps the eye through an arc -> real translation -> motion parallax (near
-     * windows shift against far ones and the fixed star dome). With the camera
-     * pinned at the origin this is the only translational depth cue we get from
-     * the 3DoF stream. eye_world rotates the fixed local offset by the presented
-     * head, so the parallax stays consistent with the orientation we render. */
-    vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
-    /* facecam: real measured head translation (lean in, slide sideways) on top of the
-     * neck-model arc. The IMU can't sense this; the webcam bridge supplies it. Lateral
-     * (x/y) and depth (z) get separate gains so depth — the noisier axis — can be
-     * dialled independently. pose_position() is {0,0,0} when facecam is off/silent. */
-    if (m->cfg.facecam_enable) {
-        vec3 hp = pose_position();
-        eye_world = v3_add(eye_world, v3(hp.x * m->cfg.facecam_lateral_gain,
-                                         hp.y * m->cfg.facecam_lateral_gain,
-                                         hp.z * m->cfg.facecam_depth_gain));
+    /* Eye translation for motion parallax (near windows shift against far ones and the
+     * fixed star dome). Two sources, picked by whether the webcam is live:
+     *
+     *  - REAL position (facecam): the measured head offset already INCLUDES the neck-arc
+     *    translation a head turn produces, so it fully replaces the neck model below -
+     *    running both would double-count that arc. Forward-predicted (pose_predict_ms) to
+     *    offset the camera's latency. Lateral (x/y) and depth (z) keep separate gains, as
+     *    depth is the noisier axis.
+     *  - NECK MODEL (fallback): with no webcam signal, synthesise the arc from rotation -
+     *    the eye sits ahead/above a neck pivot, so a turn sweeps it through an arc. This is
+     *    the only translational depth cue available from the 3DoF stream alone. */
+    vec3 eye_world;
+    if (m->cfg.facecam_enable && pose_position_active()) {
+        vec3 hp = pose_position(m->cfg.pose_predict_ms * 0.001f);
+        eye_world = v3(hp.x * m->cfg.facecam_lateral_gain,
+                       hp.y * m->cfg.facecam_lateral_gain,
+                       hp.z * m->cfg.facecam_depth_gain);
+    } else {
+        eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
     }
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */

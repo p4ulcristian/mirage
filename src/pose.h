@@ -75,11 +75,17 @@ quat pose_latest(void);
  * while you turn). horizon_s <= 0 == pose_latest(). */
 quat pose_predicted(float horizon_s);
 
-/* Latest head POSITION as a world-axis eye offset (metres) relative to the reference
- * captured at the last recenter — so rest = {0,0,0}, +x = lean right, +y = lean up,
- * -z = lean toward the wall. Returns {0,0,0} when facecam is disabled or has no signal
- * yet. render adds this into the eye translation for real lean/slide parallax. */
-vec3 pose_position(void);
+/* Head POSITION as a world-axis eye offset (metres) relative to the reference captured
+ * at the last recenter — rest = {0,0,0}, +x = lean right, +y = lean up, -z = lean toward
+ * the wall. horizon_s forward-predicts along the filtered position velocity to offset the
+ * webcam's latency (hard-capped so noise can't fling; <=0 = present). {0,0,0} when facecam
+ * is disabled or has no signal yet. render uses this as the eye translation for parallax. */
+vec3 pose_position(float horizon_s);
+
+/* True when a fresh facecam position sample arrived recently (~0.5 s). render switches on
+ * this between the real measured position and the neck-model fallback, so losing the camera
+ * (busy, out of frame, bridge down) degrades gracefully to 3DoF instead of freezing. */
+bool pose_position_active(void);
 
 /* Set the current raw orientation as the new "looking straight ahead" zero. Also
  * snaps the facecam position reference to here, so a recenter zeroes lean too. */

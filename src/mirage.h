@@ -108,8 +108,9 @@ typedef struct {
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
-    float neck_fwd_m;           /* eye distance ahead of the neck pivot (parallax; 0 = off) */
-    float neck_up_m;            /* eye height above the neck pivot (parallax)      */
+    float neck_fwd_m;           /* FALLBACK parallax when facecam is off/silent: eye distance
+                                 * ahead of the neck pivot (synthesised from rotation; 0 = off) */
+    float neck_up_m;            /* fallback parallax: eye height above the neck pivot */
 
     /* facecam 6DoF: webcam-measured head POSITION on top of the 3DoF IMU rotation
      * (see src/facecam_bridge.cpp). The bridge sends position to the pose layer;

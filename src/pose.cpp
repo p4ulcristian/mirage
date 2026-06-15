@@ -487,27 +487,42 @@ void pose_recenter(void) {
     pthread_mutex_unlock(&P.lock);
 }
 
+static inline float clampf(float v, float lim) {
+    return v > lim ? lim : (v < -lim ? -lim : v);
+}
+
 /* World-axis eye-offset (metres) from the rest reference. x/y already in mirage world
- * convention from the bridge; z is camera->head distance, so leaning in shrinks it and
- * we negate the delta to push the eye forward (-Z). {0,0,0} until a sample arrives. */
-vec3 pose_position(void) {
+ * convention from the bridge; z is camera->head distance (smaller = leaned in), so
+ * (smoothed - ref) goes negative on a lean-in -> eye moves -Z toward the wall. Each axis
+ * is forward-predicted along its One-Euro velocity (oe.*.dxhat) to offset the camera's
+ * latency, with the lead capped so a noisy velocity can't fling the view. {0,0,0} until a
+ * sample arrives. */
+vec3 pose_position(float horizon_s) {
     pthread_mutex_lock(&P.lock);
     vec3 out = {0,0,0};
     if (P.pos_have && P.pos_ref_set) {
-        out.x = P.pos_smoothed.x - P.pos_ref.x;
-        out.y = P.pos_smoothed.y - P.pos_ref.y;
-        /* lean in: distance z shrinks below the rest ref, so (smoothed - ref) goes
-         * negative -> eye moves -Z (toward the wall) -> wall comes closer. */
-        out.z = P.pos_smoothed.z - P.pos_ref.z;
-        /* clamp so a detection glitch can't fling the wall across the room */
-        const float LIM = 0.40f;
-        auto clampf = [](float v, float lim) { return v > lim ? lim : (v < -lim ? -lim : v); };
-        out.x = clampf(out.x, LIM);
-        out.y = clampf(out.y, LIM);
-        out.z = clampf(out.z, LIM);
+        float h = horizon_s > 0.0f ? horizon_s : 0.0f;
+        const float PCAP = 0.04f;   /* max predicted lead per axis (m) */
+        const float LIM  = 0.40f;   /* max total offset (anti-fling)   */
+        float px = P.pos_smoothed.x + clampf(P.oe_px.dxhat * h, PCAP);
+        float py = P.pos_smoothed.y + clampf(P.oe_py.dxhat * h, PCAP);
+        float pz = P.pos_smoothed.z + clampf(P.oe_pz.dxhat * h, PCAP);
+        out.x = clampf(px - P.pos_ref.x, LIM);
+        out.y = clampf(py - P.pos_ref.y, LIM);
+        out.z = clampf(pz - P.pos_ref.z, LIM);
     }
     pthread_mutex_unlock(&P.lock);
     return out;
+}
+
+/* Fresh position sample within ~0.5 s? Lets render fall back to the neck model when the
+ * webcam drops out (camera busy, head out of frame, bridge down) instead of freezing on
+ * a stale lean. */
+bool pose_position_active(void) {
+    pthread_mutex_lock(&P.lock);
+    bool a = P.pos_have && (now_us() - P.pos_last_us) < 500000ull;
+    pthread_mutex_unlock(&P.lock);
+    return a;
 }
 
 uint32_t pose_recenter_gen(void) {
