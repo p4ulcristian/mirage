@@ -111,6 +111,13 @@ static struct {
     /* static multi-line shortcut cheat-sheet, baked once at init */
     own::GlTexture label_help;
     int    help_w, help_h;
+    /* sensitivity slider: static "SENS"/"DEFAULT" captions baked once, plus a live
+     * value plaque ("3.0x") re-baked only when the gain changes (like the FPS one). */
+    own::GlTexture label_sens_cap, label_default, label_sens;
+    int    senscap_w, senscap_h, default_w, default_h, sens_w, sens_h, sens_val;
+    /* layout-switcher button captions (one per named layout), baked once at init */
+    own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
+    int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
     /* 3D pointer: a white arrow on black, drawn additively as a billboard at the
      * cursor's wall direction (m->cursor_yaw/pitch). Black adds nothing on the
      * additive optics, so only the arrow glows - over screens and in the gaps. */
@@ -790,6 +797,22 @@ mirage_status render_init(struct mirage *m) {
           "CMD+SCROLL: ZOOM\n"
           "SUPER+SHIFT+Q: QUIT",
           hc, &R.help_w, &R.help_h); }
+    /* sensitivity slider captions (static) + force a value bake on the first frame */
+    { const float cap[3] = {0.66f, 0.72f, 0.82f};
+      const float dft[3] = {0.80f, 0.86f, 0.95f};
+      R.label_sens_cap = bake_label("SENS", cap, &R.senscap_w, &R.senscap_h);
+      R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h); }
+    R.sens_val = -1;
+    /* layout-switcher button captions: one per loaded named layout, upper-cased to
+     * match the rest of the HUD. Layouts are parsed before render init, so the set
+     * is fixed here. */
+    { const float lc[3] = {0.72f, 0.80f, 0.92f};
+      for (int k = 0; k < m->layouts.n; k++) {
+          char nm[32];
+          snprintf(nm, sizeof nm, "%s", m->layouts.l[k].name);
+          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
+          R.label_layout[k] = bake_label(nm, lc, &R.layout_w[k], &R.layout_h[k]);
+      } }
     /* banner entities: register them here; the frame loop (banner_refresh) bakes
      * and builds each lazily and re-bakes when its key() changes. The clock is the
      * first; push more ent::Banner for status lines etc. */
@@ -808,6 +831,114 @@ static const float PLACEHOLDER[][3] = {
     {0.20f, 0.10f, 0.30f}, {0.10f, 0.25f, 0.20f}, {0.28f, 0.18f, 0.08f},
     {0.10f, 0.18f, 0.30f}, {0.25f, 0.10f, 0.15f},
 };
+
+/* In-view sensitivity slider: a track + fill + draggable handle and a DEFAULT
+ * button, hung under the centre screen with the GAZE/FPS plaques. Geometry comes
+ * from sens_panel_compute (the same numbers grab.c hit-tests), drawn in the centre
+ * screen's local frame via layout_model_matrix. Additive + depth-off like the
+ * cursor arrow, so it glows on the optics without punching a black hole. */
+static void draw_sens_panel(struct mirage *m, mat4 vp) {
+    if (calib_active(m)) return;            /* the wizard owns the view */
+    sens_panel sp;
+    if (!sens_panel_compute(m, &sp)) return;
+
+    mat4 base = layout_model_matrix(m, sp.ci);
+
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glUniform1f(R.uYFlip, 0.0f);
+    glUniform1f(R.uSharpen, 0.0f);
+
+    auto solid = [&](float cx, float cy, float w, float h, float r, float g, float b) {
+        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
+        glUniform1f(R.uHasTex, 0.0f);
+        glUniform3f(R.uColor, r, g, b);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    };
+    /* a hollow rectangle from four thin bright bars - on additive optics an outline
+     * reads as an affordance where a dark fill would just be invisible. */
+    auto outline = [&](float cx, float cy, float w, float h, float t,
+                       float r, float g, float b) {
+        solid(cx, cy + h*0.5f, w, t, r, g, b);   /* top    */
+        solid(cx, cy - h*0.5f, w, t, r, g, b);   /* bottom */
+        solid(cx - w*0.5f, cy, t, h, r, g, b);   /* left   */
+        solid(cx + w*0.5f, cy, t, h, r, g, b);   /* right  */
+    };
+    auto label = [&](GLuint tex, float cx, float cy, float h, int tw, int th) {
+        if (!tex || th <= 0) return;
+        float w = h * ((float)tw / (float)th);
+        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
+        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform1i(R.uTex, 0);
+        glUniform1f(R.uHasTex, 1.0f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    };
+
+    /* All colours are ADDED light (GL_ONE,GL_ONE): there is no "dark" on the optics,
+     * so the rail is a dim-but-present glow, the fill/handle are brighter, and the
+     * track extent is marked by bright end ticks rather than a dark box. */
+    float trackW = sp.track_x1 - sp.track_x0;
+    solid(0.0f, sp.row_y, trackW, sp.track_h, 0.22f, 0.26f, 0.34f);   /* visible rail */
+    float fillW = sp.handle_x - sp.track_x0;
+    if (fillW > 1e-4f)
+        solid(sp.track_x0 + fillW*0.5f, sp.row_y, fillW, sp.track_h, 0.30f, 0.42f, 0.65f);
+    /* bright end ticks so the min/max extent reads at a glance */
+    float tickH = sp.track_h * 3.0f, tickW = 0.008f;
+    solid(sp.track_x0, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
+    solid(sp.track_x1, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
+    /* handle */
+    solid(sp.handle_x, sp.row_y, sp.handle_w, sp.handle_h, 0.60f, 0.76f, 1.00f);
+    /* DEFAULT button: a bright outline (a dark fill would be invisible additively) */
+    float def_cx = 0.5f*(sp.def_x0 + sp.def_x1), def_cy = 0.5f*(sp.def_y0 + sp.def_y1);
+    float def_w  = sp.def_x1 - sp.def_x0,        def_h  = sp.def_y1 - sp.def_y0;
+    outline(def_cx, def_cy, def_w, def_h, 0.006f, 0.34f, 0.40f, 0.54f);
+
+    /* live value plaque ("3.0x"), re-baked only when the gain changes */
+    int sv = (int)(sp.gain * 10.0f + 0.5f);
+    if (sv != R.sens_val) {
+        char buf[16]; snprintf(buf, sizeof buf, "%.1fX", (double)sp.gain);
+        const float vc[3] = {0.62f, 0.78f, 0.95f};
+        R.label_sens = bake_label(buf, vc, &R.sens_w, &R.sens_h);
+        R.sens_val = sv;
+    }
+    label(R.label_sens_cap, sp.track_x0 - 0.13f, sp.row_y,       0.055f, R.senscap_w, R.senscap_h);
+    label(R.label_sens,     0.0f,                sp.row_y + 0.11f, 0.055f, R.sens_w,   R.sens_h);
+    label(R.label_default,  def_cx,              def_cy,         0.045f, R.default_w, R.default_h);
+
+    /* layout switcher: a clickable box per named layout, the active one filled and
+     * bright-bordered, the rest a dim idle outline. Each caption is scaled down to
+     * fit its box so long names ("THEATER") don't spill past the border. */
+    for (int k = 0; k < sp.n_layout; k++) {
+        float cx = sp.lay_cx[k];
+        float cy = 0.5f * (sp.lay_y0 + sp.lay_y1);
+        float w  = sp.lay_w, h = sp.lay_y1 - sp.lay_y0;
+        if (k == sp.active_layout) {
+            solid(cx, cy, w, h, 0.16f, 0.22f, 0.34f);            /* active: filled glow */
+            outline(cx, cy, w, h, 0.006f, 0.50f, 0.66f, 0.95f);  /* bright border       */
+        } else {
+            outline(cx, cy, w, h, 0.006f, 0.30f, 0.36f, 0.48f);  /* idle border         */
+        }
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (R.layout_h[k] > 0) {
+            float natw = lh * (float)R.layout_w[k] / (float)R.layout_h[k];
+            if (natw > maxw) lh = maxw * (float)R.layout_h[k] / (float)R.layout_w[k];
+        }
+        label(R.label_layout[k], cx, cy, lh, R.layout_w[k], R.layout_h[k]);
+    }
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
 
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
@@ -1107,6 +1238,9 @@ void render_frame(struct mirage *m, quat head) {
         banner_refresh(b, m->cfg.screen_distance_m);
         banner_draw(b, vp);
     }
+
+    /* in-view sensitivity slider, hung under the centre screen (grab.c drives it) */
+    draw_sens_panel(m, vp);
 
     /* 3D pointer: an arrow billboard at the cursor's wall direction (grab.c). It sits
      * on the same cylinder as the screens - position = yaw rotation of (0,0,-d) plus

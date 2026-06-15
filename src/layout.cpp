@@ -268,3 +268,81 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
     *v_out = (blift + bH*0.5f - bch)  / bH;
     return best;
 }
+
+/* Sensitivity slider geometry. Hangs the slider row under the centre screen, BELOW
+ * the GAZE/FPS/help plaque stack (we recompute that stack's metres here so the row
+ * lands just under it). The centre screen is the one nearest dead-ahead - smallest
+ * |yaw|, lowest lift on a tie - exactly as render picks it for the plaques. The
+ * handle's x is the current gain lerped across the track; render draws there and
+ * grab maps the clicked cursor back to a gain with the same numbers. */
+bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
+    int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
+    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
+    if (n <= 0) return false;
+
+    /* centre screen: smallest |yaw|, then lowest lift (matches render.cpp) */
+    int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f, yaw_c = 0, lift_c = 0;
+    for (int k = 0; k < n; k++) {
+        float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
+        float ay = fabsf(yw);
+        if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
+            best_yaw = ay; best_lift = lf; ci = k; yaw_c = yw; lift_c = lf;
+        }
+    }
+    if (ci < 0) return false;
+
+    float d  = m->cfg.screen_distance_m;
+    float hh = screen_height(m, ci) * 0.5f;       /* centre screen half-height (m) */
+
+    /* mirror the plaque stack in render.cpp to find where the help block bottoms
+     * out, then drop the slider row a little below it. */
+    const float fullH  = 0.11f;
+    float yc_gaze = -hh - 0.05f - fullH * 0.5f;
+    float yc_fps  = yc_gaze - fullH - 0.02f;
+    float fps_bot = yc_fps - fullH * 0.5f;
+    const float blockH = 0.26f;
+    float yc_help  = fps_bot - 0.03f - blockH * 0.5f;
+    float help_bot = yc_help - blockH * 0.5f;
+
+    out->ci      = ci;
+    out->d       = d;
+    out->yaw_c   = yaw_c;
+    out->lift_c  = lift_c;
+    out->handle_h = 0.10f;
+    out->handle_w = 0.03f;
+    out->track_h  = 0.016f;
+    out->row_y    = help_bot - 0.04f - out->handle_h * 0.5f;
+    out->track_x0 = -0.23f;
+    out->track_x1 =  0.23f;
+
+    float g = m->cfg.yaw_gain;                     /* linked: yaw drives the handle */
+    if (g < SENS_GAIN_MIN) g = SENS_GAIN_MIN;
+    if (g > SENS_GAIN_MAX) g = SENS_GAIN_MAX;
+    out->gain = g;
+    float frac = (g - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
+    out->handle_x = out->track_x0 + frac * (out->track_x1 - out->track_x0);
+
+    /* DEFAULT button: a box to the right of the track */
+    float def_cx = out->track_x1 + 0.16f, def_hw = 0.13f, def_hh = 0.06f;
+    out->def_x0 = def_cx - def_hw; out->def_x1 = def_cx + def_hw;
+    out->def_y0 = out->row_y - def_hh; out->def_y1 = out->row_y + def_hh;
+
+    /* layout switcher: one clickable box per named layout, spread across the track
+     * width in a row a little below the slider handle. Same compute-once contract:
+     * render draws these rects and grab hit-tests them. */
+    int nl = m->layouts.n;
+    out->n_layout      = nl;
+    out->active_layout = m->layouts.active;
+    if (nl > 0) {
+        const float bh = 0.07f, bgap = 0.02f;
+        out->lay_y1 = out->row_y - out->handle_h * 0.5f - 0.06f;   /* top edge   */
+        out->lay_y0 = out->lay_y1 - bh;                            /* bottom edge */
+        float span = out->track_x1 - out->track_x0;
+        float bw = (span - bgap * (float)(nl - 1)) / (float)nl;
+        if (bw < 0.04f) bw = 0.04f;
+        out->lay_w = bw;
+        for (int k = 0; k < nl; k++)
+            out->lay_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
+    }
+    return true;
+}

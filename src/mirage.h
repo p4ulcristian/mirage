@@ -338,6 +338,42 @@ int  layout_screen_col(const struct mirage *m, int i); /* column index of screen
  * Sets *arc_total <= 0 when there are no column-placed screens. */
 void layout_wall_extent(const struct mirage *m, float *yaw_c, float *arc_total, float *top);
 
+/* Sensitivity slider (in-view widget): one draggable handle sets yaw_gain and
+ * pitch_gain together (look sensitivity), a DEFAULT button resets them. render.c
+ * draws it under the centre screen alongside the GAZE/FPS plaques; grab.c hit-tests
+ * a cursor against it and drives the value. The geometry is computed ONCE here so
+ * the picture and the click can't disagree (the same trick layout_pick plays for
+ * the screens). Everything is in the centre screen's LOCAL frame (metres, on the
+ * z = -d plane), so render multiplies by layout_model_matrix(ci) and grab maps a
+ * cursor (yaw,pitch) into it via x = d*tan(yaw_c - cyaw), y = d*tan(cpitch) - lift_c. */
+typedef struct {
+    int   ci;                 /* centre screen the panel hangs under        */
+    float d;                  /* eye->wall distance (m)                     */
+    float yaw_c, lift_c;      /* centre screen placement (rad, m): cursor->local */
+    float gain;               /* current linked yaw/pitch gain              */
+    float row_y;              /* local y of the slider row centre (m)       */
+    float track_x0, track_x1; /* track ends (m); handle slides between them */
+    float track_h;            /* track thickness (m)                        */
+    float handle_x;           /* handle centre x for the current gain (m)   */
+    float handle_w, handle_h;
+    float def_x0, def_x1, def_y0, def_y1;  /* DEFAULT button rect (m)       */
+    /* layout switcher: a clickable box per loaded named layout, in one row below
+     * the slider. Buttons share a vertical extent; each has its own centre x. */
+    int   n_layout;                        /* buttons to draw (= layouts.n) */
+    int   active_layout;                   /* index applied now (highlight)  */
+    float lay_y0, lay_y1;                  /* button row vertical extent (m) */
+    float lay_w;                           /* each button's width (m)        */
+    float lay_cx[MIRAGE_MAX_LAYOUTS];      /* each button's centre x (m)     */
+} sens_panel;
+
+#define SENS_GAIN_MIN 1.0f
+#define SENS_GAIN_MAX 16.0f
+#define SENS_GAIN_DEF 8.0f    /* matches config.cpp yaw_gain/pitch_gain default */
+
+/* Fill *out with the slider geometry for the current frame; false if there's no
+ * screen to hang it under. Shared by render (draw) and grab (hit-test). */
+bool sens_panel_compute(const struct mirage *m, sens_panel *out);
+
 /* grab.c - Super+G input capture: lock the real pointer, read raw motion, and
  * drive a cursor across the virtual screens as one continuous strip. */
 bool grab_init(struct mirage *m);

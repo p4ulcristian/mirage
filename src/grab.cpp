@@ -52,6 +52,8 @@ typedef struct {
     bool super;                 /* Super held? (from the un-grabbed kbd)  */
     bool alt;                   /* Alt held? (gates the Alt+N layout combo) */
     bool world_drag;            /* left-press on empty space: drag spins the world */
+    bool sens_drag;             /* left-press on the sensitivity handle: drag sets gain */
+    bool sens_click;            /* consumed a left-press on the widget: swallow its release */
     double shake_pdx, shake_pdy;  /* previous motion vector (shake-to-gaze detector) */
     int      shake_count;         /* recent direction reversals                      */
     uint32_t shake_last_ms;       /* time of the last reversal                       */
@@ -194,6 +196,36 @@ static void push_cursor(grab_state *g) {
     zwlr_virtual_pointer_v1_frame(g->vp[s]);
 }
 
+/* Sensitivity slider helpers. The handle and DEFAULT button live in the centre
+ * screen's local frame (sens_panel_compute); a cursor (cyaw,cpitch) maps in via
+ * x = d*tan(yaw_c - cyaw), y = d*tan(cpitch) - lift_c - the inverse of how render
+ * places the panel, so a click lands where the picture shows it. */
+static void sens_cursor_local(grab_state *g, const sens_panel *sp, float *lx, float *ly) {
+    *lx = sp->d * tanf(sp->yaw_c - (float)g->cyaw);
+    *ly = sp->d * tanf((float)g->cpitch) - sp->lift_c;
+}
+
+/* Persist the linked yaw/pitch gain into profile.toml, same path calib.cpp uses, so
+ * the dialed-in look sensitivity survives a restart (and a layout switch re-stamps
+ * it via profile_apply). */
+static void sens_persist(struct mirage *m) {
+    profile_apply(&m->calib_cfg, &m->cfg);
+    std::string p = profile_default_path();
+    profile_save(p.c_str(), &m->calib_cfg);
+    m->have_profile = true;
+}
+
+/* Map the handle's x (clamped to the track) to a gain and set BOTH yaw and pitch
+ * (one knob: look sensitivity). */
+static void sens_set_from_local(struct mirage *m, const sens_panel *sp, float lx) {
+    float frac = (lx - sp->track_x0) / (sp->track_x1 - sp->track_x0);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    float gain = SENS_GAIN_MIN + frac * (SENS_GAIN_MAX - SENS_GAIN_MIN);
+    m->cfg.yaw_gain = gain;
+    m->cfg.pitch_gain = gain;
+}
+
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
     float z = g->m->zoom > 0.0f ? g->m->zoom : 1.0f;
@@ -315,6 +347,15 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             if (g->cpitch < -1.4) g->cpitch = -1.4;
         }
         push_cursor(g);
+        /* dragging the sensitivity handle: the cursor moved above, so slide the
+         * gain to wherever it now sits along the track (handle follows the cursor). */
+        if (g->sens_drag) {
+            sens_panel sp;
+            if (sens_panel_compute(g->m, &sp)) {
+                float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
+                sens_set_from_local(g->m, &sp, lx);
+            }
+        }
         break;
     }
     case LIBINPUT_EVENT_POINTER_BUTTON: {
@@ -325,6 +366,49 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         if (calib_active(g->m)) {        /* calibration: a click advances the wizard */
             if (btn == BTN_LEFT && st) calib_click(g->m);
             break;
+        }
+        /* Sensitivity slider: a left-press on the handle/track grabs it (drag in
+         * MOTION sets the gain), a press on DEFAULT resets to 8x. Checked before the
+         * world-grab below so a click on the widget never spins the world or reaches
+         * a screen. The release that ends a drag is swallowed and saves the profile. */
+        if (btn == BTN_LEFT) {
+            sens_panel sp;
+            if (st && sens_panel_compute(g->m, &sp)) {
+                float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
+                if (lx >= sp.def_x0 && lx <= sp.def_x1 && ly >= sp.def_y0 && ly <= sp.def_y1) {
+                    g->m->cfg.yaw_gain = g->m->cfg.pitch_gain = SENS_GAIN_DEF;
+                    sens_persist(g->m);
+                    g->sens_click = true;            /* swallow the matching release */
+                    std::print(stderr, "grab: sensitivity reset to {}x\n", SENS_GAIN_DEF);
+                    break;
+                }
+                /* layout switcher: a click on the Nth box applies that named layout. */
+                int lhit = -1;
+                for (int k = 0; k < sp.n_layout; k++)
+                    if (lx >= sp.lay_cx[k] - sp.lay_w*0.5f && lx <= sp.lay_cx[k] + sp.lay_w*0.5f &&
+                        ly >= sp.lay_y0 && ly <= sp.lay_y1) { lhit = k; break; }
+                if (lhit >= 0) {
+                    layouts_switch(g->m, lhit);
+                    g->sens_click = true;            /* swallow the matching release */
+                    break;
+                }
+                float band = fmaxf(sp.handle_h, sp.track_h) * 0.5f + 0.03f;
+                if (lx >= sp.track_x0 - 0.05f && lx <= sp.track_x1 + 0.05f &&
+                    ly >= sp.row_y - band && ly <= sp.row_y + band) {
+                    g->sens_drag = g->sens_click = true;
+                    sens_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
+                    break;
+                }
+            }
+            if (!st && g->sens_click) {
+                bool was_drag = g->sens_drag;
+                g->sens_drag = g->sens_click = false;
+                if (was_drag) {
+                    sens_persist(g->m);
+                    std::print(stderr, "grab: sensitivity {}x\n", g->m->cfg.yaw_gain);
+                }
+                break;
+            }
         }
         /* Left-press on empty space (a gap) grabs the WORLD: the drag rotates it
          * around you (handled in MOTION) and no click reaches a screen. A press on a

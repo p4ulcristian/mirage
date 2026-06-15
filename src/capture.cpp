@@ -306,7 +306,13 @@ mirage_status capture_init(struct mirage *m) {
     if (has_gl_ext("GL_EXT_texture_filter_anisotropic")) {
         GLfloat amax = 1.0f;
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
-        g_aniso = amax > 2.0f ? 2.0f : amax;
+        /* Use the hardware max, not a 2x cap. The desktops are minified hard onto
+         * the arc (a 2160-tall portrait into ~23deg especially), and anisotropic
+         * sampling averages along that steep minification axis - the single biggest
+         * lever against the shimmer/sparkle on text as the head moves. It works off
+         * the base level here (these are EGLImage externals with no mip chain), so a
+         * higher cap = more taps = less aliasing, for free. */
+        g_aniso = amax;
         std::print(stderr, "capture: anisotropic filtering up to {:.0f}x\n", g_aniso);
     }
 
