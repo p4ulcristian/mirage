@@ -65,6 +65,15 @@ static struct {
     vec3  pos_ref;         /* reference subtracted on read (rest = origin)     */
     uint64_t pos_last_us;  /* timestamp of previous position sample (for dt)   */
     oneeuro_s oe_px, oe_py, oe_pz;  /* per-axis One-Euro filters               */
+
+    /* Visual-inertial complementary filter (the VOR-style fusion): the IMU's linear
+     * acceleration carries the FAST position (low latency), the camera anchors the
+     * ABSOLUTE position (kills the accel's integration drift). fpos/fvel are the fused
+     * world-frame state in metres / m·s⁻¹. */
+    bool  fuse_have;       /* at least one accel sample integrated            */
+    uint64_t accel_last_us;
+    vec3  fvel;            /* fused velocity (mirage world, m/s)              */
+    vec3  fpos;            /* fused position (mirage world, m)                */
 } P = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
@@ -257,15 +266,27 @@ static quat device_to_mirage(quat dev) {
  * quaternion {w,x,y,z} of 4 little-endian doubles. We use the quaternion (not
  * OpenTrack euler) end-to-end precisely so there is no gimbal lock when reclined.
  * device_to_mirage applies the fixed device->mirage axis change; that is all. */
+static void submit_accel(vec3 a);   /* defined below, after submit_pos */
+
 static void run_opentrack(void) {
     uint8_t buf[256];
     while (P.running) {
         ssize_t n = recv(P.fd, buf, sizeof buf, 0);
         if (n < (ssize_t)(4 * sizeof(double))) continue;
-        double d[4];
-        memcpy(d, buf, sizeof d);  /* little-endian doubles, x86/arm LE */
+        size_t have = (size_t)n / sizeof(double);
+        double d[7];
+        memcpy(d, buf, (have >= 7 ? 7 : 4) * sizeof(double));  /* LE doubles, x86/arm */
         quat dev = {(float)d[0], (float)d[1], (float)d[2], (float)d[3]};
         submit_raw(device_to_mirage(q_norm(dev)));
+        /* optional 3 extra doubles (newer bridge) = earth-frame linear acceleration for
+         * the visual-inertial complementary filter. Remap earth->mirage world with the
+         * SAME B as the orientation, then fuse. Old 4-double bridges just skip this and
+         * mirage falls back to the camera-only position path. */
+        if (have >= 7 && P.cfg.facecam_enable && P.cfg.facecam_fusion) {
+            const quat B = {0.5f, -0.5f, -0.5f, -0.5f};
+            vec3 a_earth = {(float)d[4], (float)d[5], (float)d[6]};
+            submit_accel(q_rotate(B, a_earth));
+        }
     }
 }
 
@@ -363,6 +384,42 @@ static void submit_pos(vec3 raw) {
     P.pos_raw = raw;
     P.pos_last_us = t;
     if (!P.pos_ref_set) { P.pos_ref = P.pos_smoothed; P.pos_ref_set = true; }
+    pthread_mutex_unlock(&P.lock);
+}
+
+/* One complementary-filter step from a linear-acceleration sample (mirage world frame,
+ * gravity already removed by the bridge). PREDICT: integrate accel -> velocity -> position
+ * for the fast, low-latency motion, leaking velocity toward zero so a constant accel bias
+ * can't run the position away (bias -> bounded velocity instead of unbounded drift).
+ * CORRECT: pull the fused position toward the camera's absolute (One-Euro) position over
+ * TAU_C, so the slow-but-drift-free camera anchors the fast-but-drifting inertial estimate.
+ * The accel and the orientation arrive in the same packet, so they're already time-synced. */
+static void submit_accel(vec3 a) {
+    pthread_mutex_lock(&P.lock);
+    uint64_t t = now_us();
+    float dt;
+    if (!P.fuse_have) {
+        P.fuse_have = true;
+        P.fvel = (vec3){0,0,0};
+        P.fpos = P.pos_have ? P.pos_smoothed : (vec3){0,0,0};  /* start at the camera */
+        dt = 0.002f;
+    } else {
+        dt = (float)(t - P.accel_last_us) / 1000000.0f;
+        if (dt < 1e-4f) dt = 1e-4f;
+        if (dt > 0.05f) dt = 0.05f;        /* a stall shouldn't fling the integrator */
+    }
+    P.accel_last_us = t;
+
+    const float TAU_V = 0.4f;   /* velocity leak (s): bounds accel-bias drift        */
+    const float TAU_C = 0.15f;  /* camera correction time const (s): lower = trust cam */
+    P.fvel = v3_add(P.fvel, v3_scale(a, dt));        /* integrate accel -> velocity   */
+    P.fvel = v3_scale(P.fvel, expf(-dt / TAU_V));    /* leak                          */
+    P.fpos = v3_add(P.fpos, v3_scale(P.fvel, dt));   /* integrate velocity -> position*/
+    if (P.pos_have) {                                /* correct toward the camera     */
+        float kc = dt / TAU_C;
+        if (kc > 1.0f) kc = 1.0f;
+        P.fpos = v3_add(P.fpos, v3_scale(v3_sub(P.pos_smoothed, P.fpos), kc));
+    }
     pthread_mutex_unlock(&P.lock);
 }
 
@@ -500,10 +557,24 @@ static inline float clampf(float v, float lim) {
 vec3 pose_position(float horizon_s) {
     pthread_mutex_lock(&P.lock);
     vec3 out = {0,0,0};
-    if (P.pos_have && P.pos_ref_set) {
-        float h = horizon_s > 0.0f ? horizon_s : 0.0f;
-        const float PCAP = 0.04f;   /* max predicted lead per axis (m) */
-        const float LIM  = 0.40f;   /* max total offset (anti-fling)   */
+    float h = horizon_s > 0.0f ? horizon_s : 0.0f;
+    const float PCAP = 0.04f;   /* max predicted lead per axis (m) */
+    const float LIM  = 0.40f;   /* max total offset (anti-fling)   */
+    /* Prefer the fused (visual-inertial) estimate: it carries the camera's absolute
+     * position but with the IMU's low latency. Use it only while accel is actually
+     * arriving (else fall back to the camera-only One-Euro path). fpos shares the
+     * camera's absolute frame (it's continuously corrected toward pos_smoothed), so the
+     * same recenter reference applies to both. */
+    bool fusing = P.fuse_have && P.cfg.facecam_fusion && P.pos_ref_set &&
+                  (now_us() - P.accel_last_us) < 200000ull;
+    if (fusing) {
+        float px = P.fpos.x + clampf(P.fvel.x * h, PCAP);   /* real velocity lead */
+        float py = P.fpos.y + clampf(P.fvel.y * h, PCAP);
+        float pz = P.fpos.z + clampf(P.fvel.z * h, PCAP);
+        out.x = clampf(px - P.pos_ref.x, LIM);
+        out.y = clampf(py - P.pos_ref.y, LIM);
+        out.z = clampf(pz - P.pos_ref.z, LIM);
+    } else if (P.pos_have && P.pos_ref_set) {
         float px = P.pos_smoothed.x + clampf(P.oe_px.dxhat * h, PCAP);
         float py = P.pos_smoothed.y + clampf(P.oe_py.dxhat * h, PCAP);
         float pz = P.pos_smoothed.z + clampf(P.oe_pz.dxhat * h, PCAP);

@@ -119,6 +119,8 @@ typedef struct {
     float facecam_lateral_gain; /* eye shift per metre of measured x/y head move; <0 flips axis */
     float facecam_depth_gain;   /* same for lean in/out (z); depth is noisier, keep modest */
     float facecam_smooth;       /* One-Euro rest cutoff (Hz) in the pose thread; lower = steadier */
+    bool  facecam_fusion;       /* fuse IMU linear-accel for low-latency position (VOR-style);
+                                 * needs the rayneo bridge to emit accel. Off = camera-only */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 

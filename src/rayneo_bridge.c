@@ -36,6 +36,44 @@ static double now_sec(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+/* Rotate body-frame vector v by AHRS quaternion q (w,x,y,z) into the earth frame:
+ * the Madgwick q maps sensor->earth, so v_earth = q (x) v (x) q*. Standard form. */
+static void q_rotate_vec(const float q[4], const float v[3], float out[3]) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    /* t = 2 * (q.xyz X v) */
+    float tx = 2.0f * (y*v[2] - z*v[1]);
+    float ty = 2.0f * (z*v[0] - x*v[2]);
+    float tz = 2.0f * (x*v[1] - y*v[0]);
+    /* v + w*t + q.xyz X t */
+    out[0] = v[0] + w*tx + (y*tz - z*ty);
+    out[1] = v[1] + w*ty + (z*tx - x*tz);
+    out[2] = v[2] + w*tz + (x*ty - y*tx);
+}
+
+/* Linear acceleration (m/s^2, EARTH frame, gravity removed) for the 6DoF position
+ * complementary filter in mirage. The accelerometer reads specific force = linear
+ * accel + the gravity reaction; in the earth frame gravity is a CONSTANT vector, so
+ * we estimate it as a slow low-pass of the earth-frame reading and subtract it. This
+ * is convention-agnostic (whatever axis "up" is, and any constant accel bias, falls
+ * into the low-pass) and is exactly the high-pass half of the complementary filter:
+ * we keep the fast linear motion, drop the DC gravity+bias. grav_lp seeds on the
+ * first call. */
+static void linear_accel_earth(const float q[4], const float accel_body[3],
+                               float dt, float grav_lp[3], int *seeded,
+                               float out[3]) {
+    float ae[3];
+    q_rotate_vec(q, accel_body, ae);            /* body -> earth */
+    if (!*seeded) { grav_lp[0]=ae[0]; grav_lp[1]=ae[1]; grav_lp[2]=ae[2]; *seeded=1; }
+    /* gravity tracker: ~1.0 s time constant, clamped if dt is odd */
+    float a = dt / (1.0f + dt);                 /* == dt/(tau+dt), tau=1 s */
+    if (a < 0.0f) a = 0.0f;
+    else if (a > 1.0f) a = 1.0f;
+    for (int i = 0; i < 3; i++) {
+        grav_lp[i] += a * (ae[i] - grav_lp[i]);
+        out[i] = ae[i] - grav_lp[i];
+    }
+}
+
 /* Magnetometer calibration (the figure-8). The raw magnetometer reads an offset,
  * stretched ellipsoid instead of a sphere centred on zero - hard-iron shifts the
  * centre, soft-iron stretches the axes. We sweep the glasses through every
@@ -189,6 +227,7 @@ int main(int argc, char **argv) {
 
     rayneo_ahrs ahrs;
     rayneo_ahrs_init(&ahrs, beta);
+    float grav_lp[3] = {0,0,0}; int grav_seeded = 0;   /* earth-frame gravity tracker */
     fprintf(stderr, "rayneo-bridge: beta=%.3f deadband=%.2f deg/s, dt from device tick\n",
             beta, deadband_dps);
 
@@ -283,7 +322,14 @@ int main(int argc, char **argv) {
          * at pitch +-90 deg (looking straight up/down, e.g. reclined) and spins
          * the view. The quaternion carries the same orientation with no gimbal
          * lock. (yaw/pitch/roll above are still computed for --verbose logging.) */
-        double pkt[4] = { ahrs.q[0], ahrs.q[1], ahrs.q[2], ahrs.q[3] };
+        /* Earth-frame linear acceleration (gravity removed) rides in the SAME packet
+         * as the orientation it was measured with - so mirage's position filter gets
+         * the IMU's translation perfectly time-synced to the rotation, no cross-sensor
+         * offset to estimate. Packet grows 4 -> 7 doubles; mirage reads either length. */
+        float lin[3];
+        linear_accel_earth(ahrs.q, s.accel, dt, grav_lp, &grav_seeded, lin);
+        double pkt[7] = { ahrs.q[0], ahrs.q[1], ahrs.q[2], ahrs.q[3],
+                          lin[0], lin[1], lin[2] };
         if (sendto(fd, pkt, sizeof pkt, 0, (struct sockaddr*)&dst, sizeof dst) < 0 && verbose)
             perror("sendto");
 

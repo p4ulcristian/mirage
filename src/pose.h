@@ -58,6 +58,12 @@ typedef struct {
     bool  facecam_enable;
     const char *facecam_socket;  /* unix dgram path (default /tmp/mirage-facecam.sock) */
     float facecam_smooth;        /* One-Euro rest cutoff (Hz); lower = steadier/laggier (~1.2) */
+    /* Visual-inertial fusion: integrate the IMU's linear acceleration (sent by the
+     * rayneo bridge alongside orientation) for low-latency position, corrected by the
+     * camera's absolute position. Falls back to camera-only if the bridge sends no
+     * accel or this is off. Mirrors the vestibulo-ocular reflex: fast inertial, slow
+     * visual correction. */
+    bool  facecam_fusion;
 } pose_config;
 
 /* Start the reader thread. Returns 0 on success, -1 on error. */
