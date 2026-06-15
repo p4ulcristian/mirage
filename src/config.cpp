@@ -76,7 +76,9 @@ void mirage_config_defaults(mirage_config *c) {
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
     c->facecam_enable        = true;  /* webcam head-position tracking (run facecam-bridge alongside) */
     c->facecam_lateral_gain  = 1.0f;  /* 1:1 lean/slide -> eye shift; flip sign if left/right is inverted */
-    c->facecam_depth_gain    = 0.5f;  /* lean in/out -> wall nearer/further; depth is the noisy axis, so start gentle (raise toward 1.0 for more dramatic lean-in) */
+    c->facecam_depth_gain    = 0.0f;  /* lean in/out (depth) OFF: barely used at a desk and the
+                                       * noisiest single-camera axis. Lateral (x) + vertical (y)
+                                       * parallax stay on. Set >0 (e.g. 0.5) to re-enable lean-in. */
     c->facecam_smooth        = 1.2f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier, raise if it feels sluggish */
     c->facecam_fusion        = true;  /* fuse IMU accel for low-latency position (needs the accel-emitting bridge) */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
