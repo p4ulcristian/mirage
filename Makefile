@@ -57,15 +57,28 @@ MIRAGE_OBJ := $(MIRAGE_SRC:src/%.cpp=build/obj/%.o) $(PROTO_OBJ)
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o
 
-.PHONY: all posedump protocols bridge clean
+# facecam 6DoF bridge (webcam head-position tracker) - separate target so OpenCV is
+# only required when you actually build it, like the rayneo bridge.
+OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
+# Link only the modules we use - pkg-config --libs opencv4 pulls in viz/hdf (VTK,
+# HDF5) which over-link and fail. FaceDetectorYN lives in objdetect over dnn.
+OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
+                 -lopencv_objdetect -lopencv_dnn
+
+.PHONY: all posedump protocols bridge facecam clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
+facecam: facecam-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
 
 rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
 	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
 	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
+
+facecam-bridge: src/facecam_bridge.cpp
+	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra $(OPENCV_CFLAGS) \
+	    -o $@ $< $(OPENCV_LIBS)
 
 mirage: $(MIRAGE_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
@@ -94,4 +107,4 @@ build/proto build/obj:
 	mkdir -p $@
 
 clean:
-	rm -rf build mirage mirage-posedump
+	rm -rf build mirage mirage-posedump rayneo-bridge facecam-bridge

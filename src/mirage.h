@@ -110,6 +110,14 @@ typedef struct {
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
     float neck_fwd_m;           /* eye distance ahead of the neck pivot (parallax; 0 = off) */
     float neck_up_m;            /* eye height above the neck pivot (parallax)      */
+
+    /* facecam 6DoF: webcam-measured head POSITION on top of the 3DoF IMU rotation
+     * (see src/facecam_bridge.cpp). The bridge sends position to the pose layer;
+     * these gains map measured head movement to eye translation in the render. */
+    bool  facecam_enable;       /* listen for webcam head position (lean/slide parallax) */
+    float facecam_lateral_gain; /* eye shift per metre of measured x/y head move; <0 flips axis */
+    float facecam_depth_gain;   /* same for lean in/out (z); depth is noisier, keep modest */
+    float facecam_smooth;       /* One-Euro rest cutoff (Hz) in the pose thread; lower = steadier */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 

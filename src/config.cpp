@@ -57,7 +57,10 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_port         = 4242;
     c->pose_smoothing    = 0.08f;  /* legacy fixed nlerp @500Hz (only if --smooth) */
     c->pose_oneeuro      = true;   /* One-Euro adaptive filter is the default      */
-    c->pose_mincutoff    = 0.5f;   /* steadiness at rest (Hz); lower = steadier     */
+    c->pose_mincutoff    = 3.0f;   /* settle speed when stopping (Hz); higher = snappier
+                                    * settle, less creep-in. The speed-gated reading
+                                    * deadband (render.cpp) freezes tremor when still, so
+                                    * mincutoff no longer has to be tiny to be steady. */
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
     c->pose_drift_tau    = 1.0f;   /* cancel 6-axis heading creep when still (s); 0 = off */
     c->pose_predict_ms   = 18.0f;  /* forward-predict head ~18 ms so the wall stays nailed mid-turn (0 = off) */
@@ -71,6 +74,10 @@ void mirage_config_defaults(mirage_config *c) {
     c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
+    c->facecam_enable        = true;  /* webcam head-position tracking (run facecam-bridge alongside) */
+    c->facecam_lateral_gain  = 1.0f;  /* 1:1 lean/slide -> eye shift; flip sign if left/right is inverted */
+    c->facecam_depth_gain    = 0.5f;  /* lean in/out -> wall nearer/further; depth is the noisy axis, so start gentle (raise toward 1.0 for more dramatic lean-in) */
+    c->facecam_smooth        = 1.2f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier, raise if it feels sluggish */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */

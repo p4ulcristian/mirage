@@ -1,4 +1,5 @@
 #include "mirage.h"
+#include "pose.h"
 #include "handle.hpp"
 #include "entity.hpp"
 #include <stdio.h>
@@ -849,14 +850,32 @@ void render_frame(struct mirage *m, quat head) {
      * threshold and passes through with only ~deadband worth of lag. */
     if (m->cfg.read_deadband_deg > 0.0f) {
         static quat presented; static bool seeded = false;
+        /* A recenter snaps the relative orientation; reseed so the deadband doesn't
+         * slew the held pose across to the new forward over several frames. */
+        static uint32_t last_recenter_gen = 0;
+        uint32_t rg = pose_recenter_gen();
+        if (rg != last_recenter_gen) { seeded = false; last_recenter_gen = rg; }
         if (!seeded) { presented = head; seeded = true; }
         else {
+            /* Speed-gate the deadband. A fixed deadband freezes tremor when still
+             * (good) but during a SLOW pan the gap-to-live hovers right at the
+             * threshold, so `follow` flickers around zero -> erratic micro-jumps
+             * (the slow-pan jitter). Fade the deadband to zero as soon as the head
+             * is actually moving: full freeze when still, smooth 1:1 follow once
+             * panning, so there's no unstable threshold band to sit in. Gate on the
+             * physical (pre-gain) head speed - what "moving" actually means. */
+            float spd = pose_speed();                        /* rad/s, physical */
+            const float STILL = 2.0f * (float)(M_PI/180.0);  /* full deadband below 2 deg/s */
+            const float MOVE  = 7.0f * (float)(M_PI/180.0);  /* released by 7 deg/s         */
+            float mv = (spd - STILL) / (MOVE - STILL);
+            if (mv < 0.0f) mv = 0.0f;
+            if (mv > 1.0f) mv = 1.0f;
             float dot = presented.w*head.w + presented.x*head.x
                       + presented.y*head.y + presented.z*head.z;
             if (dot < 0.0f) dot = -dot;
             if (dot > 1.0f) dot = 1.0f;
             float ang = 2.0f * acosf(dot);                 /* rad moved this frame */
-            float db  = m->cfg.read_deadband_deg * (float)M_PI/180.0f;
+            float db  = m->cfg.read_deadband_deg * (float)M_PI/180.0f * (1.0f - mv);
             float follow = ang > 1e-6f ? (ang - db) / ang : 0.0f;
             if (follow < 0.0f) follow = 0.0f;              /* inside deadband: freeze */
             presented = q_nlerp(presented, head, follow);
@@ -886,6 +905,16 @@ void render_frame(struct mirage *m, quat head) {
      * the 3DoF stream. eye_world rotates the fixed local offset by the presented
      * head, so the parallax stays consistent with the orientation we render. */
     vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
+    /* facecam: real measured head translation (lean in, slide sideways) on top of the
+     * neck-model arc. The IMU can't sense this; the webcam bridge supplies it. Lateral
+     * (x/y) and depth (z) get separate gains so depth — the noisier axis — can be
+     * dialled independently. pose_position() is {0,0,0} when facecam is off/silent. */
+    if (m->cfg.facecam_enable) {
+        vec3 hp = pose_position();
+        eye_world = v3_add(eye_world, v3(hp.x * m->cfg.facecam_lateral_gain,
+                                         hp.y * m->cfg.facecam_lateral_gain,
+                                         hp.z * m->cfg.facecam_depth_gain));
+    }
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);

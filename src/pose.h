@@ -4,12 +4,12 @@
  * selected backend and keeps the latest orientation available lock-protected.
  *
  * Contract with the IMU driver (you write the driver, mirage consumes pose):
- *   POSE_OPENTRACK_UDP : driver sends OpenTrack packets to 127.0.0.1:<port>.
- *                        Packet = 6 little-endian doubles {x,y,z,yaw,pitch,roll}
- *                        with yaw/pitch/roll in DEGREES. (translation ignored
- *                        for 3DoF.) This is what XRLinuxDriver --opentrack-app
- *                        already emits, so a RayNeo plugin into that driver
- *                        works with zero glue.
+ *   POSE_OPENTRACK_UDP : driver sends datagrams to 127.0.0.1:<port>, each a head
+ *                        orientation QUATERNION of 4 little-endian doubles
+ *                        {w,x,y,z}. We use a quaternion, not OpenTrack's euler
+ *                        {x,y,z,yaw,pitch,roll}, end-to-end on purpose: there is
+ *                        no gimbal lock when reclined. The rayneo-bridge emits
+ *                        this directly (see rayneo_bridge.c).
  *   POSE_JSON_SOCKET   : driver writes newline-delimited JSON to a unix dgram
  *                        socket: {"quat":[w,x,y,z]}  (any extra keys ignored).
  *   POSE_BREEZY_SHM    : reads /dev/shm/breezy_desktop_imu (quaternion). [TODO]
@@ -40,15 +40,24 @@ typedef struct {
      * oe_dcutoff is the derivative low-pass cutoff (1 Hz is fine, not exposed). */
     bool  use_oneeuro;
     float oe_mincutoff, oe_beta, oe_dcutoff;
-    /* per-axis sign for OpenTrack euler input (+1 or -1); 0 treated as +1.
-     * Lets you flip a device whose yaw/pitch/roll runs opposite to head motion. */
-    float sign_yaw, sign_pitch, sign_roll;
     /* Heading-drift compensation time constant (s); 0 = off. A 6-axis IMU has no
      * absolute heading so it slowly creeps, and the comfort gain magnifies it.
      * When the head is still, the recenter reference is leaked toward the current
      * orientation with this tau, cancelling the creep while leaving real head
      * motion (well above the stillness gate) untouched. ~1 s is a good default. */
     float drift_comp_tau;
+
+    /* Facecam 6DoF: an OPTIONAL second input supplying head POSITION (the IMU above
+     * gives orientation only — it physically cannot sense translation). When enabled,
+     * a separate thread listens on facecam_socket for unix-dgram JSON
+     *   {"pos":[x,y,z]}   x,y in metres (mirage world axes, +x right/+y up),
+     *                     z = camera->head distance in metres (smaller = leaned in)
+     * sent by facecam_bridge (webcam + face detector). It runs independently of the
+     * orientation backend, so the RayNeo IMU keeps driving rotation untouched.
+     * facecam_enable=false (or socket=NULL) disables it; pose_position() then is 0. */
+    bool  facecam_enable;
+    const char *facecam_socket;  /* unix dgram path (default /tmp/mirage-facecam.sock) */
+    float facecam_smooth;        /* One-Euro rest cutoff (Hz); lower = steadier/laggier (~1.2) */
 } pose_config;
 
 /* Start the reader thread. Returns 0 on success, -1 on error. */
@@ -66,8 +75,19 @@ quat pose_latest(void);
  * while you turn). horizon_s <= 0 == pose_latest(). */
 quat pose_predicted(float horizon_s);
 
-/* Set the current raw orientation as the new "looking straight ahead" zero. */
+/* Latest head POSITION as a world-axis eye offset (metres) relative to the reference
+ * captured at the last recenter — so rest = {0,0,0}, +x = lean right, +y = lean up,
+ * -z = lean toward the wall. Returns {0,0,0} when facecam is disabled or has no signal
+ * yet. render adds this into the eye translation for real lean/slide parallax. */
+vec3 pose_position(void);
+
+/* Set the current raw orientation as the new "looking straight ahead" zero. Also
+ * snaps the facecam position reference to here, so a recenter zeroes lean too. */
 void pose_recenter(void);
+
+/* Counter that bumps on every recenter. render watches it to reseed the reading-
+ * deadband, so a recenter snaps cleanly instead of slewing from the stale hold. */
+uint32_t pose_recenter_gen(void);
 
 /* Monotonic milliseconds since the last fresh sample (UINT32_MAX if none).
  * NB: this is sender staleness only — it does NOT include the smoothing-filter
@@ -91,5 +111,9 @@ bool pose_smoothing_enabled(void);
 
 /* Has at least one sample been received? */
 bool pose_has_signal(void);
+
+/* Low-passed head angular speed (rad/s). render gates the reading-deadband on this
+ * (freeze when still, release when panning) to kill slow-pan jitter. */
+float pose_speed(void);
 
 #endif /* MIRAGE_POSE_H */

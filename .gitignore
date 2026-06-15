@@ -5,6 +5,7 @@ build/
 mirage
 mirage-posedump
 rayneo-bridge
+facecam-bridge
 # logs / runtime
 *.log
 *.pid

@@ -29,6 +29,11 @@ static quat recenter_ref(quat q) {
     return q_norm(q);
 }
 
+/* One-Euro filter state for a single scalar (used per position axis). Unlike a fixed
+ * EMA, its cutoff rises with signal speed, so it holds steady at rest yet doesn't lag
+ * a real lean — the right tool for jittery webcam position at 100+ fps. */
+struct oneeuro_s { bool init; float xhat, dxhat; };
+
 static struct {
     pose_config cfg;
     pthread_t   thread;
@@ -45,9 +50,21 @@ static struct {
     bool have_signal;
     bool want_recenter;
     bool smooth_on;       /* runtime A/B toggle; raw passthrough when false  */
-    uint64_t last_sample_ms;
+    uint64_t last_sample_us;
     uint32_t sample_count; /* raw samples since last pose_take_sample_count() */
+    uint32_t recenter_gen; /* bumps on every recenter; lets render reseed its deadband */
     int fd;          /* listening socket / source fd             */
+
+    /* Facecam position channel (independent of the orientation backend above). */
+    pthread_t pos_thread;
+    int   pos_fd;          /* unix-dgram listening socket for {"pos":[x,y,z]}  */
+    bool  pos_have;        /* a position sample has arrived                    */
+    bool  pos_ref_set;     /* reference captured (first sample / recenter)     */
+    vec3  pos_raw;         /* latest decoded position (camera/world frame, m)  */
+    vec3  pos_smoothed;    /* One-Euro-filtered position                       */
+    vec3  pos_ref;         /* reference subtracted on read (rest = origin)     */
+    uint64_t pos_last_us;  /* timestamp of previous position sample (for dt)   */
+    oneeuro_s oe_px, oe_py, oe_pz;  /* per-axis One-Euro filters               */
 } P = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
@@ -55,6 +72,7 @@ static struct {
     .dvel = {1,0,0,0}, .sample_dt = 0.003f,
     .smooth_on = true,
     .fd = -1,
+    .pos_fd = -1,
 };
 
 /* One-Euro low-pass smoothing factor for a given cutoff (Hz) and timestep (s):
@@ -73,10 +91,15 @@ static float quat_angle(quat a, quat b) {
     return 2.0f * acosf(d);
 }
 
-static uint64_t now_ms(void) {
+/* Microseconds, not milliseconds: at 500 Hz the inter-sample period is 2 ms, so a
+ * millisecond clock quantizes consecutive samples into the same tick (dt=0, clamped)
+ * or 1/3 ms splits, which makes speed = angle/dt swing wildly and spike the One-Euro
+ * cutoff right when the head is still. Microsecond resolution removes that jitter at
+ * the source. */
+static uint64_t now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 /* Push a freshly-decoded raw orientation into shared state. */
@@ -86,7 +109,7 @@ static void submit_raw(quat raw) {
         P.reference = recenter_ref(raw);
         P.want_recenter = false;
     }
-    uint64_t t = now_ms();
+    uint64_t t = now_us();
     quat prev_smoothed = P.smoothed;   /* before this frame's filter update */
     bool had_signal    = P.have_signal;
     if (!P.have_signal) {
@@ -104,7 +127,7 @@ static void submit_raw(quat raw) {
         /* One-Euro: cutoff (and thus follow speed) rises with head angular
          * speed, so the image locks when you hold still yet keeps up when you
          * turn — the fixed nlerp can only ever be one of those two. */
-        float dt = (float)(t - P.last_sample_ms) / 1000.0f;
+        float dt = (float)(t - P.last_sample_us) / 1000000.0f;
         if (dt < 1e-4f) dt = 1e-4f;   /* clamp: dup timestamps / clock jumps */
         if (dt > 0.1f)  dt = 0.1f;    /* a long stall shouldn't spike speed */
 
@@ -134,7 +157,7 @@ static void submit_raw(quat raw) {
      * alone. All quaternion math - no euler - so it works in any posture. */
     float trace_sp = P.speed_lp * 180.0f/(float)M_PI; bool trace_engaged = false;
     if (had_signal && P.cfg.drift_comp_tau > 0.0f) {
-        float dt = (float)(t - P.last_sample_ms) / 1000.0f;
+        float dt = (float)(t - P.last_sample_us) / 1000000.0f;
         if (dt < 1e-4f) dt = 1e-4f;
         if (dt > 0.1f)  dt = 0.1f;
         /* Gate on the LOW-PASSED head speed (P.speed_lp), not one jittery frame:
@@ -167,10 +190,15 @@ static void submit_raw(quat raw) {
     }
     if (trc && (P.sample_count % 25 == 0)) {
         quat rel = q_norm(q_mul(q_conj(P.reference), P.smoothed));
+        /* dt_us = real inter-sample arrival gap. If these are frequently <1000 or
+         * clumped, a millisecond clock would have quantized them into speed spikes
+         * (the microsecond timebase fixes that); if they hover near a clean period,
+         * the timebase change is just insurance. */
+        unsigned long long dt_us = had_signal ? (unsigned long long)(t - P.last_sample_us) : 0;
         fprintf(trc, "in[% .4f % .4f % .4f % .4f] rel[% .4f % .4f % .4f % .4f] "
-                "sp=%6.2f deg/s gate=%s\n",
+                "sp=%6.2f deg/s dt=%5lluus gate=%s\n",
                 P.smoothed.w, P.smoothed.x, P.smoothed.y, P.smoothed.z,
-                rel.w, rel.x, rel.y, rel.z, trace_sp, trace_engaged ? "ON" : "off");
+                rel.w, rel.x, rel.y, rel.z, trace_sp, dt_us, trace_engaged ? "ON" : "off");
         fflush(trc);
     }
     /* Angular velocity for forward-prediction: the per-sample change in the
@@ -179,7 +207,7 @@ static void submit_raw(quat raw) {
      * photon horizon with q_scale_angle, so the wall stays nailed to the world while
      * you turn (the difference between readable and smeary text in motion). */
     if (had_signal) {
-        float vdt = (float)(t - P.last_sample_ms) / 1000.0f;
+        float vdt = (float)(t - P.last_sample_us) / 1000000.0f;
         if (vdt < 1e-4f) vdt = 1e-4f;
         if (vdt > 0.1f)  vdt = 0.1f;
         quat dq = q_mul(P.smoothed, q_conj(prev_smoothed));   /* world-frame step */
@@ -189,7 +217,7 @@ static void submit_raw(quat raw) {
 
     P.raw = raw;
     P.have_signal = true;
-    P.last_sample_ms = t;
+    P.last_sample_us = t;
     P.sample_count++;
     pthread_mutex_unlock(&P.lock);
 }
@@ -282,6 +310,79 @@ static void run_json_socket(void) {
     }
 }
 
+/* ---- Facecam position channel: unix-dgram JSON {"pos":[x,y,z]} ---- */
+static bool parse_pos_json(const char *s, vec3 *out) {
+    const char *p = strstr(s, "\"pos\"");
+    if (!p) return false;
+    p = strchr(p, '[');
+    if (!p) return false;
+    float v[3];
+    if (sscanf(p, "[ %f , %f , %f ]", &v[0], &v[1], &v[2]) != 3) return false;
+    *out = (vec3){v[0], v[1], v[2]};
+    return true;
+}
+
+/* One-Euro step for one scalar: low-pass whose cutoff = mincut + beta*|speed|, so it
+ * follows fast motion with little lag but smooths hard when nearly still. */
+static float oneeuro_step(oneeuro_s *s, float x, float dt, float mincut, float beta) {
+    if (!s->init) { s->init = true; s->xhat = x; s->dxhat = 0.0f; return x; }
+    float dx = (x - s->xhat) / dt;
+    float ad = oneeuro_alpha(1.0f, dt);            /* derivative cutoff = 1 Hz */
+    s->dxhat += ad * (dx - s->dxhat);
+    float cutoff = mincut + beta * fabsf(s->dxhat);
+    float a = oneeuro_alpha(cutoff, dt);
+    s->xhat += a * (x - s->xhat);
+    return s->xhat;
+}
+
+/* Fold a freshly decoded head position into shared state. The first sample (and any
+ * recenter) seeds the reference, so pose_position() reads zero at rest. One-Euro
+ * filtered per axis (face detection is jittery, especially z's apparent-size depth);
+ * depth gets a lower rest cutoff than x/y, so it's held steadier at the cost of a
+ * touch more lag. facecam_smooth sets the lateral rest cutoff (Hz, lower = steadier). */
+static void submit_pos(vec3 raw) {
+    pthread_mutex_lock(&P.lock);
+    uint64_t t = now_us();
+    if (!P.pos_have) {
+        P.pos_smoothed = raw;          /* seed filters, no lerp from a garbage origin */
+        oneeuro_step(&P.oe_px, raw.x, 0.01f, 1.0f, 0.0f);
+        oneeuro_step(&P.oe_py, raw.y, 0.01f, 1.0f, 0.0f);
+        oneeuro_step(&P.oe_pz, raw.z, 0.01f, 1.0f, 0.0f);
+        P.pos_have = true;
+    } else {
+        float dt = (float)(t - P.pos_last_us) / 1000000.0f;
+        if (dt < 1e-3f) dt = 1e-3f;
+        if (dt > 0.2f)  dt = 0.2f;
+        float mincut = P.cfg.facecam_smooth;       /* lateral rest cutoff (Hz) */
+        if (mincut <= 0.0f) mincut = 1.2f;
+        const float beta = 0.6f;                   /* speed coupling (less lag in motion) */
+        P.pos_smoothed.x = oneeuro_step(&P.oe_px, raw.x, dt, mincut, beta);
+        P.pos_smoothed.y = oneeuro_step(&P.oe_py, raw.y, dt, mincut, beta);
+        P.pos_smoothed.z = oneeuro_step(&P.oe_pz, raw.z, dt, mincut * 0.5f, beta);
+    }
+    P.pos_raw = raw;
+    P.pos_last_us = t;
+    if (!P.pos_ref_set) { P.pos_ref = P.pos_smoothed; P.pos_ref_set = true; }
+    pthread_mutex_unlock(&P.lock);
+}
+
+static void run_position_socket(void) {
+    char buf[512];
+    while (P.running) {
+        ssize_t n = recv(P.pos_fd, buf, sizeof buf - 1, 0);
+        if (n <= 0) continue;       /* 200ms timeout -> re-check P.running */
+        buf[n] = 0;
+        vec3 pos;
+        if (parse_pos_json(buf, &pos)) submit_pos(pos);
+    }
+}
+
+static void *pos_reader_thread(void *arg) {
+    (void)arg;
+    run_position_socket();
+    return NULL;
+}
+
 static void *reader_thread(void *arg) {
     (void)arg;
     switch (P.cfg.backend) {
@@ -300,9 +401,6 @@ int pose_start(const pose_config *cfg) {
     if (P.cfg.oe_mincutoff <= 0.0f) P.cfg.oe_mincutoff = 0.5f;
     if (P.cfg.oe_beta      <= 0.0f) P.cfg.oe_beta      = 1.0f;
     if (P.cfg.oe_dcutoff   <= 0.0f) P.cfg.oe_dcutoff   = 1.0f;
-    if (P.cfg.sign_yaw   == 0.0f) P.cfg.sign_yaw   = 1.0f;
-    if (P.cfg.sign_pitch == 0.0f) P.cfg.sign_pitch = 1.0f;
-    if (P.cfg.sign_roll  == 0.0f) P.cfg.sign_roll  = 1.0f;
 
     switch (cfg->backend) {
         case POSE_OPENTRACK_UDP:
@@ -318,11 +416,26 @@ int pose_start(const pose_config *cfg) {
     }
     if (cfg->backend != POSE_BREEZY_SHM && P.fd < 0) return -1;
 
+    /* Optional facecam position channel: a second unix-dgram socket that the webcam
+     * bridge sends head position to. Independent of the orientation backend; if it
+     * fails to bind we log and carry on with rotation-only (3DoF). */
+    if (cfg->facecam_enable) {
+        P.pos_fd = open_unix_dgram(cfg->facecam_socket ? cfg->facecam_socket
+                                                       : "/tmp/mirage-facecam.sock");
+        if (P.pos_fd < 0)
+            std::print(stderr, "pose: facecam disabled (socket bind failed)\n");
+    }
+
     P.running = true;
     if (pthread_create(&P.thread, NULL, reader_thread, NULL) != 0) {
         P.running = false;
         if (P.fd >= 0) close(P.fd);
+        if (P.pos_fd >= 0) { close(P.pos_fd); P.pos_fd = -1; }
         return -1;
+    }
+    if (P.pos_fd >= 0 && pthread_create(&P.pos_thread, NULL, pos_reader_thread, NULL) != 0) {
+        std::print(stderr, "pose: facecam thread failed to start\n");
+        close(P.pos_fd); P.pos_fd = -1;
     }
     return 0;
 }
@@ -331,6 +444,7 @@ void pose_stop(void) {
     if (!P.running) return;
     P.running = false;
     pthread_join(P.thread, NULL);
+    if (P.pos_fd >= 0) { pthread_join(P.pos_thread, NULL); close(P.pos_fd); P.pos_fd = -1; }
     if (P.fd >= 0) { close(P.fd); P.fd = -1; }
 }
 
@@ -367,12 +481,45 @@ void pose_recenter(void) {
     P.want_recenter = true;
     /* apply immediately against the most recent raw too */
     P.reference = recenter_ref(P.raw);
+    /* zero the facecam lean too: current position becomes the new rest origin */
+    if (P.pos_have) P.pos_ref = P.pos_smoothed;
+    P.recenter_gen++;   /* signal render to reseed its reading-deadband (no slew) */
     pthread_mutex_unlock(&P.lock);
+}
+
+/* World-axis eye-offset (metres) from the rest reference. x/y already in mirage world
+ * convention from the bridge; z is camera->head distance, so leaning in shrinks it and
+ * we negate the delta to push the eye forward (-Z). {0,0,0} until a sample arrives. */
+vec3 pose_position(void) {
+    pthread_mutex_lock(&P.lock);
+    vec3 out = {0,0,0};
+    if (P.pos_have && P.pos_ref_set) {
+        out.x = P.pos_smoothed.x - P.pos_ref.x;
+        out.y = P.pos_smoothed.y - P.pos_ref.y;
+        /* lean in: distance z shrinks below the rest ref, so (smoothed - ref) goes
+         * negative -> eye moves -Z (toward the wall) -> wall comes closer. */
+        out.z = P.pos_smoothed.z - P.pos_ref.z;
+        /* clamp so a detection glitch can't fling the wall across the room */
+        const float LIM = 0.40f;
+        auto clampf = [](float v, float lim) { return v > lim ? lim : (v < -lim ? -lim : v); };
+        out.x = clampf(out.x, LIM);
+        out.y = clampf(out.y, LIM);
+        out.z = clampf(out.z, LIM);
+    }
+    pthread_mutex_unlock(&P.lock);
+    return out;
+}
+
+uint32_t pose_recenter_gen(void) {
+    pthread_mutex_lock(&P.lock);
+    uint32_t g = P.recenter_gen;
+    pthread_mutex_unlock(&P.lock);
+    return g;
 }
 
 uint32_t pose_age_ms(void) {
     pthread_mutex_lock(&P.lock);
-    uint32_t age = P.have_signal ? (uint32_t)(now_ms() - P.last_sample_ms)
+    uint32_t age = P.have_signal ? (uint32_t)((now_us() - P.last_sample_us) / 1000)
                                  : UINT32_MAX;
     pthread_mutex_unlock(&P.lock);
     return age;
@@ -404,6 +551,16 @@ bool pose_smoothing_enabled(void) {
 bool pose_has_signal(void) {
     pthread_mutex_lock(&P.lock);
     bool s = P.have_signal;
+    pthread_mutex_unlock(&P.lock);
+    return s;
+}
+
+/* Low-passed head angular speed (rad/s), the same estimate that drives the One-Euro
+ * cutoff. render gates the reading-deadband on this: freeze when still, release when
+ * panning. 0 until the first sample / when smoothing is off. */
+float pose_speed(void) {
+    pthread_mutex_lock(&P.lock);
+    float s = P.speed_lp;
     pthread_mutex_unlock(&P.lock);
     return s;
 }
