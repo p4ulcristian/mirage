@@ -74,9 +74,9 @@ void mirage_config_defaults(mirage_config *c) {
     c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
-    c->facecam_enable        = false; /* OFF: pure 3DoF (orientation only). The webcam position needs
-                                       * a world-fixed camera (a lap moves -> jumps), and lean isn't
-                                       * used. Set true + run facecam-bridge for lean parallax on a desk. */
+    c->facecam_enable        = true;  /* ON for desk use: lateral lean parallax from the webcam. Needs a
+                                       * STABLE, world-fixed camera (a moving laptop -> jumps). Fusion stays
+                                       * off (below) and depth off, so it's the clean camera-only position. */
     c->facecam_lateral_gain  = 1.0f;  /* 1:1 lean/slide -> eye shift; flip sign if left/right is inverted */
     c->facecam_depth_gain    = 0.0f;  /* lean in/out (depth) OFF: barely used at a desk and the
                                        * noisiest single-camera axis. Lateral (x) + vertical (y)
