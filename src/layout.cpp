@@ -364,5 +364,20 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
         for (int k = 0; k < ne; k++)
             out->env_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
     }
+
+    /* environment brightness slider: a thin slider one row below the env tiles, the
+     * handle position set from m->env_brightness. Same track span as the sens slider. */
+    out->bri_track_h  = 0.012f;
+    out->bri_handle_w = 0.026f;
+    out->bri_handle_h = 0.05f;
+    out->bri_x0 = out->track_x0;
+    out->bri_x1 = out->track_x1;
+    float bri_top = (ne > 0) ? out->env_y0
+                  : (nl > 0) ? out->lay_y0
+                             : (out->row_y - out->handle_h * 0.5f - 0.06f);
+    out->bri_row_y = bri_top - 0.04f - out->bri_handle_h * 0.5f;
+    float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
+    bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
+    out->bri_handle_x = out->bri_x0 + bf * (out->bri_x1 - out->bri_x0);
     return true;
 }

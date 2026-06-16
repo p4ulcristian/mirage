@@ -282,6 +282,7 @@ struct mirage {
      * the render loop watches to reload the dome texture after a switch. */
     int   active_env;
     bool  env_dirty;
+    float env_brightness;   /* HUD slider: multiplies the dome intensity (1.0 = as tuned) */
     bool running;
 };
 
@@ -397,7 +398,17 @@ typedef struct {
     float env_y0, env_y1;                  /* env row vertical extent (m)         */
     float env_w;                           /* each button's width (m)             */
     float env_cx[MIRAGE_MAX_ENVS];         /* each button's centre x (m)          */
+    /* environment brightness slider: one more row below the env tiles */
+    float bri_row_y;                       /* slider y centre (m)                 */
+    float bri_x0, bri_x1;                  /* track ends (m)                      */
+    float bri_track_h;                     /* track thickness (m)                 */
+    float bri_handle_x;                    /* handle centre for current brightness */
+    float bri_handle_w, bri_handle_h;      /* handle size (m)                     */
 } sens_panel;
+
+#define BRI_MIN 0.20f
+#define BRI_MAX 3.00f
+#define BRI_DEF 1.00f
 
 #define SENS_GAIN_MIN 1.0f
 #define SENS_GAIN_MAX 16.0f

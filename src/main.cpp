@@ -194,6 +194,7 @@ static int classify_outputs(void) {
 int main(void) {
     mirage_config_defaults(&M.cfg);
     M.zoom = 1.0f;
+    M.env_brightness = BRI_DEF;   /* HUD brightness slider starts centred (1.0 = as tuned) */
 
     /* device/tracking/optics calibration: overlay profile.toml on the defaults and
      * stash the result, so it can be re-stamped after every layout switch (layouts

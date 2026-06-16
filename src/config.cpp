@@ -105,9 +105,9 @@ const mirage_env MIRAGE_ENVS[] = {
      * vs 0.016), so they lean DARK here - high black point crushes the midtones to
      * transparent, leaving only highlights (moon, sky band, water sheen) glowing, with
      * low exposure/intensity so the wall stays readable. Tune live from the HUD. */
-    { "Forest",   "hdri/forest_night_4k.hdr",           1.0f,  0.70f, 0.12f,  1.2f,  true  },
-    { "Mountain", "hdri/mountain_dusk_4k.hdr",          0.9f,  0.65f, 0.18f,  1.2f,  true  },
-    { "Lake",     "hdri/lake_moonlit_4k.hdr",           0.85f, 0.60f, 0.22f,  1.2f,  true  },
+    { "Forest",   "hdri/forest_night_4k.hdr",           1.2f,  0.95f, 0.10f,  1.2f,  true  },
+    { "Mountain", "hdri/mountain_dusk_4k.hdr",          1.1f,  0.90f, 0.15f,  1.2f,  true  },
+    { "Lake",     "hdri/lake_moonlit_4k.hdr",           1.0f,  0.85f, 0.18f,  1.2f,  true  },
     { "Off",      "",                                   1.0f,  1.0f,  0.0f,   1.0f,  false },
 };
 const int MIRAGE_ENV_COUNT = (int)(sizeof MIRAGE_ENVS / sizeof MIRAGE_ENVS[0]);

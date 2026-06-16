@@ -115,6 +115,8 @@ static struct {
      * value plaque ("3.0x") re-baked only when the gain changes (like the FPS one). */
     own::GlTexture label_sens_cap, label_default, label_sens;
     int    senscap_w, senscap_h, default_w, default_h, sens_w, sens_h, sens_val;
+    own::GlTexture label_bright;            /* "BRIGHT" caption for the env brightness slider */
+    int    bright_w, bright_h;
     /* layout-switcher button captions (one per named layout), baked once at init */
     own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
     int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
@@ -812,7 +814,9 @@ mirage_status render_init(struct mirage *m) {
     { const float cap[3] = {0.66f, 0.72f, 0.82f};
       const float dft[3] = {0.80f, 0.86f, 0.95f};
       R.label_sens_cap = bake_label("SENS", cap, &R.senscap_w, &R.senscap_h);
-      R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h); }
+      R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h);
+      const float bc[3] = {0.72f, 0.88f, 0.78f};   /* green, matches the env row */
+      R.label_bright   = bake_label("BRIGHT", bc, &R.bright_w, &R.bright_h); }
     R.sens_val = -1;
     /* layout-switcher button captions: one per loaded named layout, upper-cased to
      * match the rest of the HUD. Layouts are parsed before render init, so the set
@@ -975,6 +979,16 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(R.label_env[k], cx, cy, lh, R.env_w[k], R.env_h[k]);
     }
 
+    /* environment brightness slider: rail + fill + handle (green to match the env row),
+     * with a "BRIGHT" caption to its left. grab.cpp drives the handle. */
+    float briW = sp.bri_x1 - sp.bri_x0;
+    solid(0.0f, sp.bri_row_y, briW, sp.bri_track_h, 0.20f, 0.30f, 0.24f);   /* rail */
+    float briFill = sp.bri_handle_x - sp.bri_x0;
+    if (briFill > 1e-4f)
+        solid(sp.bri_x0 + briFill*0.5f, sp.bri_row_y, briFill, sp.bri_track_h, 0.26f, 0.46f, 0.34f);
+    solid(sp.bri_handle_x, sp.bri_row_y, sp.bri_handle_w, sp.bri_handle_h, 0.52f, 0.86f, 0.64f);
+    label(R.label_bright, sp.bri_x0 - 0.14f, sp.bri_row_y, 0.045f, R.bright_w, R.bright_h);
+
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -1109,8 +1123,10 @@ void render_frame(struct mirage *m, quat head) {
     if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on) {
         glUseProgram(R.dome_prog);
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
+        /* env_brightness is the HUD slider (1.0 = as tuned); guard the zero-init case. */
+        float env_bri = m->env_brightness > 0.0f ? m->env_brightness : 1.0f;
         glUniform1f(R.dExposure,  m->cfg.hdri_exposure);
-        glUniform1f(R.dIntensity, m->cfg.hdri_intensity);
+        glUniform1f(R.dIntensity, m->cfg.hdri_intensity * env_bri);
         glUniform1f(R.dBlack,     m->cfg.hdri_black);
         glUniform1f(R.dSat,       m->cfg.hdri_saturation);
         glActiveTexture(GL_TEXTURE0);

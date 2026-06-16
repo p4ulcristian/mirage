@@ -54,6 +54,7 @@ typedef struct {
     bool world_drag;            /* left-press on empty space: drag spins the world */
     bool sens_drag;             /* left-press on the sensitivity handle: drag sets gain */
     bool sens_click;            /* consumed a left-press on the widget: swallow its release */
+    bool bri_drag;              /* left-press on the brightness handle: drag sets env_brightness */
     double shake_pdx, shake_pdy;  /* previous motion vector (shake-to-gaze detector) */
     int      shake_count;         /* recent direction reversals                      */
     uint32_t shake_last_ms;       /* time of the last reversal                       */
@@ -226,6 +227,14 @@ static void sens_set_from_local(struct mirage *m, const sens_panel *sp, float lx
     m->cfg.pitch_gain = gain;
 }
 
+/* Map the brightness handle's x (clamped to its track) to env_brightness. */
+static void bri_set_from_local(struct mirage *m, const sens_panel *sp, float lx) {
+    float frac = (lx - sp->bri_x0) / (sp->bri_x1 - sp->bri_x0);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    m->env_brightness = BRI_MIN + frac * (BRI_MAX - BRI_MIN);
+}
+
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
     float z = g->m->zoom > 0.0f ? g->m->zoom : 1.0f;
@@ -349,11 +358,12 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         push_cursor(g);
         /* dragging the sensitivity handle: the cursor moved above, so slide the
          * gain to wherever it now sits along the track (handle follows the cursor). */
-        if (g->sens_drag) {
+        if (g->sens_drag || g->bri_drag) {
             sens_panel sp;
             if (sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
-                sens_set_from_local(g->m, &sp, lx);
+                if (g->sens_drag) sens_set_from_local(g->m, &sp, lx);
+                else              bri_set_from_local(g->m, &sp, lx);
             }
         }
         break;
@@ -402,6 +412,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release */
                     break;
                 }
+                /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
+                float bri_band = fmaxf(sp.bri_handle_h, sp.bri_track_h) * 0.5f + 0.03f;
+                if (lx >= sp.bri_x0 - 0.05f && lx <= sp.bri_x1 + 0.05f &&
+                    ly >= sp.bri_row_y - bri_band && ly <= sp.bri_row_y + bri_band) {
+                    g->bri_drag = g->sens_click = true;
+                    bri_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
+                    break;
+                }
                 float band = fmaxf(sp.handle_h, sp.track_h) * 0.5f + 0.03f;
                 if (lx >= sp.track_x0 - 0.05f && lx <= sp.track_x1 + 0.05f &&
                     ly >= sp.row_y - band && ly <= sp.row_y + band) {
@@ -411,11 +429,13 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 }
             }
             if (!st && g->sens_click) {
-                bool was_drag = g->sens_drag;
-                g->sens_drag = g->sens_click = false;
-                if (was_drag) {
+                bool was_sens = g->sens_drag, was_bri = g->bri_drag;
+                g->sens_drag = g->sens_click = g->bri_drag = false;
+                if (was_sens) {
                     sens_persist(g->m);
                     std::print(stderr, "grab: sensitivity {}x\n", g->m->cfg.yaw_gain);
+                } else if (was_bri) {
+                    std::print(stderr, "grab: env brightness {:.2f}\n", g->m->env_brightness);
                 }
                 break;
             }
