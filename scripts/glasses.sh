@@ -71,9 +71,11 @@ hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
 echo "[glasses] virtual screens + head tracking..."
 python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
 bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
-# webcam head-position bridge for 6DoF lean/slide parallax (optional; mirage runs
-# fine in 3DoF if the camera is busy or this fails). Log: /tmp/facecam.log
-bash "$HERE/scripts/facecam.sh" >/dev/null 2>&1 || true
+# webcam head-position bridge for 6DoF lean/slide parallax. DISABLED: we run pure
+# 3DoF (facecam_enable=false in config.cpp), which needs no camera and is rock-solid
+# in any posture. To re-enable lean parallax on a STABLE desk, set facecam_enable=true
+# and uncomment the next line. Log: /tmp/facecam.log
+# bash "$HERE/scripts/facecam.sh" >/dev/null 2>&1 || true
 
 # Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
 # captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
