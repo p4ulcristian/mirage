@@ -59,6 +59,8 @@ struct Opts {
     bool  verbose = false;
     int   threads = 2;      /* OpenCV worker threads (default 8 thrashes a busy box) */
     int   fps_cap = 30;     /* cap the processing rate; head position is slow */
+    float lat_dist = 0.6f;  /* FIXED distance (m) for lateral scaling - decouples x/y from
+                             * the noisy apparent-size depth. ~your face-to-camera distance. */
 };
 
 static void usage(const char *p) {
@@ -233,13 +235,16 @@ int main(int argc, char **argv) {
         if (mcx.size() > 5) { mcx.pop_front(); mcy.pop_front(); msp.pop_front(); }
         float cx = median(mcx), cy = median(mcy), span = median(msp);
 
-        /* metric recovery. distance from apparent size; lateral/vertical by similar
-         * triangles. image +x is right, +y is DOWN -> negate both to get world
-         * +right/+up. The horizontal sign also depends on whether the cam mirrors. */
-        float Z = f_px * h.span_m / span;                 /* camera->head, metres */
+        /* Distance from apparent size is GARBAGE when the head is at an angle (e.g.
+         * lying down) - it swings metres and is the depth axis we don't even use.
+         * Worse, scaling lateral by it (x = pixel_offset * Z / f) injects that swing
+         * straight into x/y. So compute lateral from the (stable) face PIXEL position
+         * with a FIXED nominal distance - x/y now track where the face IS, not how big
+         * it looks. Z is still reported for the depth channel (off in mirage). */
+        float Z = f_px * h.span_m / span;                 /* camera->head (depth only) */
         float xs = o.mirror ? +1.0f : -1.0f;
-        float wx = xs * (cx - W * 0.5f) * Z / f_px;       /* world right (m) */
-        float wy =     -(cy - H * 0.5f) * Z / f_px;       /* world up (m)    */
+        float wx = xs * (cx - W * 0.5f) * o.lat_dist / f_px;   /* world right (m) */
+        float wy =     -(cy - H * 0.5f) * o.lat_dist / f_px;   /* world up (m)    */
 
         /* backstop spike gate (the median already kills most): reject teleports that
          * exceed any plausible per-frame head move, snapping after a short streak so a
