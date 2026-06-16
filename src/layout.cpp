@@ -344,5 +344,25 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
         for (int k = 0; k < nl; k++)
             out->lay_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
     }
+
+    /* environment switcher: a second box row below the layout row (or directly under
+     * the slider if there are no layouts), same width/spacing contract. */
+    int ne = MIRAGE_ENV_COUNT;
+    if (ne > MIRAGE_MAX_ENVS) ne = MIRAGE_MAX_ENVS;
+    out->n_env      = ne;
+    out->active_env = m->active_env;
+    if (ne > 0) {
+        const float bh = 0.07f, bgap = 0.02f;
+        float top = (nl > 0) ? out->lay_y0
+                             : (out->row_y - out->handle_h * 0.5f - 0.06f);
+        out->env_y1 = top - 0.03f;                  /* gap below the layout row */
+        out->env_y0 = out->env_y1 - bh;
+        float span = out->track_x1 - out->track_x0;
+        float bw = (span - bgap * (float)(ne - 1)) / (float)ne;
+        if (bw < 0.04f) bw = 0.04f;
+        out->env_w = bw;
+        for (int k = 0; k < ne; k++)
+            out->env_cx[k] = out->track_x0 + bw * 0.5f + (bw + bgap) * (float)k;
+    }
     return true;
 }

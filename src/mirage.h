@@ -153,6 +153,25 @@ typedef struct {
     int           active;   /* index currently applied to m->cfg                  */
 } mirage_layouts;
 
+/* Selectable HDRI environments (the dome behind the wall): the starfield plus calm
+ * nature scenes, switched at runtime from the HUD. Each carries its own dome params
+ * because the optics are ADDITIVE (black = transparent): the starfield's hard black
+ * point / high exposure crush a nature scene, so every scene is tuned independently
+ * and curated dark/dusk so it stays mostly see-through. on=false = dome hidden. */
+#define MIRAGE_MAX_ENVS 8
+typedef struct {
+    char  name[16];          /* HUD caption ("Space", "Forest", ...)   */
+    char  hdri_path[256];    /* flat Radiance .hdr (hdri/exr2hdr.py)    */
+    float exposure, intensity, black, saturation;  /* dome shader params */
+    bool  on;                /* false = "Off" tile: hide the dome       */
+} mirage_env;
+extern const mirage_env MIRAGE_ENVS[];
+extern const int         MIRAGE_ENV_COUNT;
+
+/* Apply environment idx: copies its dome params into m->cfg.hdri_* and flags a
+ * texture reload (render does the GL work next frame). Mirrors layouts_switch. */
+void env_switch(struct mirage *m, int idx);
+
 /* In-glasses guided calibration overlay (calib.cpp): a head-locked panel that
  * tells you what to do. Two cadences from ONE machine: the full wizard (first run
  * - center, then tracking check, then FOV, then save) and the quick centre (every
@@ -258,6 +277,11 @@ struct mirage {
      * watches so a runtime layout switch rebuilds the screen meshes. */
     mirage_layouts layouts;
     bool  layout_dirty;
+
+    /* selectable HDRI environment (env_switch): the index shown now and a dirty flag
+     * the render loop watches to reload the dome texture after a switch. */
+    int   active_env;
+    bool  env_dirty;
     bool running;
 };
 
@@ -367,6 +391,12 @@ typedef struct {
     float lay_y0, lay_y1;                  /* button row vertical extent (m) */
     float lay_w;                           /* each button's width (m)        */
     float lay_cx[MIRAGE_MAX_LAYOUTS];      /* each button's centre x (m)     */
+    /* environment switcher: a second row below the layout row, same box style */
+    int   n_env;                           /* buttons to draw (= MIRAGE_ENV_COUNT) */
+    int   active_env;                      /* index applied now (highlight)       */
+    float env_y0, env_y1;                  /* env row vertical extent (m)         */
+    float env_w;                           /* each button's width (m)             */
+    float env_cx[MIRAGE_MAX_ENVS];         /* each button's centre x (m)          */
 } sens_panel;
 
 #define SENS_GAIN_MIN 1.0f

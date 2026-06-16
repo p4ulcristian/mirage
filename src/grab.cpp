@@ -392,6 +392,16 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release */
                     break;
                 }
+                /* environment switcher: a click on the Nth box applies that backdrop. */
+                int ehit = -1;
+                for (int k = 0; k < sp.n_env; k++)
+                    if (lx >= sp.env_cx[k] - sp.env_w*0.5f && lx <= sp.env_cx[k] + sp.env_w*0.5f &&
+                        ly >= sp.env_y0 && ly <= sp.env_y1) { ehit = k; break; }
+                if (ehit >= 0) {
+                    env_switch(g->m, ehit);
+                    g->sens_click = true;            /* swallow the matching release */
+                    break;
+                }
                 float band = fmaxf(sp.handle_h, sp.track_h) * 0.5f + 0.03f;
                 if (lx >= sp.track_x0 - 0.05f && lx <= sp.track_x1 + 0.05f &&
                     ly >= sp.row_y - band && ly <= sp.row_y + band) {

@@ -118,6 +118,9 @@ static struct {
     /* layout-switcher button captions (one per named layout), baked once at init */
     own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
     int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
+    /* environment-switcher button captions (one per MIRAGE_ENVS entry), baked once */
+    own::GlTexture label_env[MIRAGE_MAX_ENVS];
+    int    env_w[MIRAGE_MAX_ENVS], env_h[MIRAGE_MAX_ENVS];
     /* 3D pointer: a white arrow on black, drawn additively as a billboard at the
      * cursor's wall direction (m->cursor_yaw/pitch). Black adds nothing on the
      * additive optics, so only the arrow glows - over screens and in the gaps. */
@@ -585,13 +588,13 @@ static void build_dome(void) {
 
 /* Build the dome program, load the HDRI into a texture, and build the sphere.
  * Disables the dome (R.dome_prog stays 0) if anything fails, so render_frame skips it. */
-static void hdri_init(struct mirage *m) {
-    if (!m->cfg.hdri_on) return;
+/* (Re)upload a flat Radiance .hdr into R.hdri_tex (assumes it's been gen'd). Shared by
+ * first-time init and runtime environment switches - the texture object is reused, so a
+ * switch is just a re-upload (no gen/delete churn). */
+static bool hdri_upload(const char *path) {
     int w, h;
-    unsigned char *px = load_hdri_rgb8(m->cfg.hdri_path, &w, &h);
-    if (!px) { std::print(stderr, "hdri: disabled (load failed)\n"); return; }
-
-    R.hdri_tex.gen();
+    unsigned char *px = load_hdri_rgb8(path, &w, &h);
+    if (!px) { std::print(stderr, "hdri: load failed {}\n", path); return false; }
     glBindTexture(GL_TEXTURE_2D, R.hdri_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -599,6 +602,14 @@ static void hdri_init(struct mirage *m) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);          /* equirect wraps in u */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     free(px);
+    std::print(stderr, "hdri: loaded {}x{} {}\n", w, h, path);
+    return true;
+}
+
+static void hdri_init(struct mirage *m) {
+    if (!m->cfg.hdri_on) return;
+    R.hdri_tex.gen();
+    if (!hdri_upload(m->cfg.hdri_path)) { std::print(stderr, "hdri: disabled (load failed)\n"); return; }
 
     GLuint vs = compile(GL_VERTEX_SHADER, DOME_VERT);
     GLuint fs = compile(GL_FRAGMENT_SHADER, DOME_FRAG);
@@ -618,7 +629,7 @@ static void hdri_init(struct mirage *m) {
     R.dSat       = glGetUniformLocation(R.dome_prog, "uSaturation");
     R.dTex       = glGetUniformLocation(R.dome_prog, "uTex");
     build_dome();
-    std::print(stderr, "hdri: dome ready ({}x{}, {})\n", w, h, m->cfg.hdri_path);
+    std::print(stderr, "hdri: dome ready ({})\n", m->cfg.hdri_path);
 }
 
 /* 3D pointer texture: a classic arrowhead (tip at top-left) filled white on a
@@ -813,6 +824,14 @@ mirage_status render_init(struct mirage *m) {
           for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
           R.label_layout[k] = bake_label(nm, lc, &R.layout_w[k], &R.layout_h[k]);
       } }
+    /* environment-switcher captions: one per MIRAGE_ENVS entry (Space/Forest/...) */
+    { const float ec[3] = {0.72f, 0.88f, 0.78f};   /* faint green tint vs the layout row */
+      for (int k = 0; k < MIRAGE_ENV_COUNT; k++) {
+          char nm[16];
+          snprintf(nm, sizeof nm, "%s", MIRAGE_ENVS[k].name);
+          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
+          R.label_env[k] = bake_label(nm, ec, &R.env_w[k], &R.env_h[k]);
+      } }
     /* banner entities: register them here; the frame loop (banner_refresh) bakes
      * and builds each lazily and re-bakes when its key() changes. The clock is the
      * first; push more ent::Banner for status lines etc. */
@@ -936,6 +955,26 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(R.label_layout[k], cx, cy, lh, R.layout_w[k], R.layout_h[k]);
     }
 
+    /* environment switcher: same box style as the layout row, one row below, in a
+     * green tint so the two rows read as distinct switchers. Active = filled+bright. */
+    for (int k = 0; k < sp.n_env; k++) {
+        float cx = sp.env_cx[k];
+        float cy = 0.5f * (sp.env_y0 + sp.env_y1);
+        float w  = sp.env_w, h = sp.env_y1 - sp.env_y0;
+        if (k == sp.active_env) {
+            solid(cx, cy, w, h, 0.16f, 0.30f, 0.22f);            /* active: filled glow */
+            outline(cx, cy, w, h, 0.006f, 0.46f, 0.86f, 0.60f);  /* bright green border */
+        } else {
+            outline(cx, cy, w, h, 0.006f, 0.30f, 0.46f, 0.36f);  /* idle border         */
+        }
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (R.env_h[k] > 0) {
+            float natw = lh * (float)R.env_w[k] / (float)R.env_h[k];
+            if (natw > maxw) lh = maxw * (float)R.env_h[k] / (float)R.env_w[k];
+        }
+        label(R.label_env[k], cx, cy, lh, R.env_w[k], R.env_h[k]);
+    }
+
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -1053,12 +1092,21 @@ void render_frame(struct mirage *m, quat head) {
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);
 
+    /* Environment switch (HUD): reload the dome texture once when env_dirty is set.
+     * The new dome params (exposure/black/...) are read from cfg below each frame, so
+     * only the texture needs swapping. Done here on the GL thread, not in grab. */
+    if (m->env_dirty) {
+        m->env_dirty = false;
+        if (R.dome_prog && m->cfg.hdri_on) hdri_upload(m->cfg.hdri_path);
+    }
+
     /* HDRI environment dome: drawn first as an infinite, world-fixed backdrop.
      * Additive (dark sky adds nothing on the optics), depth test + write off so the
      * wall and slabs draw cleanly over it. The dome sphere (radius 50 m) dwarfs the
      * neck-model eye shift (~0.1 m), so the stars stay effectively fixed in world
-     * space - the far reference the near windows parallax against as you look around. */
-    if (R.dome_prog && R.dome_vbo) {
+     * space - the far reference the near windows parallax against as you look around.
+     * cfg.hdri_on gates the whole draw so the "Off" environment hides it. */
+    if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on) {
         glUseProgram(R.dome_prog);
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
         glUniform1f(R.dExposure,  m->cfg.hdri_exposure);

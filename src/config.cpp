@@ -92,3 +92,36 @@ void mirage_config_defaults(mirage_config *c) {
     strcpy(c->glasses_match, "SmartGlasses");
     c->bg[0] = 0.0f; c->bg[1] = 0.0f; c->bg[2] = 0.0f;   /* true black = transparent on the additive optics */
 }
+
+/* Selectable dome environments shown in the HUD. env[0] (Space) MUST match the
+ * hdri_* defaults above, so the default launch is unchanged. Nature scenes are tuned
+ * dark/dusk (lower exposure, black point that crushes the dark areas to transparent)
+ * because the optics are additive - a bright scene would wash the wall out. Per-scene
+ * numbers are starting points; tune on-glasses. Add a row by adding an entry (<= MAX). */
+const mirage_env MIRAGE_ENVS[] = {
+    /* name        hdri_path (flat .hdr; fetch.sh)      exp    inten  black   sat   on   */
+    { "Space",    "hdri/starmap_2020_4k.hdr",           7.0f,  1.0f,  0.025f, 1.7f,  true  },
+    /* Nature scenes measure far brighter than the starfield (mean luminance ~0.5-0.7
+     * vs 0.016), so they lean DARK here - high black point crushes the midtones to
+     * transparent, leaving only highlights (moon, sky band, water sheen) glowing, with
+     * low exposure/intensity so the wall stays readable. Tune live from the HUD. */
+    { "Forest",   "hdri/forest_night_4k.hdr",           1.0f,  0.70f, 0.12f,  1.2f,  true  },
+    { "Mountain", "hdri/mountain_dusk_4k.hdr",          0.9f,  0.65f, 0.18f,  1.2f,  true  },
+    { "Lake",     "hdri/lake_moonlit_4k.hdr",           0.85f, 0.60f, 0.22f,  1.2f,  true  },
+    { "Off",      "",                                   1.0f,  1.0f,  0.0f,   1.0f,  false },
+};
+const int MIRAGE_ENV_COUNT = (int)(sizeof MIRAGE_ENVS / sizeof MIRAGE_ENVS[0]);
+
+void env_switch(struct mirage *m, int idx) {
+    if (idx < 0 || idx >= MIRAGE_ENV_COUNT) return;
+    const mirage_env *e = &MIRAGE_ENVS[idx];
+    m->cfg.hdri_on = e->on;
+    strncpy(m->cfg.hdri_path, e->hdri_path, sizeof m->cfg.hdri_path - 1);
+    m->cfg.hdri_path[sizeof m->cfg.hdri_path - 1] = '\0';
+    m->cfg.hdri_exposure   = e->exposure;
+    m->cfg.hdri_intensity  = e->intensity;
+    m->cfg.hdri_black      = e->black;
+    m->cfg.hdri_saturation = e->saturation;
+    m->active_env = idx;
+    m->env_dirty  = true;       /* render reloads the texture next frame */
+}
