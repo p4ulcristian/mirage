@@ -45,6 +45,7 @@
 
 #define GRAB_MAX MIRAGE_MAX_SCREENS
 #define MAX_KBD  8           /* how many keyboards we observe for the Super key */
+#define MAX_PAD  8           /* how many trackpads we grab at once (built-in + external) */
 
 typedef struct {
     struct mirage *m;           /* back-ref for zoom etc.                 */
@@ -76,7 +77,8 @@ typedef struct {
 
     struct zwlr_virtual_pointer_v1 *vp[GRAB_MAX];
     struct libinput *li;        /* input, live only while active          */
-    char   dev[64];             /* trackpad device path (grabbed)         */
+    char   pad[MAX_PAD][64];    /* trackpad device paths (all grabbed)    */
+    int    n_pad;               /* how many entries of pad[] are valid    */
     char   kbd[MAX_KBD][64];    /* keyboard device paths (observed, not grabbed) */
     int    n_kbd;               /* how many entries of kbd[] are valid    */
     int    uifd;                /* uinput wheel device fd (-1 if unavailable) */
@@ -571,19 +573,24 @@ static void detect_keyboards(grab_state *g) {
     for (int i = 0; i < 32 && g->n_kbd < MAX_KBD; i++) {
         char path[64];
         snprintf(path, sizeof path, "/dev/input/event%d", i);
-        if (!strcmp(path, g->dev)) continue;      /* that's the grabbed trackpad */
+        bool is_pad = false;                      /* skip any grabbed trackpad */
+        for (int k = 0; k < g->n_pad; k++)
+            if (!strcmp(path, g->pad[k])) { is_pad = true; break; }
+        if (is_pad) continue;
         if (dev_has_meta(path))
             snprintf(g->kbd[g->n_kbd++], sizeof g->kbd[0], "%s", path);
     }
 }
 
-/* Pick the first multitouch trackpad into g->dev. Falls back to event0 (left as
- * set by the caller) if none is found. */
+/* Collect EVERY multitouch trackpad into g->pad[] (built-in + external, e.g. a
+ * Magic Trackpad), so they all drive the cursor - no need to choose. */
 static void detect_trackpad(grab_state *g) {
-    for (int i = 0; i < 32; i++) {
+    g->n_pad = 0;
+    for (int i = 0; i < 32 && g->n_pad < MAX_PAD; i++) {
         char path[64];
         snprintf(path, sizeof path, "/dev/input/event%d", i);
-        if (dev_is_trackpad(path)) { snprintf(g->dev, sizeof g->dev, "%s", path); return; }
+        if (dev_is_trackpad(path))
+            snprintf(g->pad[g->n_pad++], sizeof g->pad[0], "%s", path);
     }
 }
 
@@ -608,8 +615,9 @@ bool grab_init(struct mirage *m) {
     /* Auto-detect input devices by capability, not name or event number (neither
      * is stable across boots/replug): the multitouch trackpad, then every
      * Super-capable keyboard. Trackpad falls back to event0 if none is found. */
-    snprintf(g->dev, sizeof g->dev, "%s", "/dev/input/event0");
     detect_trackpad(g);
+    if (g->n_pad == 0)        /* none found by capability: fall back to event0 */
+        snprintf(g->pad[g->n_pad++], sizeof g->pad[0], "%s", "/dev/input/event0");
     detect_keyboards(g);
 
     g->n = m->n_screen > GRAB_MAX ? GRAB_MAX : m->n_screen;
@@ -625,8 +633,9 @@ bool grab_init(struct mirage *m) {
      * nearest screen, so the cursor starts on a panel in front of you, not parked
      * up on the banner (screen 0). */
     g->cyaw = 0.0; g->cpitch = 0.0;
-    std::print(stderr, "grab: ready ({} panels, angular cursor, trackpad {}, {} keyboard(s):",
-            g->n, g->dev, g->n_kbd);
+    std::print(stderr, "grab: ready ({} panels, angular cursor, {} trackpad(s):", g->n, g->n_pad);
+    for (int i = 0; i < g->n_pad; i++) std::print(stderr, " {}", g->pad[i]);
+    std::print(stderr, ", {} keyboard(s):", g->n_kbd);
     for (int i = 0; i < g->n_kbd; i++) std::print(stderr, " {}", g->kbd[i]);
     std::print(stderr, ").\n");
     /* Always-on capture: the trackpad drives the arc cursor and Cmd+scroll zooms
@@ -641,21 +650,30 @@ void grab_toggle(struct mirage *m) {
     if (!g->active) {
         g->li = libinput_path_create_context(&LI_IFACE, g);
         if (!g->li) { std::print(stderr, "grab: libinput context failed\n"); return; }
-        struct libinput_device *dev = libinput_path_add_device(g->li, g->dev);
-        if (!dev) {
-            std::print(stderr, "grab: cannot open trackpad {} (permission? or "
-                    "name-match auto-detect picked the wrong device)\n", g->dev);
+        /* Open + grab EVERY detected trackpad, so the built-in pad and an external
+         * one (e.g. a Magic Trackpad) both drive the cursor. Flat (constant)
+         * acceleration on each: map finger travel linearly to cursor travel.
+         * libinput's default adaptive profile DECELERATES slow motion toward zero,
+         * so a slow drag parks at a screen edge and can't push the cursor across the
+         * 1920px-wide cell boundary into the next screen - only a fast flick
+         * accumulates enough delta. Flat removes that "wall", so boundaries cross
+         * smoothly at any speed. Our own g->sens scales it. */
+        int pad_ok = 0;
+        for (int i = 0; i < g->n_pad; i++) {
+            struct libinput_device *dev = libinput_path_add_device(g->li, g->pad[i]);
+            if (!dev) {
+                std::print(stderr, "grab: cannot open trackpad {} (permission?)\n", g->pad[i]);
+                continue;
+            }
+            pad_ok++;
+            if (libinput_device_config_accel_is_available(dev))
+                libinput_device_config_accel_set_profile(
+                    dev, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
+        }
+        if (pad_ok == 0) {
+            std::print(stderr, "grab: no trackpad opened; Super+G disabled\n");
             libinput_unref(g->li); g->li = NULL; return;
         }
-        /* Flat (constant) acceleration: map finger travel linearly to cursor
-         * travel. libinput's default adaptive profile DECELERATES slow motion
-         * toward zero, so a slow drag parks at a screen edge and can't push the
-         * cursor across the 1920px-wide cell boundary into the next screen -
-         * only a fast flick accumulates enough delta. Flat removes that "wall",
-         * so boundaries cross smoothly at any speed. Our own g->sens scales it. */
-        if (libinput_device_config_accel_is_available(dev))
-            libinput_device_config_accel_set_profile(
-                dev, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT);
         /* observe (don't grab) every Super-capable keyboard, for the Cmd+scroll
          * zoom / Cmd+H-pan modifier. We add them all so the modifier is seen
          * whether keyd is grabbing the raw keyboard or passing it through. */
