@@ -51,11 +51,11 @@ LDLIBS   := $(shell $(PKGCONF) --libs $(RENDER_PKGS)) -lm -pthread -lrt
 # ---- core mirage objects (wayland + GL), now C++ ----
 MIRAGE_SRC := src/main.cpp src/pose.cpp src/capture.cpp src/render.cpp \
               src/layout.cpp src/grab.cpp src/config.cpp src/layouts.cpp \
-              src/profile.cpp src/calib.cpp src/stb_truetype_impl.cpp
+              src/profile.cpp src/calib.cpp src/stb_truetype_impl.cpp src/diag.cpp
 MIRAGE_OBJ := $(MIRAGE_SRC:src/%.cpp=build/obj/%.o) $(PROTO_OBJ)
 
 # ---- pose test tool (no wayland/GL) ----
-POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o
+POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o build/obj/diag.o
 
 # facecam 6DoF bridge (webcam head-position tracker) - separate target so OpenCV is
 # only required when you actually build it, like the rayneo bridge.

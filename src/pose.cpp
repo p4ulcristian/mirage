@@ -1,4 +1,5 @@
 #include "pose.h"
+#include "diag.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -74,6 +75,11 @@ static struct {
     uint64_t accel_last_us;
     vec3  fvel;            /* fused velocity (mirage world, m/s)              */
     vec3  fpos;            /* fused position (mirage world, m)                */
+
+    /* diagnostics (jumps-while-still log; see diag.h) */
+    vec3  diag_prev_fpos;   bool diag_fpos_init;
+    vec3  diag_prev_campos; bool diag_campos_init;
+    uint64_t diag_last_hb_us; uint32_t diag_hb_count;
 } P = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
@@ -120,6 +126,7 @@ static void submit_raw(quat raw) {
     }
     uint64_t t = now_us();
     quat prev_smoothed = P.smoothed;   /* before this frame's filter update */
+    quat diag_prev_raw = P.prev_raw;   /* before any branch updates it (for the diag) */
     bool had_signal    = P.have_signal;
     if (!P.have_signal) {
         /* first sample: seed every filter state from it, no lerp from identity */
@@ -222,6 +229,38 @@ static void submit_raw(quat raw) {
         quat dq = q_mul(P.smoothed, q_conj(prev_smoothed));   /* world-frame step */
         P.dvel = q_nlerp(P.dvel, dq, 0.5f);                   /* light smoothing  */
         P.sample_dt += 0.05f * (vdt - P.sample_dt);
+    }
+
+    /* --- diagnostics: orientation jumps while (nearly) still, plus a heartbeat ---
+     * A still-jump is a per-sample step in the SMOOTHED orientation that is large
+     * while the low-passed head speed is low (so it isn't real motion). raw vs
+     * smoothed tells whether the glitch came from the IMU or leaked through the
+     * filter. The heartbeat records the inbound rate + live state every ~3 s. */
+    if (diag_enabled()) {
+        P.diag_hb_count++;
+        if (had_signal) {
+            float spd_deg = P.speed_lp * 180.0f / (float)M_PI;
+            float sm_d  = quat_angle(P.smoothed, prev_smoothed) * 180.0f / (float)M_PI;
+            float raw_d = quat_angle(raw, diag_prev_raw)        * 180.0f / (float)M_PI;
+            if (sm_d > 0.20f && spd_deg < 4.0f) {
+                float dt_ms = (float)(t - P.last_sample_us) / 1000.0f;
+                diag_logf("ORI", "jump sm=%.3fdeg raw=%.3fdeg spd=%.2fdeg/s dt=%.2fms "
+                          "sm=[% .4f % .4f % .4f % .4f]",
+                          sm_d, raw_d, spd_deg, dt_ms,
+                          P.smoothed.w, P.smoothed.x, P.smoothed.y, P.smoothed.z);
+            }
+        }
+        if (t - P.diag_last_hb_us > 3000000ull) {
+            float el = P.diag_last_hb_us ? (float)(t - P.diag_last_hb_us) / 1e6f : 1.0f;
+            diag_logf("HB", "imu=%.0fHz spd=%.2fdeg/s fpos=(%.3f,%.3f,%.3f) "
+                      "fvel=(%.3f,%.3f,%.3f) cam=(%.3f,%.3f,%.3f) have_cam=%d fuse=%d",
+                      (float)P.diag_hb_count / el, P.speed_lp * 180.0f / (float)M_PI,
+                      P.fpos.x, P.fpos.y, P.fpos.z, P.fvel.x, P.fvel.y, P.fvel.z,
+                      P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z,
+                      (int)P.pos_have, (int)P.fuse_have);
+            P.diag_last_hb_us = t;
+            P.diag_hb_count = 0;
+        }
     }
 
     P.raw = raw;
@@ -384,6 +423,16 @@ static void submit_pos(vec3 raw) {
     P.pos_raw = raw;
     P.pos_last_us = t;
     if (!P.pos_ref_set) { P.pos_ref = P.pos_smoothed; P.pos_ref_set = true; }
+    /* diag: a big step in the SMOOTHED camera position = a facecam misdetection that
+     * slipped past the median + spike gate (the prime suspect for a lateral still-jump). */
+    if (diag_enabled() && P.diag_campos_init) {
+        float d = v3_len(v3_sub(P.pos_smoothed, P.diag_prev_campos));
+        if (d > 0.02f)
+            diag_logf("CAM", "jump d=%.4fm cam=(%.3f,%.3f,%.3f) raw=(%.3f,%.3f,%.3f)",
+                      d, P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z,
+                      raw.x, raw.y, raw.z);
+    }
+    P.diag_prev_campos = P.pos_smoothed; P.diag_campos_init = true;
     pthread_mutex_unlock(&P.lock);
 }
 
@@ -420,6 +469,18 @@ static void submit_accel(vec3 a) {
         if (kc > 1.0f) kc = 1.0f;
         P.fpos = v3_add(P.fpos, v3_scale(v3_sub(P.pos_smoothed, P.fpos), kc));
     }
+    /* diag: a big per-sample step in the FUSED position = the accel integration spiked
+     * or the complementary filter overshot (the prime suspect from the new VI fusion).
+     * 6 mm in one ~2 ms sample is physically impossible head motion, so it's a glitch. */
+    if (diag_enabled() && P.diag_fpos_init) {
+        float d = v3_len(v3_sub(P.fpos, P.diag_prev_fpos));
+        if (d > 0.006f)
+            diag_logf("FPOS", "jump d=%.4fm fvel=%.3f accel=%.2f fpos=(%.3f,%.3f,%.3f) cam=(%.3f,%.3f,%.3f)",
+                      d, v3_len(P.fvel), v3_len(a),
+                      P.fpos.x, P.fpos.y, P.fpos.z,
+                      P.pos_smoothed.x, P.pos_smoothed.y, P.pos_smoothed.z);
+    }
+    P.diag_prev_fpos = P.fpos; P.diag_fpos_init = true;
     pthread_mutex_unlock(&P.lock);
 }
 
