@@ -79,8 +79,12 @@ void mirage_config_defaults(mirage_config *c) {
     c->facecam_depth_gain    = 0.0f;  /* lean in/out (depth) OFF: barely used at a desk and the
                                        * noisiest single-camera axis. Lateral (x) + vertical (y)
                                        * parallax stay on. Set >0 (e.g. 0.5) to re-enable lean-in. */
-    c->facecam_smooth        = 1.2f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier, raise if it feels sluggish */
-    c->facecam_fusion        = true;  /* fuse IMU accel for low-latency position (needs the accel-emitting bridge) */
+    c->facecam_smooth        = 0.8f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier. Lowered
+                                       * from 1.2 to damp residual camera misdetections at rest. */
+    c->facecam_fusion        = false; /* OFF: the accel fusion's z (distance vs world-coord) never
+                                       * settles and yanks lateral position during corrections -
+                                       * the diag log showed it causing the still-jumps. Depth is
+                                       * disabled and lean is slow, so camera-only position is better. */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
