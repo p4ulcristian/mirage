@@ -2,19 +2,20 @@
 """setup_displays.py - create + position mirage's virtual displays (replaces
 setup-displays.sh).
 
-Desk layout: one full-width 21:9 banner on top, three 16:9 monitors centred in a
-row below it. The four panels tile a CLEAN RECTANGLE, so dragging a window between
-any of them is seamless, with no dead zones.
+Desk layout: a small 21:9 ultrawide centred on top, three 16:9 monitors in a row
+below it. The bottom row tiles gaplessly; the top ultrawide is narrower than the
+row, so the two upper corners are empty desktop (a dead zone for window-dragging
+there only - the price of a small, non-full-width top monitor).
 
     2D desktop (what Hyprland sees, what governs dragging):
-      +------------------------------------------------+
-      |          VIRT1   21:9   5760x2468              |
-      +----------------+----------------+--------------+
-      | VIRT2 16:9     | VIRT3 16:9     | VIRT4 16:9   |
-      | 1920x1080      | 1920x1080      | 1920x1080    |
-      +----------------+----------------+--------------+
-        1920          +     1920        +    1920       = 5760 wide
-        top banner spans the full 5760 -> edges line up
+      +------+------------------------+------+
+      |      |   VIRT1  21:9          |      |
+      |      |   2560x1080            |      |   <- centred top, side gaps
+      +------+------------------------+------+
+      | VIRT2 16:9 | VIRT3 16:9 | VIRT4 16:9 |
+      | 1920x1080  | 1920x1080  | 1920x1080  |
+      +------------+------------+------------+
+        1920       +    1920    +    1920     = 5760 wide
 
 This file is the single source of truth for the arrangement: `create()` builds
 the 2D monitors here, and `--layout` emits the matching mirage 3D arc layout
@@ -43,10 +44,10 @@ ORIGIN_X, ORIGIN_Y, REFRESH = 8000, 0, 60
 # arc placement is projected from the cell below, so there are no separate arc /
 # lift / col numbers to keep in sync.
 PANELS = [
-    dict(name="VIRT1", w=5760, h=2468, x=0,    y=0,    role="21:9 banner (full width)"),
-    dict(name="VIRT2", w=1920, h=1080, x=0,    y=2468, role="bottom-left 16:9"),
-    dict(name="VIRT3", w=1920, h=1080, x=1920, y=2468, role="bottom-centre 16:9"),
-    dict(name="VIRT4", w=1920, h=1080, x=3840, y=2468, role="bottom-right 16:9"),
+    dict(name="VIRT1", w=2560, h=1080, x=1600, y=0,    role="21:9 ultrawide (top, centred)"),
+    dict(name="VIRT2", w=1920, h=1080, x=0,    y=1080, role="bottom-left 16:9"),
+    dict(name="VIRT3", w=1920, h=1080, x=1920, y=1080, role="bottom-centre 16:9"),
+    dict(name="VIRT4", w=1920, h=1080, x=3840, y=1080, role="bottom-right 16:9"),
 ]
 ACTIVE, DISTANCE, SLAB = "desk", 2.0, 0.05
 
@@ -55,8 +56,8 @@ ACTIVE, DISTANCE, SLAB = "desk", 2.0, 0.05
 # (lift 0). The grid is gapless and the projection is uniform (square pixels, and
 # each VIRT output's resolution == its cell, so capture aspect == cell aspect), so
 # the arc tiling is gapless too - by construction, not by hand-tuning.
-WALL_ARC_DEG = 121.4    # preserves the theater per-pixel size (86 * 5760/4080) so each 16:9 ~40 deg
-EYE_Y = 3008            # centre of the bottom 16:9 row (2468 + 540) -> the mains sit at eye level
+WALL_ARC_DEG = 121.4    # spans the 5760-wide bottom row; each 16:9 ~40 deg, the top 21:9 ~54 deg
+EYE_Y = 1620            # centre of the bottom 16:9 row (1080 + 540) -> the mains sit at eye level
 
 # Bezel gap: shrink each panel's arc uniformly about its centre, so the screens
 # sit apart with a visible gap between them on the arc WITHOUT moving (yaw/lift
