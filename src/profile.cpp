@@ -106,11 +106,66 @@ bool profile_save(const char *path, const mirage_config *c) {
 }
 
 /* Copy the calibration fields from src onto dst, leaving everything else (geometry,
- * the runtime gaze toggle, ...) untouched. Called after cfg is (re)assigned from a
- * layout, so the calibration survives a layout switch. */
+ * screen placement, ...) untouched. Called after cfg is (re)assigned from a layout,
+ * so the calibration survives a layout switch. */
 void profile_apply(mirage_config *dst, const mirage_config *src) {
 #define F(kind, name) dst->name = src->name;
     CALIB_FIELDS(F)
 #undef F
     std::memcpy(dst->glasses_match, src->glasses_match, sizeof dst->glasses_match);
+}
+
+/* ---- ui_state.toml: persisted HUD selections -------------------------------
+ * Kept apart from the calibration profile on purpose: these are user-facing runtime
+ * choices (which environment, how bright, flat or curved, which layout) and must not
+ * ride the profile_apply re-stamp. mirage writes this whenever a HUD control changes;
+ * main reads it once at startup and applies it after the active layout is resolved. */
+std::string ui_state_default_path() {
+    if (const char *e = getenv("MIRAGE_UI_STATE"); e && *e) return e;
+    std::string base;
+    if (const char *xdg = getenv("XDG_CONFIG_HOME"); xdg && *xdg) base = xdg;
+    else { const char *home = getenv("HOME"); base = (home && *home ? home : ".");
+           base += "/.config"; }
+    return base + "/mirage/ui_state.toml";
+}
+
+int ui_state_load(const char *path, mirage_ui_state *s) {
+    *s = mirage_ui_state{};
+    toml::table tbl;
+    try { tbl = toml::parse_file(path); }
+    catch (const toml::parse_error &) { return 0; }   /* missing / malformed -> none */
+
+    int applied = 0;
+    if (auto v = tbl["geometry"].value<std::string_view>()) {
+        s->geometry = (*v == "flat") ? GEOM_FLAT : GEOM_CYLINDER;
+        s->has_geometry = true; applied++;
+    }
+    if (auto v = tbl["active_env"].value<int64_t>()) {
+        s->env = (int)*v; s->has_env = true; applied++;
+    }
+    if (auto v = tbl["brightness"].value<double>()) {
+        s->brightness = (float)*v; s->has_brightness = true; applied++;
+    }
+    if (auto v = tbl["layout"].value<std::string_view>()) {
+        std::snprintf(s->layout, sizeof s->layout, "%.*s", (int)v->size(), v->data());
+        s->has_layout = true; applied++;
+    }
+    return applied;
+}
+
+bool ui_state_save(const char *path, const struct mirage *m) {
+    std::filesystem::path p(path);
+    std::error_code ec;
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+
+    std::ofstream o(path, std::ios::trunc);
+    if (!o) { std::print(stderr, "ui_state: cannot write {}\n", path); return false; }
+    o << "# mirage HUD state - written by mirage as you adjust the on-wall controls.\n"
+      << "# Restores the geometry toggle, brightness, environment and active layout.\n\n";
+    o << "geometry = \"" << (m->cfg.geometry == GEOM_FLAT ? "flat" : "cylinder") << "\"\n";
+    o << "active_env = " << m->active_env << "\n";
+    o << "brightness = " << m->env_brightness << "\n";
+    if (m->layouts.n > 0 && m->layouts.active >= 0 && m->layouts.active < m->layouts.n)
+        o << "layout = \"" << m->layouts.l[m->layouts.active].name << "\"\n";
+    return (bool)o;
 }

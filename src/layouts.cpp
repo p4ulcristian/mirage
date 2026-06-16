@@ -128,10 +128,10 @@ int layouts_load(mirage_layouts *L, const char *path) {
 void layouts_switch(struct mirage *m, int idx) {
     mirage_layouts *L = &m->layouts;
     if (L->n == 0 || idx < 0 || idx >= L->n) return;   /* no such layout: ignore */
-    bool gaze = m->cfg.gaze_cursor;                    /* preserve runtime toggle */
+    int geom = m->cfg.geometry;                        /* preserve the flat/curved toggle */
     L->active = idx;
     m->cfg = L->l[idx].cfg;
-    m->cfg.gaze_cursor = gaze;
+    m->cfg.geometry = geom;
     if (m->have_profile) profile_apply(&m->cfg, &m->calib_cfg);   /* keep calibration */
     m->layout_dirty = true;
     std::print(stderr, "layouts: switched to {} ({})\n", idx + 1, L->l[idx].name);

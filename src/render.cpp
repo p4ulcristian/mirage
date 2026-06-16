@@ -101,10 +101,10 @@ static struct {
     int    dome_verts;
     GLint  dMVP, dExposure, dIntensity, dBlack, dSat, dTex;
 
-    /* "GAZE: ON/OFF" status plaque below the centre screen (baked text textures,
-     * drawn on the unit QUAD via R.prog). */
-    own::GlTexture label_on, label_off;
-    int    label_w, label_h;
+    /* flat/curved toggle captions (one each, baked once at init; the live one is
+     * shown on the toggle button below the brightness slider). */
+    own::GlTexture label_flat, label_curved;
+    int    flat_w, flat_h, curved_w, curved_h;
     /* live FPS plaque: re-baked only when the integer value changes */
     own::GlTexture label_fps;
     int    fps_w, fps_h, fps_val;
@@ -264,7 +264,7 @@ void render_rebuild_meshes(struct mirage *m) {
 /* ---- status plaque text (stb_truetype) -------------------------------------
  * Real TTF glyphs rasterised into an RGBA plaque texture: a monospace HUD font
  * (assets/hud.ttf, override with $MIRAGE_FONT), antialiased, foreground glyphs
- * over the dark plaque. One texture is baked per label (GAZE/FPS/cheat-sheet/
+ * over the dark plaque. One texture is baked per label (FPS/cheat-sheet/
  * clock) and the callers are unchanged. Replaces the old hand-rolled 5x7 bitmap
  * font - this gives lowercase, any glyph, and smooth edges. */
 #define HUD_PX   44      /* glyph cell pixel height                 */
@@ -729,18 +729,16 @@ mirage_status render_init(struct mirage *m) {
 
     render_rebuild_meshes(m);
 
-    /* gaze-mode status plaque (ON green, OFF grey) - same dims for both */
-    { const float on[3]  = {0.31f, 0.90f, 0.47f};
-      const float off[3] = {0.42f, 0.45f, 0.52f};
-      R.label_on  = bake_label("GAZE: ON ", on, &R.label_w, &R.label_h);   /* trailing space: same dims */
-      R.label_off = bake_label("GAZE: OFF", off, &R.label_w, &R.label_h); }
+    /* flat/curved toggle captions (one shown at a time on the toggle button) */
+    { const float gc[3] = {0.66f, 0.72f, 0.82f};
+      R.label_curved = bake_label("CURVED", gc, &R.curved_w, &R.curved_h);
+      R.label_flat   = bake_label("FLAT",   gc, &R.flat_w,   &R.flat_h); }
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
     /* static shortcut cheat-sheet, one multi-line plaque baked once */
     { const float hc[3] = {0.66f, 0.72f, 0.82f};
       R.label_help = bake_label(
           "2X CMD: RECENTER\n"
-          "2X ALT: GAZE\n"
           "CMD+SCROLL: ZOOM\n"
           "SUPER+SHIFT+Q: QUIT",
           hc, &R.help_w, &R.help_h); }
@@ -790,7 +788,7 @@ static const float PLACEHOLDER[][3] = {
 };
 
 /* In-view sensitivity slider: a track + fill + draggable handle and a DEFAULT
- * button, hung under the centre screen with the GAZE/FPS plaques. Geometry comes
+ * button, hung under the centre screen with the FPS plaque. Geometry comes
  * from sens_panel_compute (the same numbers grab.c hit-tests), drawn in the centre
  * screen's local frame via layout_model_matrix. Additive + depth-off like the
  * cursor arrow, so it glows on the optics without punching a black hole. */
@@ -923,6 +921,26 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
     solid(sp.bri_handle_x, sp.bri_row_y, sp.bri_handle_w, sp.bri_handle_h, 0.52f, 0.86f, 0.64f);
     label(R.label_bright, sp.bri_x0 - 0.14f, sp.bri_row_y, 0.045f, R.bright_w, R.bright_h);
 
+    /* flat/curved toggle: one button spanning the track, filled + bright-bordered
+     * (it always reflects an active choice), captioned with the current geometry.
+     * Amber tint so it reads as distinct from the blue/green switcher rows above. */
+    {
+        float cx = 0.5f * (sp.geo_x0 + sp.geo_x1);
+        float cy = 0.5f * (sp.geo_y0 + sp.geo_y1);
+        float w  = sp.geo_x1 - sp.geo_x0, h = sp.geo_y1 - sp.geo_y0;
+        solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* filled glow         */
+        outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border */
+        GLuint tex = sp.geo_flat ? R.label_flat : R.label_curved;
+        int tw = sp.geo_flat ? R.flat_w : R.curved_w;
+        int th = sp.geo_flat ? R.flat_h : R.curved_h;
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (th > 0) {
+            float natw = lh * (float)tw / (float)th;
+            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+        }
+        label(tex, cx, cy, lh, tw, th);
+    }
+
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -1001,7 +1019,7 @@ void render_frame(struct mirage *m, quat head) {
         head = presented;
     }
 
-    /* Publish the look direction for the gaze cursor: this is the exact camera
+    /* Publish the look direction for shake-to-gaze: this is the exact camera
      * orientation we render through (comfort gains + deadband baked
      * in), so grab.c can map "where the eye points" back to a screen + pixel.
      * Same yaw/pitch convention as layout_focus_angles, so its inverse lands
@@ -1116,9 +1134,9 @@ void render_frame(struct mirage *m, quat head) {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, s->mesh_verts);
     }
 
-    /* Gaze-mode status plaque, floating just under the centre-column screen and
-     * pinned to its frame (so it tracks the wall as you pan). Picks the ON/OFF
-     * texture from the live gaze_cursor flag (toggled by double-Cmd in grab.c). */
+    /* Status plaques under the centre-column screen, pinned to its frame so they
+     * track the wall as you pan: the FPS counter on top, the shortcut cheat-sheet
+     * below it. */
     {
         /* centre-column, bottom screen: smallest |yaw|, then lowest lift */
         int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f;
@@ -1130,7 +1148,7 @@ void render_frame(struct mirage *m, quat head) {
                 best_yaw = ay; best_lift = lf; ci = k;
             }
         }
-        if (ci >= 0 && ci < n && R.label_on) {
+        if (ci >= 0 && ci < n) {
             screen_t *cs = &m->screen[ci];
             float d      = m->cfg.screen_distance_m;
             float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
@@ -1138,31 +1156,17 @@ void render_frame(struct mirage *m, quat head) {
                            ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
             float hh     = d * tanf(ang_w * 0.5f) * aspect;   /* screen half-height */
             float fullH  = 0.11f;
-            float fullW  = fullH * ((float)R.label_w / (float)R.label_h);
-            float yc     = -hh - 0.05f - fullH * 0.5f;        /* just below the edge */
+            float yc     = -hh - 0.05f - fullH * 0.5f;        /* FPS row, just below edge */
 
-            mat4 local = m4_mul(m4_translate(v3(0.0f, yc, -d)),
-                                m4_scale(v3(fullW, fullH, 1.0f)));
-            mat4 model = m4_mul(layout_model_matrix(m, ci), local);
-            mat4 mvp   = m4_mul(vp, model);
-            glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
             glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
             glEnableVertexAttribArray(R.aPos);
             glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
             glEnableVertexAttribArray(R.aUV);
             glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m->cfg.gaze_cursor ? R.label_on : R.label_off);
-            glUniform1i(R.uTex, 0);
-            glUniform1f(R.uHasTex, 1.0f);
-            glUniform1f(R.uYFlip, 0.0f);
-            glUniform1f(R.uSharpen, 0.0f);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-            /* FPS counter, one row below the GAZE plaque. Re-bake the digits only
-             * when the integer value changes (~once a second); the vbo + vertex
-             * attribs are still bound from the GAZE draw above, so we just swap the
-             * texture and the MVP. */
+            /* FPS counter. Re-bake the digits only when the integer value changes
+             * (~once a second); otherwise just swap the texture and the MVP. */
             int fv = (int)(m->fps + 0.5f);
             if (fv < 0)   fv = 0;
             if (fv > 999) fv = 999;
@@ -1174,12 +1178,10 @@ void render_frame(struct mirage *m, quat head) {
             }
             if (R.label_fps) {
                 float fpsW  = fullH * ((float)R.fps_w / (float)R.fps_h);
-                float yc2   = yc - fullH - 0.02f;            /* one row lower */
-                mat4 local2 = m4_mul(m4_translate(v3(0.0f, yc2, -d)),
+                mat4 local  = m4_mul(m4_translate(v3(0.0f, yc, -d)),
                                      m4_scale(v3(fpsW, fullH, 1.0f)));
-                mat4 model2 = m4_mul(layout_model_matrix(m, ci), local2);
-                mat4 mvp2   = m4_mul(vp, model2);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp2.m);
+                mat4 model  = m4_mul(layout_model_matrix(m, ci), local);
+                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model).m);
                 glBindTexture(GL_TEXTURE_2D, R.label_fps);
                 glUniform1i(R.uTex, 0);
                 glUniform1f(R.uHasTex, 1.0f);
@@ -1189,17 +1191,16 @@ void render_frame(struct mirage *m, quat head) {
             }
 
             /* Shortcut cheat-sheet, stacked below the FPS row. Static texture,
-             * drawn at a smaller scale so the five lines don't hang too far down. */
+             * drawn at a smaller scale so the lines don't hang too far down. */
             if (R.label_help) {
                 float blockH = 0.26f;                            /* whole block height */
                 float blockW = blockH * ((float)R.help_w / (float)R.help_h);
-                float fpsBot = (yc - fullH - 0.02f) - fullH * 0.5f;  /* FPS plaque bottom */
-                float yc3    = fpsBot - 0.03f - blockH * 0.5f;
-                mat4 local3  = m4_mul(m4_translate(v3(0.0f, yc3, -d)),
+                float fpsBot = yc - fullH * 0.5f;                /* FPS plaque bottom */
+                float yc2    = fpsBot - 0.03f - blockH * 0.5f;
+                mat4 local2  = m4_mul(m4_translate(v3(0.0f, yc2, -d)),
                                       m4_scale(v3(blockW, blockH, 1.0f)));
-                mat4 model3  = m4_mul(layout_model_matrix(m, ci), local3);
-                mat4 mvp3    = m4_mul(vp, model3);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp3.m);
+                mat4 model2  = m4_mul(layout_model_matrix(m, ci), local2);
+                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model2).m);
                 glBindTexture(GL_TEXTURE_2D, R.label_help);
                 glUniform1i(R.uTex, 0);
                 glUniform1f(R.uHasTex, 1.0f);
@@ -1288,7 +1289,7 @@ void render_finish(struct mirage *m) {
      * (built here, not by capture). */
     R.prog.reset();   R.vbo.reset();
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
-    R.label_on.reset(); R.label_off.reset(); R.label_fps.reset();
+    R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
     R.label_help.reset();
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
     for (int i = 0; i < m->n_screen; i++) {

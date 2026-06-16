@@ -85,7 +85,6 @@ typedef struct {
      * the metres above eye level. Set by named layouts (layouts.c). */
     float screen_yaw_deg[MIRAGE_MAX_SCREENS];  /* NAN = auto (column) */
     float screen_lift_m [MIRAGE_MAX_SCREENS];  /* NAN = auto (row)    */
-    bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
     /* glasses optics */
     float fov_deg;              /* vertical field of view of the glasses */
@@ -249,9 +248,9 @@ struct mirage {
      * = render/texture-sampling bound; swap high = compositor/present bound. */
     bool   profile;
     double prof_gpu_ms, prof_swap_ms;
-    /* gaze cursor (grab.c): the final camera yaw/pitch (rad) render_frame looked
-     * along this frame, so the cursor can warp to where the eye points while Cmd
-     * is held. gaze_have gates it off until the first head-tracked frame. */
+    /* head gaze (grab.c): the final camera yaw/pitch (rad) render_frame looked
+     * along this frame, so shake-to-gaze ("find my cursor") can warp the cursor to
+     * where the eye points. gaze_have gates it off until the first tracked frame. */
     float gaze_yaw, gaze_pitch;
     bool  gaze_have;
     /* 3D pointer (grab.c publishes the cursor's wall-space look direction each
@@ -298,6 +297,21 @@ std::string profile_default_path();                       /* $MIRAGE_PROFILE / X
 int  profile_load(const char *path, mirage_config *c);    /* overlay present keys; count */
 bool profile_save(const char *path, const mirage_config *c);
 void profile_apply(mirage_config *dst, const mirage_config *src);  /* copy calib fields */
+
+/* ui_state.toml - persisted HUD selections (geometry toggle, env brightness, active
+ * environment, active layout) so the wall comes back as you left it. Separate from
+ * the calibration profile: these are user-facing runtime choices, not per-rig tuning,
+ * and they must NOT ride the profile_apply re-stamp (which would pin them per layout).
+ * ui_state_save snapshots the live mirage; ui_state_load fills *s for main to apply. */
+typedef struct {
+    bool  has_geometry;  int   geometry;       /* GEOM_CYLINDER / GEOM_FLAT */
+    bool  has_env;       int   env;            /* active_env index          */
+    bool  has_brightness; float brightness;    /* env_brightness            */
+    bool  has_layout;    char  layout[64];     /* active layout NAME        */
+} mirage_ui_state;
+std::string ui_state_default_path();                      /* $MIRAGE_UI_STATE / XDG path */
+int  ui_state_load(const char *path, mirage_ui_state *s); /* present keys; count          */
+bool ui_state_save(const char *path, const struct mirage *m);
 
 /* calib.c - in-glasses guided calibration overlay. calib_init picks the cadence
  * (full wizard on first run, else quick centre); calib_update runs the state
@@ -362,7 +376,7 @@ void layout_wall_extent(const struct mirage *m, float *yaw_c, float *arc_total, 
 
 /* Sensitivity slider (in-view widget): one draggable handle sets yaw_gain and
  * pitch_gain together (look sensitivity), a DEFAULT button resets them. render.c
- * draws it under the centre screen alongside the GAZE/FPS plaques; grab.c hit-tests
+ * draws it under the centre screen alongside the FPS plaque; grab.c hit-tests
  * a cursor against it and drives the value. The geometry is computed ONCE here so
  * the picture and the click can't disagree (the same trick layout_pick plays for
  * the screens). Everything is in the centre screen's LOCAL frame (metres, on the
@@ -398,6 +412,10 @@ typedef struct {
     float bri_track_h;                     /* track thickness (m)                 */
     float bri_handle_x;                    /* handle centre for current brightness */
     float bri_handle_w, bri_handle_h;      /* handle size (m)                     */
+    /* flat/curved geometry toggle: one button row below the brightness slider */
+    float geo_x0, geo_x1;                  /* button horizontal extent (m)        */
+    float geo_y0, geo_y1;                  /* button vertical extent (m)          */
+    int   geo_flat;                        /* 1 = currently flat (else curved)    */
 } sens_panel;
 
 #define BRI_MIN 0.20f

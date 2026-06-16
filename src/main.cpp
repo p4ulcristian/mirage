@@ -210,17 +210,39 @@ int main(void) {
       calib_init(&M, np > 0);
     }
 
+    /* persisted HUD selections (geometry toggle, brightness, environment, active
+     * layout): read once here, applied below after the layout is resolved. Kept
+     * apart from the calibration profile so they don't ride the profile_apply
+     * re-stamp. No file yet = first run, the compiled/layout defaults stand. */
+    mirage_ui_state ui{};
+    { std::string up = ui_state_default_path();
+      if (ui_state_load(up.c_str(), &ui) > 0)
+          std::print(stderr, "mirage: loaded HUD state from {}\n", up); }
+
     /* named layouts: if layouts.conf is present, apply the active one over the
      * hardcoded defaults. Toggle between them at runtime with Alt+1/2/3 (grab.c).
      * Path overridable via $MIRAGE_LAYOUTS; otherwise the cwd's layouts.conf. */
     { const char *lp = getenv("MIRAGE_LAYOUTS");
       if (!lp || !*lp) lp = "layouts.conf";
       if (layouts_load(&M.layouts, lp) > 0) {
+          /* restore the last-active layout by name (overrides layouts.conf's own
+           * `active`), so the wall comes back to the one the user left running. */
+          if (ui.has_layout)
+              for (int i = 0; i < M.layouts.n; i++)
+                  if (!strcmp(M.layouts.l[i].name, ui.layout)) { M.layouts.active = i; break; }
           M.cfg = M.layouts.l[M.layouts.active].cfg;
           profile_apply(&M.cfg, &M.calib_cfg);   /* keep calibration over the layout */
           std::print(stderr, "mirage: loaded {} layout(s) from {}, active '{}'\n",
                   M.layouts.n, lp, M.layouts.l[M.layouts.active].name);
       } }
+
+    /* apply the remaining persisted HUD selections over the resolved layout: the
+     * flat/curved toggle, brightness, and environment all override the layout's own
+     * values (they're user choices, not part of the layout). env_switch just stamps
+     * cfg.hdri_* + flags a reload; the first rendered frame does the GL work. */
+    if (ui.has_geometry)   M.cfg.geometry  = ui.geometry;
+    if (ui.has_brightness) M.env_brightness = ui.brightness;
+    if (ui.has_env)        env_switch(&M, ui.env);
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);

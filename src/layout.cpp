@@ -270,7 +270,7 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
 }
 
 /* Sensitivity slider geometry. Hangs the slider row under the centre screen, BELOW
- * the GAZE/FPS/help plaque stack (we recompute that stack's metres here so the row
+ * the FPS/help plaque stack (we recompute that stack's metres here so the row
  * lands just under it). The centre screen is the one nearest dead-ahead - smallest
  * |yaw|, lowest lift on a tie - exactly as render picks it for the plaques. The
  * handle's x is the current gain lerped across the track; render draws there and
@@ -297,8 +297,7 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
     /* mirror the plaque stack in render.cpp to find where the help block bottoms
      * out, then drop the slider row a little below it. */
     const float fullH  = 0.11f;
-    float yc_gaze = -hh - 0.05f - fullH * 0.5f;
-    float yc_fps  = yc_gaze - fullH - 0.02f;
+    float yc_fps  = -hh - 0.05f - fullH * 0.5f;   /* FPS plaque tops the stack */
     float fps_bot = yc_fps - fullH * 0.5f;
     const float blockH = 0.26f;
     float yc_help  = fps_bot - 0.03f - blockH * 0.5f;
@@ -379,5 +378,15 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
     float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
     bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
     out->bri_handle_x = out->bri_x0 + bf * (out->bri_x1 - out->bri_x0);
+
+    /* flat/curved toggle: a single button spanning the track, one row below the
+     * brightness slider. Label/highlight reflect the current geometry; a click flips
+     * it (grab.cpp). */
+    const float geo_h = 0.06f;
+    out->geo_x0 = out->track_x0;
+    out->geo_x1 = out->track_x1;
+    out->geo_y1 = out->bri_row_y - out->bri_handle_h * 0.5f - 0.04f;
+    out->geo_y0 = out->geo_y1 - geo_h;
+    out->geo_flat = (m->cfg.geometry == GEOM_FLAT);
     return true;
 }

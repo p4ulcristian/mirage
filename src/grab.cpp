@@ -68,10 +68,6 @@ typedef struct {
     double cyaw, cpitch;       /* pointer direction in wall space (rad)  */
     int    cur;                 /* screen the cursor is currently on      */
     float  sens;               /* trackpad delta -> angular motion (rad/unit) */
-    float  gaze_gain;          /* scales gaze delta -> cursor delta (1 = 1:1)     */
-    double gaze_prev_yaw, gaze_prev_pitch;  /* last frame's gaze direction (rad)  */
-    bool   gaze_prev_valid;    /* false until the first gaze sample is seeded     */
-    uint32_t last_alt_ms;      /* last Alt press (for double-tap gaze toggle) */
     uint32_t last_super_ms;    /* last Cmd press (for double-tap recenter)    */
     double scroll_acc;         /* accumulated trackpad delta -> wheel notches */
 
@@ -218,6 +214,14 @@ static void sens_persist(struct mirage *m) {
     m->have_profile = true;
 }
 
+/* Persist the HUD selections (geometry toggle, brightness, environment, active
+ * layout) to ui_state.toml so the wall comes back as the user left it. Called from
+ * the widget hit-tests below whenever one of those choices changes at runtime. */
+static void ui_persist(struct mirage *m) {
+    std::string p = ui_state_default_path();
+    ui_state_save(p.c_str(), m);
+}
+
 /* Map the handle's x (clamped to the track) to a gain and set BOTH yaw and pitch
  * (one knob: look sensitivity). */
 static void sens_set_from_local(struct mirage *m, const sens_panel *sp, float lx) {
@@ -257,8 +261,8 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         if (key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {
             g->super = down;               /* Cmd gates scroll zoom */
             /* Double-tap Cmd recenters the head pose (current look = straight
-             * ahead). Two presses within 350 ms; a single Cmd press/hold (zoom,
-             * gaze) is unaffected. */
+             * ahead). Two presses within 350 ms; a single Cmd press/hold (zoom)
+             * is unaffected. */
             if (down) {
                 uint32_t t = now_ms();
                 if (t - g->last_super_ms < 350u) {
@@ -270,36 +274,19 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 }
             }
         }
-        if (down && key != KEY_LEFTMETA && key != KEY_RIGHTMETA
-                 && key != KEY_LEFTALT  && key != KEY_RIGHTALT) {
-            /* Any other key (e.g. the V in Cmd+V) breaks a double-tap: the two
-             * modifier presses must be consecutive with nothing between them. */
+        if (down && key != KEY_LEFTMETA && key != KEY_RIGHTMETA) {
+            /* Any other key (e.g. the V in Cmd+V) breaks the Cmd double-tap: the two
+             * presses must be consecutive with nothing between them. */
             g->last_super_ms = 0;
-            g->last_alt_ms   = 0;
         }
-        /* Alt+1 / Alt+2 / Alt+3 switch to the Nth named layout (layouts.conf).
-         * Alt-held + number, so it never collides with the Alt double-tap above. */
+        /* Alt+1 / Alt+2 / Alt+3 switch to the Nth named layout (layouts.conf). */
         if (down && g->alt && (key == KEY_1 || key == KEY_2 || key == KEY_3)) {
             int idx = key == KEY_1 ? 0 : key == KEY_2 ? 1 : 2;
             layouts_switch(g->m, idx);
+            ui_persist(g->m);            /* remember the active layout across restarts */
         }
-        if (key == KEY_LEFTALT || key == KEY_RIGHTALT) {
-            g->alt = down;                  /* track Alt for the Alt+N layout combo */
-            /* Double-tap Alt toggles the gaze-follow cursor. Two presses within
-             * 350 ms flips it; a single Alt tap does nothing here. */
-            if (down) {
-                uint32_t t = now_ms();
-                if (t - g->last_alt_ms < 350u) {
-                    g->m->cfg.gaze_cursor = !g->m->cfg.gaze_cursor;
-                    g->gaze_prev_valid = false;   /* reseed delta on next frame */
-                    g->last_alt_ms = 0;    /* consume, so a third tap re-arms */
-                    std::print(stderr, "grab: gaze cursor {}\n",
-                            g->m->cfg.gaze_cursor ? "ON" : "OFF");
-                } else {
-                    g->last_alt_ms = t;
-                }
-            }
-        }
+        if (key == KEY_LEFTALT || key == KEY_RIGHTALT)
+            g->alt = down;               /* track Alt for the Alt+N layout combo */
         break;
     }
     case LIBINPUT_EVENT_POINTER_MOTION: {
@@ -401,6 +388,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                         ly >= sp.lay_y0 && ly <= sp.lay_y1) { lhit = k; break; }
                 if (lhit >= 0) {
                     layouts_switch(g->m, lhit);
+                    ui_persist(g->m);                /* remember the active layout    */
                     g->sens_click = true;            /* swallow the matching release */
                     break;
                 }
@@ -411,7 +399,18 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                         ly >= sp.env_y0 && ly <= sp.env_y1) { ehit = k; break; }
                 if (ehit >= 0) {
                     env_switch(g->m, ehit);
+                    ui_persist(g->m);                /* remember the environment      */
                     g->sens_click = true;            /* swallow the matching release */
+                    break;
+                }
+                /* flat/curved toggle: a click flips the geometry and rebuilds meshes. */
+                if (lx >= sp.geo_x0 && lx <= sp.geo_x1 &&
+                    ly >= sp.geo_y0 && ly <= sp.geo_y1) {
+                    g->m->cfg.geometry =
+                        g->m->cfg.geometry == GEOM_FLAT ? GEOM_CYLINDER : GEOM_FLAT;
+                    g->m->layout_dirty = true;       /* render thread rebuilds meshes  */
+                    ui_persist(g->m);                /* remember the toggle            */
+                    g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
                 /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
@@ -437,6 +436,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     sens_persist(g->m);
                     std::print(stderr, "grab: sensitivity {}x\n", g->m->cfg.yaw_gain);
                 } else if (was_bri) {
+                    ui_persist(g->m);                /* remember the brightness        */
                     std::print(stderr, "grab: env brightness {:.2f}\n", g->m->env_brightness);
                 }
                 break;
@@ -499,34 +499,6 @@ void grab_pump(struct mirage *m) {
     while ((ev = libinput_get_event(g->li))) {
         handle_event(g, ev);
         libinput_event_destroy(ev);
-    }
-
-    /* Gaze cursor (toggled by double-tap Cmd): move the cursor by HOW MUCH the
-     * gaze shifted since last frame, not toward where it points. A still head
-     * (the camera read-deadband freezes gaze_yaw/pitch) yields a zero delta, so
-     * the cursor stays exactly where your hand left it - no magnet, no jump-back.
-     * Move your head and the cursor travels the same amount, keeping the hand's
-     * offset. The trackpad deltas above already landed this frame; gaze just adds
-     * its own on top. */
-    if (m->cfg.gaze_cursor && m->gaze_have) {
-        double ty = m->gaze_yaw, tp = m->gaze_pitch;
-        if (!g->gaze_prev_valid) {
-            g->gaze_prev_yaw = ty; g->gaze_prev_pitch = tp;
-            g->gaze_prev_valid = true;
-        } else {
-            double dy = ty - g->gaze_prev_yaw, dp = tp - g->gaze_prev_pitch;
-            g->gaze_prev_yaw = ty; g->gaze_prev_pitch = tp;
-            /* Cursor and gaze now share wall-space angles, so the head delta adds
-             * straight onto the pointer direction - no strip reprojection, no
-             * nearest-screen reclassification to produce phantom jumps. */
-            if (dy != 0.0 || dp != 0.0) {
-                g->cyaw   += dy * g->gaze_gain;
-                g->cpitch += dp * g->gaze_gain;
-                if (g->cpitch >  1.4) g->cpitch =  1.4;
-                if (g->cpitch < -1.4) g->cpitch = -1.4;
-                push_cursor(g);
-            }
-        }
     }
 
     wl_display_flush(m->display);
@@ -608,9 +580,6 @@ bool grab_init(struct mirage *m) {
      * px/unit at ~3000 px/rad). Angular, so the feel is the same regardless of
      * screen distance, and motion is linear in finger travel at any speed. */
     g->sens = 1.0e-4f;
-    /* Gaze-follow gain: cursor travel per unit of gaze travel; 1.0 = the cursor
-     * moves exactly as far as the point you're looking at. */
-    g->gaze_gain = 1.0f;
     g->uifd = -1;               /* opened lazily on capture (fd 0 is valid!) */
     /* Auto-detect input devices by capability, not name or event number (neither
      * is stable across boots/replug): the multitouch trackpad, then every
