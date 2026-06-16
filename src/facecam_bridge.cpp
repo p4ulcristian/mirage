@@ -57,6 +57,8 @@ struct Opts {
     float fov_h  = 55.0f;   /* horizontal field of view of the webcam, degrees */
     bool  mirror = false;   /* set if the cam delivers a mirrored (selfie) image */
     bool  verbose = false;
+    int   threads = 2;      /* OpenCV worker threads (default 8 thrashes a busy box) */
+    int   fps_cap = 30;     /* cap the processing rate; head position is slow */
 };
 
 static void usage(const char *p) {
@@ -103,6 +105,11 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
 
+    /* Cap OpenCV's worker threads. YuNet barely parallelises at this size, but the
+     * default (one per core) spawns 8 threads that thrash and burn ~130% CPU for ~10
+     * fps on a busy machine. 2 is plenty and frees cores for mirage. */
+    cv::setNumThreads(o.threads);
+
     /* --- camera --- */
     cv::VideoCapture cap(o.camera, cv::CAP_V4L2);
     if (!cap.isOpened()) {
@@ -111,6 +118,7 @@ int main(int argc, char **argv) {
     }
     cap.set(cv::CAP_PROP_FRAME_WIDTH,  o.width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, o.height);
+    cap.set(cv::CAP_PROP_FPS, o.fps_cap);   /* head position is slow; no need for 100+ fps */
     int W = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
     int H = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
     if (W <= 0 || H <= 0) { W = o.width; H = o.height; }
@@ -166,7 +174,17 @@ int main(int argc, char **argv) {
         return d[d.size() / 2];
     };
 
+    double t_pace = now_s();
+    const double frame_budget = o.fps_cap > 0 ? 1.0 / (double)o.fps_cap : 0.0;
     while (!g_stop) {
+        /* Pace the loop to fps_cap even if the camera ignores CAP_PROP_FPS: head
+         * position barely changes, so running detection 100+ times/sec just burns
+         * cores mirage needs. Sleep the remainder of this frame's budget. */
+        if (frame_budget > 0.0) {
+            double slack = frame_budget - (now_s() - t_pace);
+            if (slack > 0.0) usleep((useconds_t)(slack * 1e6));
+            t_pace = now_s();
+        }
         if (!cap.read(frame) || frame.empty()) { usleep(5000); continue; }
         frames++;
 
