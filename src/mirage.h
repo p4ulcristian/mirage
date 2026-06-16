@@ -64,11 +64,6 @@ typedef struct {
     /* curved-screen mesh (built once, drawn each frame in 3D mode) */
     GLuint   mesh_vbo;
     int      mesh_verts;
-
-    /* slab body: 5 solid faces (top/bottom/left/right/back) extruded behind the
-     * front face to give each screen real thickness (built once, 3D mode only). */
-    GLuint   slab_vbo;
-    int      slab_verts;
 } screen_t;
 
 typedef struct {
@@ -90,7 +85,6 @@ typedef struct {
      * the metres above eye level. Set by named layouts (layouts.c). */
     float screen_yaw_deg[MIRAGE_MAX_SCREENS];  /* NAN = auto (column) */
     float screen_lift_m [MIRAGE_MAX_SCREENS];  /* NAN = auto (row)    */
-    float slab_depth_m;         /* screen thickness; 0 = flat panels (no slab) */
     bool  gaze_cursor;          /* Cmd-held: cursor follows head gaze (grab.c)  */
 
     /* glasses optics */
@@ -322,7 +316,7 @@ float calib_progress(const struct mirage *m);     /* 0..1 in CENTER, <0 = no bar
 mirage_status render_init(struct mirage *m);
 void render_frame(struct mirage *m, quat head);   /* 3D head-tracked arc      */
 void render_finish(struct mirage *m);
-/* (re)build every screen's mesh + slab from the current cfg; call after a layout
+/* (re)build every screen's mesh from the current cfg; call after a layout
  * switch changes arcs/geometry/distance. Safe to call only with a live GL ctx. */
 void render_rebuild_meshes(struct mirage *m);
 

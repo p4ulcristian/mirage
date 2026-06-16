@@ -51,7 +51,6 @@ void mirage_config_defaults(mirage_config *c) {
     c->screen_lift_m[5]  = 0.41f;  /* VIRT6 col3 portrait, bottom aligned */
     c->screen_lift_m[6]  = 0.41f;  /* VIRT7 col4 portrait, bottom aligned */
     c->screen_cols       = 5;      /* informational; explicit_layout drives placement */
-    c->slab_depth_m      = 0.05f;  /* 5 cm thick: real edges/sides, lit from above */
     c->gaze_cursor       = false;  /* off by default; double-tap Alt toggles */
     c->fov_deg           = 26.0f;  /* glasses vertical FOV (approx)     */
     c->pose_port         = 4242;

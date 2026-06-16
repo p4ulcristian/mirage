@@ -63,7 +63,6 @@ static void apply_screen(mirage_config *cfg, const toml::table &sc) {
 /* Apply the global (non-screen) keys of a [[layout]] table. */
 static void apply_globals(mirage_config *cfg, const toml::table &t) {
     if (auto v = t["distance"].value<double>())    cfg->screen_distance_m = (float)*v;
-    if (auto v = t["slab_depth"].value<double>())  cfg->slab_depth_m      = (float)*v;
     if (auto v = t["spacing"].value<double>())     cfg->arc_spacing_deg   = (float)*v;
     if (auto v = t["center_col"].value<int64_t>()) cfg->center_col        = (int)*v;
     if (auto v = t["arc"].value<double>())         cfg->screen_arc_deg    = (float)*v;

@@ -242,71 +242,7 @@ static void build_flat_mesh(struct mirage *m, screen_t *s) {
     s->mesh_verts = 4;
 }
 
-/* ---- slab body: give each screen real thickness ----------------------------
- * The textured front face is unchanged; this adds the 5 other faces of a box
- * extruded behind it (back + 4 sides). They're drawn as flat solid colour and
- * lit by a single fixed key light (brightness = ambient + n.L), so the top edge
- * glows and the underside fades to ~black = transparent on the see-through
- * optics. On the curved arc each side face catches the light differently across
- * the wall, which is what sells the panels as solid objects. */
-static const vec3  SLAB_LIGHT   = {0.356f, 0.814f, 0.458f}; /* key dir: up/front/right (unit) */
-static const float SLAB_TINT[3] = {0.55f, 0.57f, 0.62f};    /* cool-grey bezel             */
-static const float SLAB_AMBIENT = 0.12f;                    /* fill so unlit faces aren't 0 */
-
-/* face local normals, order: top, bottom, left, right, back */
-static const vec3 SLAB_N[5] = {
-    {0,1,0}, {0,-1,0}, {-1,0,0}, {1,0,0}, {0,0,-1}
-};
-
-/* Rotate a local direction into world space through a model matrix's upper-left
- * 3x3 (our model matrices are rotation+translation, so this gives the world
- * normal for lighting). Column-major: element (row,col) = m[col*4+row]. */
-static vec3 m4_dir(const mat4 *m, vec3 v) {
-    vec3 r = { m->m[0]*v.x + m->m[4]*v.y + m->m[8]*v.z,
-               m->m[1]*v.x + m->m[5]*v.y + m->m[9]*v.z,
-               m->m[2]*v.x + m->m[6]*v.y + m->m[10]*v.z };
-    return v3_norm(r);
-}
-
-/* Box around the front panel, extruded back by slab_depth_m. Front half-extents
- * match the textured mesh so the slab wraps it (curved strips bulge a touch
- * proud of the front rim - reads fine). 5 faces x 2 tris, interleaved x,y,z,u,v
- * (uv unused). No-op when slab depth is 0 (flat panels). */
-static void build_slab_mesh(struct mirage *m, screen_t *s) {
-    const mirage_config *c = &m->cfg;
-    if (c->slab_depth_m <= 0.0f) { s->slab_vbo = 0; s->slab_verts = 0; return; }
-    float d      = c->screen_distance_m;
-    float ang_w  = s->arc_deg * (float)M_PI/180.0f;
-    float aspect = (s->width > 0 && s->height > 0)
-                   ? (float)s->height / (float)s->width : 9.0f/16.0f;
-    float hw, hh;
-    if (c->geometry == GEOM_FLAT) { hw = d * tanf(ang_w * 0.5f); hh = hw * aspect; }
-    else { float L = d * ang_w; hw = L * 0.5f; hh = L * aspect * 0.5f; }
-    float zf = -d;                       /* front rim (screen plane) */
-    float zb = -d - c->slab_depth_m;     /* back rim                 */
-
-    GLfloat buf[5*6*5];
-    int k = 0;
-    #define V(X,Y,Z) do { buf[k++]=(X); buf[k++]=(Y); buf[k++]=(Z); \
-                          buf[k++]=0.0f; buf[k++]=0.0f; } while (0)
-    #define QUAD(ax,ay,az, bx,by,bz, cx,cy,cz, dx,dy,dz) do { \
-        V(ax,ay,az); V(bx,by,bz); V(cx,cy,cz); \
-        V(ax,ay,az); V(cx,cy,cz); V(dx,dy,dz); } while (0)
-    QUAD(-hw, hh,zf,  hw, hh,zf,  hw, hh,zb, -hw, hh,zb);  /* top    (+Y) */
-    QUAD(-hw,-hh,zf,  hw,-hh,zf,  hw,-hh,zb, -hw,-hh,zb);  /* bottom (-Y) */
-    QUAD(-hw, hh,zf, -hw,-hh,zf, -hw,-hh,zb, -hw, hh,zb);  /* left   (-X) */
-    QUAD( hw, hh,zf,  hw,-hh,zf,  hw,-hh,zb,  hw, hh,zb);  /* right  (+X) */
-    QUAD(-hw, hh,zb,  hw, hh,zb,  hw,-hh,zb, -hw,-hh,zb);  /* back   (-Z) */
-    #undef QUAD
-    #undef V
-
-    glGenBuffers(1, &s->slab_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, s->slab_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof buf, buf, GL_STATIC_DRAW);
-    s->slab_verts = 5*6;
-}
-
-/* (Re)build every screen's mesh + slab from the current cfg. Called once at init
+/* (Re)build every screen's mesh from the current cfg. Called once at init
  * and again whenever a layout switch changes arcs/geometry/distance; old VBOs are
  * released first so a repeated switch doesn't leak GPU buffers. Needs a live ctx. */
 void render_rebuild_meshes(struct mirage *m) {
@@ -315,7 +251,6 @@ void render_rebuild_meshes(struct mirage *m) {
     for (int i = 0; i < n; i++) {
         screen_t *s = &m->screen[i];
         if (s->mesh_vbo) { glDeleteBuffers(1, &s->mesh_vbo); s->mesh_vbo = 0; }
-        if (s->slab_vbo) { glDeleteBuffers(1, &s->slab_vbo); s->slab_vbo = 0; }
         /* each screen's angular width is its per-screen override (cfg.screen_arc[i]),
          * falling back to the default - so the wide wall and the narrower 16:9 each
          * get their own arc. */
@@ -323,7 +258,6 @@ void render_rebuild_meshes(struct mirage *m) {
                      ? m->cfg.screen_arc[i] : m->cfg.screen_arc_deg;
         if (m->cfg.geometry == GEOM_FLAT) build_flat_mesh(m, s);
         else                              build_curved_mesh(m, s);
-        build_slab_mesh(m, s);
     }
 }
 
@@ -1116,7 +1050,7 @@ void render_frame(struct mirage *m, quat head) {
 
     /* HDRI environment dome: drawn first as an infinite, world-fixed backdrop.
      * Additive (dark sky adds nothing on the optics), depth test + write off so the
-     * wall and slabs draw cleanly over it. The dome sphere (radius 50 m) dwarfs the
+     * wall draws cleanly over it. The dome sphere (radius 50 m) dwarfs the
      * neck-model eye shift (~0.1 m), so the stars stay effectively fixed in world
      * space - the far reference the near windows parallax against as you look around.
      * cfg.hdri_on gates the whole draw so the "Off" environment hides it. */
@@ -1157,27 +1091,6 @@ void render_frame(struct mirage *m, quat head) {
         mat4 model = layout_model_matrix(m, i);
         mat4 mvp   = m4_mul(vp, model);
         glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
-
-        /* slab body: the 5 non-front faces, each a solid colour lit by the fixed
-         * key light. Drawn first; the textured front face below sits in front of
-         * it (same MVP - the box is in the same local space as the panel). */
-        if (s->slab_vbo) {
-            glBindBuffer(GL_ARRAY_BUFFER, s->slab_vbo);
-            glEnableVertexAttribArray(R.aPos);
-            glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
-            glEnableVertexAttribArray(R.aUV);
-            glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
-            glUniform1f(R.uHasTex, 0.0f);
-            glUniform1f(R.uYFlip, 0.0f);
-            for (int f = 0; f < 5; f++) {
-                vec3 wn = m4_dir(&model, SLAB_N[f]);
-                float diff = wn.x*SLAB_LIGHT.x + wn.y*SLAB_LIGHT.y + wn.z*SLAB_LIGHT.z;
-                if (diff < 0.0f) diff = 0.0f;
-                float b = SLAB_AMBIENT + (1.0f - SLAB_AMBIENT) * diff;
-                glUniform3f(R.uColor, SLAB_TINT[0]*b, SLAB_TINT[1]*b, SLAB_TINT[2]*b);
-                glDrawArrays(GL_TRIANGLES, f*6, 6);
-            }
-        }
 
         glBindBuffer(GL_ARRAY_BUFFER, s->mesh_vbo);
         glEnableVertexAttribArray(R.aPos);
@@ -1380,7 +1293,6 @@ void render_finish(struct mirage *m) {
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
     for (int i = 0; i < m->n_screen; i++) {
         if (m->screen[i].mesh_vbo) { glDeleteBuffers(1, &m->screen[i].mesh_vbo); m->screen[i].mesh_vbo = 0; }
-        if (m->screen[i].slab_vbo) { glDeleteBuffers(1, &m->screen[i].slab_vbo); m->screen[i].slab_vbo = 0; }
     }
     eglMakeCurrent(m->edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (m->esurf != EGL_NO_SURFACE) eglDestroySurface(m->edpy, m->esurf);
