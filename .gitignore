@@ -5,6 +5,7 @@ build/
 mirage
 mirage-posedump
 rayneo-bridge
+viture-bridge
 facecam-bridge
 # logs / runtime
 *.log
@@ -17,3 +18,8 @@ facecam-bridge
 hdri/*.exr
 hdri/*.hdr
 hdri/*.jpg
+viture-sdk/
+
+# python bytecode
+__pycache__/
+*.pyc

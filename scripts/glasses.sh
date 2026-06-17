@@ -55,7 +55,9 @@ hyprctl eval "hl.config({ render = { direct_scanout = 1 } })" >/dev/null
 # pacing is rock-solid - measured 120.0fps, 0.00 hitches/sec, worst-frame ~11ms - so
 # the old ~95Hz present wall is gone and GPU draw is <1ms.
 echo "[glasses] locking $GLASSES to 120Hz for a stable vsync..."
-hyprctl eval "hl.monitor({ output='$GLASSES', mode='1920x1080@120', position='auto', scale=1 })" >/dev/null || true
+# The Beast only exposes 1920x1080@60 over DP on Asahi (its 120Hz mode FREEZES the
+# apple-drm/DCP driver - never set it). Keep DP-1 at the safe 60Hz mode.
+hyprctl eval "hl.monitor({ output='$GLASSES', mode='1920x1080@60', position='auto', scale=1 })" >/dev/null || true
 # fullscreen is requested by mirage itself; these rules just keep the surface
 # scanout-eligible (opaque, no blur/rounding) and pin it to $GLASSES.
 hyprctl eval "
@@ -70,7 +72,7 @@ hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
 
 echo "[glasses] virtual screens + head tracking..."
 python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
-bash "$HERE/scripts/bridge.sh" >/dev/null 2>&1 || true
+bash "$HERE/scripts/viture-bridge.sh" >/dev/null 2>&1 || true
 # webcam head-position bridge for lateral lean parallax (facecam_enable=true). Needs a
 # STABLE desk camera; for lap/3DoF use set facecam_enable=false and comment this out.
 # Log: /tmp/facecam.log

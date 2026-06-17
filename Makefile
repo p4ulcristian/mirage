@@ -65,16 +65,24 @@ OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
 OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
                  -lopencv_objdetect -lopencv_dnn
 
-.PHONY: all posedump protocols bridge facecam clean
+.PHONY: all posedump protocols bridge viture facecam clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
+viture: viture-bridge
 facecam: facecam-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
 
 rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
 	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
 	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
+
+# VITURE (Beast) head-tracking bridge. dlopen()s VITURE's v2.0.0 aarch64 SDK
+# (libglasses.so) at runtime - so it builds with no SDK present (only -ldl) - and
+# reuses the RayNeo Madgwick AHRS (rayneo.c/magcal.c) to fuse the Beast's raw IMU.
+viture-bridge: src/viture_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
+	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
+	    -o $@ src/viture_bridge.c src/rayneo.c src/magcal.c -ldl -lm
 
 facecam-bridge: src/facecam_bridge.cpp
 	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra $(OPENCV_CFLAGS) \
@@ -107,4 +115,4 @@ build/proto build/obj:
 	mkdir -p $@
 
 clean:
-	rm -rf build mirage mirage-posedump rayneo-bridge facecam-bridge
+	rm -rf build mirage mirage-posedump rayneo-bridge viture-bridge facecam-bridge
