@@ -68,24 +68,51 @@ OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
 OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
                  -lopencv_objdetect -lopencv_dnn
 
-.PHONY: all posedump protocols bridge viture facecam clean
+.PHONY: all posedump protocols bridge viture viture-vio facecam clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
 viture: viture-bridge
+viture-vio: viture-vio-bin
 facecam: facecam-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
+
+# VITURE Carina VIO (OpenVINS) bring-up harness. Links libcarina_vio.so directly
+# (the carina_vio_* exports are C-linkage but take libstdc++ types by ref, matching
+# our g++ __cxx11 ABI). rpath so it finds the .so next to the repo at runtime.
+SDK_DIR ?= viture-sdk
+viture-vio-bin: src/viture_vio.cpp src/camera.cpp src/camera.h
+	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra -Isrc -o viture-vio \
+	    src/viture_vio.cpp src/camera.cpp \
+	    -L$(SDK_DIR) -lcarina_vio -Wl,-rpath,'$$ORIGIN/$(SDK_DIR)' \
+	    -lturbojpeg -ldl -pthread
 
 rayneo-bridge: src/rayneo_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
 	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
 	    -o $@ src/rayneo_bridge.c src/rayneo.c src/magcal.c -lm
 
 # VITURE (Beast) head-tracking bridge. dlopen()s VITURE's v2.0.0 aarch64 SDK
-# (libglasses.so) at runtime - so it builds with no SDK present (only -ldl) - and
-# reuses the RayNeo Madgwick AHRS (rayneo.c/magcal.c) to fuse the Beast's raw IMU.
-viture-bridge: src/viture_bridge.c src/rayneo.c src/magcal.c src/rayneo.h src/magcal.h
-	$(CC) -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc \
-	    -o $@ src/viture_bridge.c src/rayneo.c src/magcal.c -ldl -lm
+# (libglasses.so) at runtime (so it builds with no SDK present, only -ldl) and fuses
+# the Beast's raw IMU with VQF (src/vqf, C++) - with the RayNeo Madgwick kept as an
+# A/B fallback. C sources compiled with $(CC), VQF + shim with $(CXX); linked with $(CXX).
+VB_C_OBJ   := build/obj/vb_bridge.o build/obj/vb_rayneo.o build/obj/vb_magcal.o
+VB_CPP_OBJ := build/obj/vb_vqf.o build/obj/vb_vqf_shim.o
+VB_CFLAGS  := -O2 -g -std=c11 -D_GNU_SOURCE -Wall -Wextra -Isrc
+VB_CXXFLAGS:= -O2 -g -std=gnu++17 -Wall -Wextra -Isrc
+
+build/obj/vb_bridge.o: src/viture_bridge.c src/rayneo.h src/magcal.h src/vqf_shim.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_rayneo.o: src/rayneo.c src/rayneo.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_magcal.o: src/magcal.c src/magcal.h | build/obj
+	$(CC) $(VB_CFLAGS) -c -o $@ $<
+build/obj/vb_vqf.o: src/vqf/vqf.cpp src/vqf/vqf.hpp | build/obj
+	$(CXX) $(VB_CXXFLAGS) -c -o $@ $<
+build/obj/vb_vqf_shim.o: src/vqf_shim.cpp src/vqf_shim.h src/vqf/vqf.hpp | build/obj
+	$(CXX) $(VB_CXXFLAGS) -c -o $@ $<
+
+viture-bridge: $(VB_C_OBJ) $(VB_CPP_OBJ)
+	$(CXX) -O2 -g -o $@ $^ -ldl -lm
 
 facecam-bridge: src/facecam_bridge.cpp
 	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra $(OPENCV_CFLAGS) \

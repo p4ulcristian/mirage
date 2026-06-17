@@ -35,10 +35,18 @@ if pgrep -x viture-bridge >/dev/null 2>&1; then
     n1=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1)
     sleep 1
     n2=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1)
-    if [ -n "$n1" ] && [ "$n1" != "$n2" ]; then
+    # Don't keep a stale binary: if viture-bridge was rebuilt AFTER the running one
+    # started, the healthy-bridge keep below would silently run the OLD code (so a
+    # fresh build's changes never take effect). Force a restart when $BIN is newer.
+    rpid=$(pgrep -x viture-bridge | head -1)
+    binm=$(stat -c %Y "$BIN" 2>/dev/null || echo 0)
+    et=$(ps -o etimes= -p "$rpid" 2>/dev/null | tr -d ' '); et=${et:-0}
+    started=$(( $(date +%s) - et ))
+    if [ -n "$n1" ] && [ "$n1" != "$n2" ] && [ "$binm" -le "$started" ]; then
         echo "viture-bridge already streaming ($n2) - keeping it"
         exit 0
     fi
+    [ "$binm" -gt "$started" ] && echo "viture-bridge binary is newer than the running one - restarting to pick it up..."
     echo "existing viture-bridge is wedged (no samples) - restarting..."
     sudo -n pkill -x viture-bridge 2>/dev/null || pkill -x viture-bridge 2>/dev/null || true
     for _ in $(seq 1 20); do pgrep -x viture-bridge >/dev/null 2>&1 || break; sleep 0.2; done

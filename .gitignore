@@ -23,3 +23,7 @@ viture-sdk/
 # python bytecode
 __pycache__/
 *.pyc
+
+# VIO harness binary + its generated config
+viture-vio
+viture-vio-config/

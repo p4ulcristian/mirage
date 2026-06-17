@@ -44,7 +44,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "rayneo.h"   /* reuse the Madgwick AHRS (rayneo_ahrs_*) + rayneo_imu */
+#include "rayneo.h"   /* reuse rayneo_imu + the legacy Madgwick AHRS (A/B fallback) */
+#include "vqf_shim.h" /* VQF: modern AHRS w/ runtime gyro-bias est + accel/mag rejection */
 
 #define VITURE_VID  0x35ca
 #define BEAST_PID   0x1201
@@ -79,6 +80,40 @@ static int  (*xr_get_gl_pose)(XRH, float*, double);   /* get_gl_pose_carina(hand
 static int  g_probe_gl = 0;
 static long g_pose_n = 0;
 static double g_pose_log = 0;
+/* Direct Carina-engine probes. libcarina_vio.so is a NEEDED dep of libglasses.so,
+ * which we dlopen with RTLD_GLOBAL, so these C-linkage exports resolve through the
+ * libglasses handle. They are VITURE's *own* fusion outputs - the thing that makes
+ * their anchor rock-solid - which we currently throw away in favour of our Madgwick:
+ *   get_imu_pose : factory-calibrated IMU filter (Tier-1 anchor, no camera needed)
+ *   get_gl_pose  : 6DOF GL transform (Tier-2 VIO, if the a1088/VIO path is live)
+ * Signatures from objdump+c++filt: carina_api::get_imu_pose(float*,double),
+ * get_gl_pose(float*,double). We pass a 16-float buffer (room for a 4x4) to be safe. */
+static int (*ca_imu_pose)(float*, double);
+static int (*ca_gl_pose)(float*, double);
+static double g_capose_log = 0;
+
+/* High-level libglasses Carina path (what XRLinuxDriver uses for 6DoF). The SDK's
+ * CarinaDeviceProvider reads the device's factory calibration + drives the cameras +
+ * runs the VIO internally - the app passes NO config. We just create->initialize->
+ * register_callbacks_carina->start, then poll get_gl_pose_carina. The whole question
+ * is whether the Beast reports device_type == CARINA so this path is available. */
+static double now_sec(void);   /* fwd decl (defined below; used by on_carina_pose) */
+typedef void (*carina_pose_cb)(float*, double);
+typedef void (*carina_vsync_cb)(double);
+typedef void (*carina_imu_cb)(float*, double);
+typedef void (*carina_cam_cb)(char*,char*,char*,char*,double,int,int);
+static int (*xr_reg_carina)(XRH, carina_pose_cb, carina_vsync_cb, carina_imu_cb, carina_cam_cb);
+static int (*xr_get_devtype)(XRH);
+static int (*xr_reset_carina)(XRH);
+static long g_cpose_n = 0; static double g_cpose_log = 0;
+static void on_carina_pose(float *pose, double ts){
+    (void)ts; g_cpose_n++;
+    double t = now_sec();
+    if (t - g_cpose_log >= 0.3){ g_cpose_log = t;
+        fprintf(stderr,"CARINA-POSE n=%ld | [0..8] % .4f % .4f % .4f | % .4f % .4f % .4f % .4f | % .4f % .4f\n",
+                g_cpose_n, pose[0],pose[1],pose[2], pose[3],pose[4],pose[5],pose[6], pose[7],pose[8]);
+    }
+}
 
 static volatile sig_atomic_t g_run = 1;
 static int g_stall = 0;           /* set when the watchdog trips -> re-exec to recover */
@@ -91,6 +126,8 @@ static double now_sec(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t
 
 /* ---- shared with the SDK's IMU callback thread ---- */
 static rayneo_ahrs g_ahrs;
+static vqf_handle *g_vqf = NULL;     /* VQF filter (default); NULL falls back to Madgwick */
+static int g_use_vqf = 1;            /* --madgwick sets 0 for A/B against the old filter */
 static int g_sock; static struct sockaddr_in g_dst;
 static int g_qi[4]; static double g_qs[4];      /* output quaternion remap */
 /* input axis remap, Beast sensor->AHRS frame. Default = "-z,x,-y" (forward<-(-z),
@@ -102,6 +139,11 @@ static float g_dt = 1.0f/120.0f;                 /* fixed sample dt (SDK streams
 static int g_verbose, g_use_mag;
 static int g_seeded = 0;
 static float g_gyro_bias[3] = {0,0,0};
+/* Live magnetometer span tracker (raw sensor frame d[6..8]). If the mag is real,
+ * each axis min/max spreads as you rotate the glasses (do a slow figure-8); the
+ * centre (min+max)/2 is the hard-iron bias, the half-span the per-axis scale.
+ * If the spans stay ~0, the Beast isn't streaming mag and Path A is off. */
+static float g_mag_min[3]={1e9f,1e9f,1e9f}, g_mag_max[3]={-1e9f,-1e9f,-1e9f};
 static long g_n = 0;
 static double g_last_log = 0;
 static double g_last_raw = 0;     /* monotonic time of the last raw IMU callback (stall watchdog) */
@@ -122,37 +164,66 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
         s.mag[i]      = sg * d[6+j];
     }
 
-    /* seed orientation to gravity once (pitch/roll start level) */
-    if (!g_seeded){
-        rayneo_imu g = s; g.gyro_rad[0]=g.gyro_rad[1]=g.gyro_rad[2]=0;
-        float sb=g_ahrs.beta; g_ahrs.beta=2.0f;
-        for (int it=0; it<400; it++) rayneo_ahrs_update(&g_ahrs,&g,0.01f);
-        g_ahrs.beta=sb; g_seeded=1;
+    double src[4];
+    if (g_use_vqf){
+        /* VQF does its own gravity init, continuous gyro-bias estimation, filtered tilt
+         * correction, and (9-axis) magnetic-disturbance rejection - so none of the manual
+         * seed/bias hacks the Madgwick path needs apply. Feed gyro rad/s + accel m/s^2
+         * (Beast accel is in g) [+ mag in the same remapped frame]. */
+        double gyr[3] = { s.gyro_rad[0], s.gyro_rad[1], s.gyro_rad[2] };
+        double acc[3] = { s.accel[0]*9.80665, s.accel[1]*9.80665, s.accel[2]*9.80665 };
+        if (g_use_mag){ double mag[3]={s.mag[0],s.mag[1],s.mag[2]};
+            vqf_update9(g_vqf,gyr,acc,mag); vqf_quat9(g_vqf,src); }
+        else { vqf_update6(g_vqf,gyr,acc); vqf_quat6(g_vqf,src); }
+    } else {
+        /* legacy Madgwick A/B path (--madgwick): seed to gravity, auto-zero gyro bias, fuse. */
+        if (!g_seeded){
+            rayneo_imu g = s; g.gyro_rad[0]=g.gyro_rad[1]=g.gyro_rad[2]=0;
+            float sb=g_ahrs.beta; g_ahrs.beta=2.0f;
+            for (int it=0; it<400; it++) rayneo_ahrs_update(&g_ahrs,&g,0.01f);
+            g_ahrs.beta=sb; g_seeded=1;
+        }
+        float gm = sqrtf(s.gyro_rad[0]*s.gyro_rad[0]+s.gyro_rad[1]*s.gyro_rad[1]+s.gyro_rad[2]*s.gyro_rad[2]);
+        if (gm < 2.5f*(float)(M_PI/180.0)){
+            float lr = dt/1.5f; if (lr>0.05f) lr=0.05f;
+            for (int k=0;k<3;k++) g_gyro_bias[k]+=lr*(s.gyro_rad[k]-g_gyro_bias[k]);
+        }
+        for (int k=0;k<3;k++) s.gyro_rad[k]-=g_gyro_bias[k];
+        if (g_use_mag) rayneo_ahrs_update9(&g_ahrs,&s,s.mag,dt);
+        else           rayneo_ahrs_update(&g_ahrs,&s,dt);
+        src[0]=g_ahrs.q[0]; src[1]=g_ahrs.q[1]; src[2]=g_ahrs.q[2]; src[3]=g_ahrs.q[3];
     }
-    /* gyro bias auto-zero while still (kills heading drift) */
-    float gm = sqrtf(s.gyro_rad[0]*s.gyro_rad[0]+s.gyro_rad[1]*s.gyro_rad[1]+s.gyro_rad[2]*s.gyro_rad[2]);
-    if (gm < 2.5f*(float)(M_PI/180.0)){
-        float lr = dt/1.5f; if (lr>0.05f) lr=0.05f;
-        for (int k=0;k<3;k++) g_gyro_bias[k]+=lr*(s.gyro_rad[k]-g_gyro_bias[k]);
-    }
-    for (int k=0;k<3;k++) s.gyro_rad[k]-=g_gyro_bias[k];
 
-    if (g_use_mag) rayneo_ahrs_update9(&g_ahrs,&s,s.mag,dt);
-    else           rayneo_ahrs_update(&g_ahrs,&s,dt);
-
-    double src[4] = { g_ahrs.q[0], g_ahrs.q[1], g_ahrs.q[2], g_ahrs.q[3] };
     double out[4]; for (int k=0;k<4;k++) out[k]=g_qs[k]*src[g_qi[k]];
     double nm = sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]+out[3]*out[3]);
     if (nm>1e-9) for(int k=0;k<4;k++) out[k]/=nm;
     sendto(g_sock,out,sizeof out,0,(struct sockaddr*)&g_dst,sizeof g_dst);
     g_n++;
 
+    /* track raw mag span (sensor frame) so we can see if the mag is real + get its range */
+    for (int k=0;k<3;k++){ float m=d[6+k];
+        if (m<g_mag_min[k]) g_mag_min[k]=m;
+        if (m>g_mag_max[k]) g_mag_max[k]=m; }
+
     double t = now_sec();
     g_last_raw = t;               /* feed the stall watchdog */
     if (g_verbose && t-g_last_log>=0.25){
-        float yaw,pitch,roll; rayneo_ahrs_euler(&g_ahrs,&yaw,&pitch,&roll);
-        fprintf(stderr,"ypr % 7.1f % 7.1f % 7.1f | RAWacc % 6.2f % 6.2f % 6.2f | RAWgyr % 6.2f % 6.2f % 6.2f | n %ld\n",
-                yaw,pitch,roll, d[3],d[4],d[5], d[0],d[1],d[2], g_n);
+        /* euler from the fused (pre-qmap) quaternion - same for either filter */
+        rayneo_ahrs tmp; tmp.q[0]=src[0]; tmp.q[1]=src[1]; tmp.q[2]=src[2]; tmp.q[3]=src[3];
+        float yaw,pitch,roll; rayneo_ahrs_euler(&tmp,&yaw,&pitch,&roll);
+        if (g_use_vqf){
+            double bias[3]={0,0,0}; vqf_get_bias(g_vqf,bias);
+            fprintf(stderr,"[VQF%s] ypr % 7.1f % 7.1f % 7.1f | bias(deg/s) % 5.2f % 5.2f % 5.2f | rest %d magrej %d | n %ld\n",
+                    g_use_mag?"+mag":"", yaw,pitch,roll,
+                    bias[0]*57.2958,bias[1]*57.2958,bias[2]*57.2958,
+                    vqf_rest_detected(g_vqf), vqf_mag_dist_detected(g_vqf), g_n);
+        } else {
+            float mm = sqrtf(d[6]*d[6]+d[7]*d[7]+d[8]*d[8]);
+            fprintf(stderr,"[MADG] ypr % 7.1f % 7.1f % 7.1f | acc % 6.2f % 6.2f % 6.2f | gyr % 6.2f % 6.2f % 6.2f "
+                    "| MAG % 7.1f % 7.1f % 7.1f |m|% 6.1f span[% 6.1f % 6.1f % 6.1f] n %ld\n",
+                    yaw,pitch,roll, d[3],d[4],d[5], d[0],d[1],d[2], d[6],d[7],d[8], mm,
+                    g_mag_max[0]-g_mag_min[0], g_mag_max[1]-g_mag_min[1], g_mag_max[2]-g_mag_min[2], g_n);
+        }
         g_last_log=t;
     }
 }
@@ -239,7 +310,7 @@ static void load_tuning(void){
 
 int main(int argc,char**argv){
     g_argv = argv;                /* for self-re-exec on an IMU stall */
-    int port=4242, freq=2, log=1, dispmode=-1; float beta=0.02f;  /* 0.02 = tremor-free on the Beast (0.08 yanked on accel) */
+    int port=4242, freq=2, log=1, dispmode=-1, dump_calib=0, carina=0, native=0, dofval=3; float beta=0.02f;  /* 0.02 = tremor-free on the Beast (0.08 yanked on accel) */
     const char*host="127.0.0.1",*qmap="w,x,y,z",*lib=NULL;
     for(int i=1;i<argc;i++){
         if      (!strcmp(argv[i],"--port")&&i+1<argc) port=atoi(argv[++i]);
@@ -252,14 +323,21 @@ int main(int argc,char**argv){
         else if (!strcmp(argv[i],"--beta")&&i+1<argc) beta=atof(argv[++i]);
         else if (!strcmp(argv[i],"--gyro-scale")&&i+1<argc) g_gyro_scale=atof(argv[++i]);
         else if (!strcmp(argv[i],"--mag")) g_use_mag=1;
+        else if (!strcmp(argv[i],"--madgwick")) g_use_vqf=0;  /* A/B: use the old Madgwick filter */
         else if (!strcmp(argv[i],"--sdk-log")) log=3;
         else if (!strcmp(argv[i],"--probe-gl")) g_probe_gl=1;  /* also poll get_gl_pose (VIO probe) */
+        else if (!strcmp(argv[i],"--dump-calib")) dump_calib=1; /* fetch factory cam/IMU cal blob -> /tmp/viture-calib.bin, then exit */
+        else if (!strcmp(argv[i],"--carina")) carina=1;         /* XRLinuxDriver high-level 6DoF path probe */
+        else if (!strcmp(argv[i],"--native")) native=1;         /* read the firmware's native fused 3DoF (anchor-mode) pose */
+        else if (!strcmp(argv[i],"--dof")&&i+1<argc) dofval=atoi(argv[++i]); /* native_dof value to enable (default 3) */
         else if (!strcmp(argv[i],"--verbose")||!strcmp(argv[i],"-v")) g_verbose=1;
         else { fprintf(stderr,"usage: %s [--lib DIR] [--port N] [--host IP] [--qmap w,x,y,z] "
-               "[--freq 0..4] [--beta F] [--gyro-scale F] [--mag] [--sdk-log] [--probe-gl] [-v]\n",argv[0]); return 2; }
+               "[--freq 0..4] [--beta F] [--gyro-scale F] [--mag] [--sdk-log] [--probe-gl] [--dump-calib] [-v]\n",argv[0]); return 2; }
     }
     if (parse_qmap(qmap,g_qi,g_qs)){ fprintf(stderr,"bad --qmap '%s'\n",qmap); return 2; }
     { const float hz[5]={60,90,120,240,500}; g_dt = 1.0f / hz[(freq>=0&&freq<=4)?freq:2]; }
+    if (g_use_vqf){ g_vqf = vqf_create((double)g_dt);
+        fprintf(stderr,"viture-bridge: VQF filter @ %.0f Hz, %s\n", 1.0/g_dt, g_use_mag?"9-axis (mag)":"6-axis"); }
     signal(SIGINT,on_sigint); signal(SIGTERM,on_sigint); signal(SIGHUP,on_hup);
 
     /* locate libglasses.so: --lib, $VITURE_SDK, then common spots */
@@ -293,6 +371,11 @@ int main(int argc,char**argv){
     xr_destroy=dlsym(h,"xr_device_provider_destroy");
     xr_set_display_mode=dlsym(h,"xr_device_provider_set_display_mode");
     xr_get_display_mode=dlsym(h,"xr_device_provider_get_display_mode");
+    ca_imu_pose=dlsym(h,"carina_a1088_viture_get_imu_pose");
+    ca_gl_pose =dlsym(h,"carina_a1088_viture_get_gl_pose");
+    xr_reg_carina=dlsym(h,"register_callbacks_carina");
+    xr_get_devtype=dlsym(h,"xr_device_provider_get_device_type");
+    xr_reset_carina=dlsym(h,"reset_pose_carina");
     if(!xr_create||!xr_init||!xr_start||!xr_reg_raw||!xr_open_imu||!xr_set_dof){
         fprintf(stderr,"viture-bridge: SDK missing expected symbols\n"); return 1; }
     if(xr_setlog) xr_setlog(log);
@@ -313,6 +396,109 @@ int main(int argc,char**argv){
     if(xr_reg_pose){ xr_reg_pose(on_pose); fprintf(stderr,"viture-bridge: pose callback registered (probe)\n"); }
     else fprintf(stderr,"viture-bridge: no register_pose_callback in SDK\n");
     if(xr_init(p,NULL)!=0){ fprintf(stderr,"viture-bridge: initialize failed\n"); return 1; }
+
+    /* --dump-calib: pull the Beast's factory calibration blob (camera intrinsics +
+     * distortion + IMU/mag cal + cam-display optical params) over USB and write it
+     * raw to /tmp/viture-calib.bin, then exit. This is the input the Carina VIO
+     * config.yaml needs (fisheye intrinsics + T_cam_imu). Done BEFORE open_imu/start
+     * so the calibration control read doesn't contend with the IMU stream.
+     * get_calibration_config(handle, buf, &len): *len must be set to buf capacity on
+     * entry; returns 0 ok (len=actual), -1 none, -2 buf<actual (max 256KB), -3 type. */
+    if(dump_calib){
+        int (*get_calib)(void*,unsigned char*,int*) =
+            dlsym(h,"_ZN6viture8internal22get_calibration_configEPvPhPi");
+        int (*close_imu_fn)(void*) = dlsym(h,"close_imu");
+        if(!get_calib){ fprintf(stderr,"viture-bridge: get_calibration_config missing in SDK\n"); }
+        else {
+            /* The calibration blob comes back as a multi-segment USB long-packet on
+             * the SAME CDC-ACM pipe that streams pose/IMU. Any live stream interleaves
+             * into the response and reassembly fails CRC. Two streams to kill first:
+             *  (1) the Beast's NATIVE on-glasses 3DOF pose (on by default) - disable it
+             *      via set_dof(...,OFF), exactly like the normal bridge does; and
+             *  (2) raw IMU, via close_imu. Then drain the pipe before reading. */
+            { int dm0=0x36,nd0=0; if(xr_get_dof) xr_get_dof(p,&dm0,&nd0); if(dm0<0) dm0=0x36;
+              int sr=xr_set_dof(p,dm0,NATIVE_DOF_OFF);
+              fprintf(stderr,"viture-bridge: set_dof(0x%x,OFF) -> %d (disabling native 3DOF stream)\n",dm0,sr); }
+            if(close_imu_fn){ int cr=close_imu_fn(p);
+                fprintf(stderr,"viture-bridge: close_imu -> %d (quieting pipe for calib read)\n",cr); }
+            struct timespec drain={0,800000000}; nanosleep(&drain,NULL);   /* 800ms drain */
+            int r=-1, len=0; static unsigned char buf[262144];
+            for(int attempt=1; attempt<=5; attempt++){
+                len=(int)sizeof buf;
+                r=get_calib(p,buf,&len);
+                fprintf(stderr,"viture-bridge: get_calibration_config attempt %d -> r=%d len=%d\n",attempt,r,len);
+                if(r==0 && len>0) break;
+                struct timespec rt={0,300000000}; nanosleep(&rt,NULL);
+            }
+            if(r==0 && len>0){
+                FILE*cf=fopen("/tmp/viture-calib.bin","wb");
+                if(cf){ size_t w=fwrite(buf,1,(size_t)len,cf); fclose(cf);
+                    fprintf(stderr,"viture-bridge: wrote /tmp/viture-calib.bin (%zu bytes)\n",w); }
+                else perror("viture-bridge: open /tmp/viture-calib.bin");
+            } else fprintf(stderr,"viture-bridge: calibration read failed after retries (r=%d)\n",r);
+        }
+        if(xr_stop) xr_stop(p);
+        if(xr_shutdown) xr_shutdown(p);
+        if(xr_destroy) xr_destroy(p);
+        close(sock);
+        return 0;
+    }
+
+    /* --carina: the XRLinuxDriver high-level 6DoF path. NO open_imu / set_dof / config -
+     * the SDK's CarinaDeviceProvider reads factory cal + drives cameras + runs the VIO
+     * internally. The whole question: does the Beast report device_type==CARINA so this
+     * is even available? register_callbacks_carina returns -1 if the provider isn't a
+     * CarinaDeviceProvider. If poses stream (with translation in [0..2]), Beast does 6DoF. */
+    if(carina){
+        int dt = xr_get_devtype ? xr_get_devtype(p) : -99;
+        fprintf(stderr,"viture-bridge: xr_device_provider_get_device_type -> %d\n", dt);
+        if(!xr_reg_carina){ fprintf(stderr,"viture-bridge: register_callbacks_carina missing in SDK\n"); }
+        else {
+            int rr = xr_reg_carina(p, on_carina_pose, NULL, NULL, NULL);
+            fprintf(stderr,"viture-bridge: register_callbacks_carina -> %d %s\n", rr,
+                    rr==0?"(OK - Beast IS carina-capable!)":"(FAILED - not a Carina provider)");
+        }
+        xr_start(p);
+        fprintf(stderr,"viture-bridge: carina started; polling get_gl_pose_carina + pose callback...\n");
+        if(xr_reset_carina){ xr_reset_carina(p); fprintf(stderr,"viture-bridge: reset_pose_carina called (anchor here)\n"); }
+        double l=0;
+        while(g_run){
+            struct timespec ts={0,100000000}; nanosleep(&ts,NULL);
+            double t=now_sec();
+            if(xr_get_gl_pose && t-l>=0.3){ l=t; float gp[16]={0}; int r=xr_get_gl_pose(p,gp,0.0);
+                fprintf(stderr,"GLPOSE r=%d | pos % .4f % .4f % .4f | rot % .4f % .4f % .4f % .4f\n",
+                        r, gp[0],gp[1],gp[2], gp[3],gp[4],gp[5],gp[6]); }
+        }
+        if(xr_stop) xr_stop(p); if(xr_shutdown) xr_shutdown(p); if(xr_destroy) xr_destroy(p);
+        close(sock); return 0;
+    }
+
+    /* --native: read the FIRMWARE's native fused 3DoF pose (what "anchor mode" uses) -
+     * the opposite of our normal path. We do NOT disable native DOF and do NOT open_imu
+     * RAW; instead we ENABLE native 3DoF and let register_pose_callback (on_pose, already
+     * registered) deliver the factory-calibrated, firmware-fused orientation. This is
+     * XRLinuxDriver's legacy (non-carina) path for device_type 1 like the Beast. */
+    if(native){
+        /* XRLinuxDriver legacy recipe EXACTLY: NO set_dof (don't disable native fusion,
+         * and don't touch the display mode - safer too), start, THEN open_imu(POSE).
+         * The earlier "open_imu(POSE)=-2" was because we'd called set_dof(OFF) first. */
+        (void)dofval;
+        fprintf(stderr,"viture-bridge: native: sleep(1) -> start -> open_imu(POSE)...\n");
+        sleep(1);
+        xr_start(p);
+        int oi = xr_open_imu(p, IMU_MODE_POSE, (uint8_t)freq);
+        fprintf(stderr,"viture-bridge: open_imu(POSE=%d, freq=%d) -> %d %s\n",
+                IMU_MODE_POSE, freq, oi, oi==0?"OK":"(FAILED)");
+        fprintf(stderr,"viture-bridge: waiting for SDK fused-pose callback (rotate the glasses)...\n");
+        int waited=0;
+        while(g_run){
+            struct timespec ts={0,200000000}; nanosleep(&ts,NULL);
+            if(g_pose_n==0 && ++waited%5==0) fprintf(stderr,"viture-bridge: no native pose yet (%d)...\n",waited);
+        }
+        if(xr_stop) xr_stop(p); if(xr_shutdown) xr_shutdown(p); if(xr_destroy) xr_destroy(p);
+        close(sock); return 0;
+    }
+
     int dm=0x36,nd=0;
     if(xr_get_dof) xr_get_dof(p,&dm,&nd);
     if(dm<0) dm=0x36;
@@ -338,8 +524,10 @@ int main(int argc,char**argv){
                         map survives bridge restarts AND watchdog re-execs (the
                         callback only re-reads them on SIGHUP otherwise). */
 
-    if(g_probe_gl && xr_get_gl_pose) fprintf(stderr,"viture-bridge: --probe-gl on (polling get_gl_pose)\n");
-    else if(g_probe_gl) fprintf(stderr,"viture-bridge: --probe-gl requested but get_gl_pose_carina missing\n");
+    if(g_probe_gl)
+        fprintf(stderr,"viture-bridge: --probe-gl ON | get_gl_pose_carina=%s "
+                "carina_get_imu_pose=%s carina_get_gl_pose=%s\n",
+                xr_get_gl_pose?"yes":"NO", ca_imu_pose?"yes":"NO", ca_gl_pose?"yes":"NO");
 
     while(g_run) { struct timespec t={0,200000000}; nanosleep(&t,NULL);
         if(g_reload){ g_reload=0; load_tuning();
@@ -349,10 +537,26 @@ int main(int argc,char**argv){
         /* VIO probe: poll the carina GL pose. If it returns 0 with a 6DoF transform
          * (translation in [4..6] that tracks as you lean), the SDK is doing VIO; if
          * it errors or is static, it isn't (for the Beast over this path). */
-        if(g_probe_gl && xr_get_gl_pose){
-            float gp[16]={0}; int r=xr_get_gl_pose(p,gp,0.0);
-            fprintf(stderr,"GLPOSE r=%d | % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
-                    r, gp[0],gp[1],gp[2],gp[3], gp[4],gp[5],gp[6]);
+        if(g_probe_gl && now_sec()-g_capose_log >= 0.5){
+            g_capose_log = now_sec();
+            /* libglasses wrapper: get_gl_pose_carina(handle, out, ts) */
+            if(xr_get_gl_pose){
+                float gp[16]={0}; int r=xr_get_gl_pose(p,gp,0.0);
+                fprintf(stderr,"GLPOSE  r=%d | % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+                        r, gp[0],gp[1],gp[2],gp[3], gp[4],gp[5],gp[6]);
+            }
+            /* Tier-1: VITURE's own IMU fusion (the rock-solid anchor, no camera) */
+            if(ca_imu_pose){
+                float ip[16]={0}; int r=ca_imu_pose(ip,0.0);
+                fprintf(stderr,"IMUPOSE r=%d | % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+                        r, ip[0],ip[1],ip[2],ip[3], ip[4],ip[5],ip[6]);
+            }
+            /* Tier-2: a1088 6DOF GL transform (live only if the VIO path is running) */
+            if(ca_gl_pose){
+                float gp[16]={0}; int r=ca_gl_pose(gp,0.0);
+                fprintf(stderr,"A1088GL r=%d | % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+                        r, gp[0],gp[1],gp[2],gp[3], gp[4],gp[5],gp[6]);
+            }
         }
 
         /* Stall watchdog. The Beast is a combined DP+USB device: when the display
