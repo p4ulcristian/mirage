@@ -56,6 +56,7 @@ typedef struct {
     bool sens_drag;             /* left-press on the sensitivity handle: drag sets gain */
     bool sens_click;            /* consumed a left-press on the widget: swallow its release */
     bool bri_drag;              /* left-press on the brightness handle: drag sets env_brightness */
+    bool tr_drag;               /* left-press on the transparency handle: drag sets screen_opacity */
     double shake_pdx, shake_pdy;  /* previous motion vector (shake-to-gaze detector) */
     int      shake_count;         /* recent direction reversals                      */
     uint32_t shake_last_ms;       /* time of the last reversal                       */
@@ -241,6 +242,14 @@ static void bri_set_from_local(struct mirage *m, const sens_panel *sp, float lx)
     m->env_brightness = BRI_MIN + frac * (BRI_MAX - BRI_MIN);
 }
 
+/* Map the transparency handle's x (clamped to its track) to screen_opacity. */
+static void tr_set_from_local(struct mirage *m, const sens_panel *sp, float lx) {
+    float frac = (lx - sp->tr_x0) / (sp->tr_x1 - sp->tr_x0);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    m->screen_opacity = OPAC_MIN + frac * (OPAC_MAX - OPAC_MIN);
+}
+
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
     float z = g->m->zoom > 0.0f ? g->m->zoom : 1.0f;
@@ -347,12 +356,13 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         push_cursor(g);
         /* dragging the sensitivity handle: the cursor moved above, so slide the
          * gain to wherever it now sits along the track (handle follows the cursor). */
-        if (g->sens_drag || g->bri_drag) {
+        if (g->sens_drag || g->bri_drag || g->tr_drag) {
             sens_panel sp;
             if (sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
-                if (g->sens_drag) sens_set_from_local(g->m, &sp, lx);
-                else              bri_set_from_local(g->m, &sp, lx);
+                if (g->sens_drag)     sens_set_from_local(g->m, &sp, lx);
+                else if (g->bri_drag) bri_set_from_local(g->m, &sp, lx);
+                else                  tr_set_from_local(g->m, &sp, lx);
             }
         }
         break;
@@ -413,12 +423,29 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
+                /* background-mode button: cycle black -> hdri -> passthrough. The render
+                 * thread starts/stops the camera off m->bg_mode (GL + V4L2 stay one thread). */
+                if (lx >= sp.pt_x0 && lx <= sp.pt_x1 &&
+                    ly >= sp.pt_y0 && ly <= sp.pt_y1) {
+                    g->m->bg_mode = (g->m->bg_mode + 1) % BG_MODE_COUNT;
+                    ui_persist(g->m);                /* remember background mode across restarts */
+                    g->sens_click = true;            /* swallow the matching release  */
+                    break;
+                }
                 /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
                 float bri_band = fmaxf(sp.bri_handle_h, sp.bri_track_h) * 0.5f + 0.03f;
                 if (lx >= sp.bri_x0 - 0.05f && lx <= sp.bri_x1 + 0.05f &&
                     ly >= sp.bri_row_y - bri_band && ly <= sp.bri_row_y + bri_band) {
                     g->bri_drag = g->sens_click = true;
                     bri_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
+                    break;
+                }
+                /* transparency slider: a press on its track/handle grabs it (MOTION drags). */
+                float tr_band = fmaxf(sp.tr_handle_h, sp.tr_track_h) * 0.5f + 0.03f;
+                if (lx >= sp.tr_x0 - 0.05f && lx <= sp.tr_x1 + 0.05f &&
+                    ly >= sp.tr_row_y - tr_band && ly <= sp.tr_row_y + tr_band) {
+                    g->tr_drag = g->sens_click = true;
+                    tr_set_from_local(g->m, &sp, lx);    /* jump the handle to the click */
                     break;
                 }
                 float band = fmaxf(sp.handle_h, sp.track_h) * 0.5f + 0.03f;
@@ -430,14 +457,17 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 }
             }
             if (!st && g->sens_click) {
-                bool was_sens = g->sens_drag, was_bri = g->bri_drag;
-                g->sens_drag = g->sens_click = g->bri_drag = false;
+                bool was_sens = g->sens_drag, was_bri = g->bri_drag, was_tr = g->tr_drag;
+                g->sens_drag = g->sens_click = g->bri_drag = g->tr_drag = false;
                 if (was_sens) {
                     sens_persist(g->m);
                     std::print(stderr, "grab: sensitivity {}x\n", g->m->cfg.yaw_gain);
                 } else if (was_bri) {
                     ui_persist(g->m);                /* remember the brightness        */
                     std::print(stderr, "grab: env brightness {:.2f}\n", g->m->env_brightness);
+                } else if (was_tr) {
+                    ui_persist(g->m);                /* remember the opacity           */
+                    std::print(stderr, "grab: screen opacity {:.2f}\n", g->m->screen_opacity);
                 }
                 break;
             }

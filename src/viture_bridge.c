@@ -52,8 +52,11 @@
 /* ---- VITURE v2.0.0 SDK ABI (from XRLinuxDriver's viture headers) ---- */
 typedef void* XRH;
 typedef void (*raw_cb)(float *data, uint64_t ts, uint64_t vsync);
+/* onboard fused-pose callback: SetImuPoseCallback(void(*)(float*, unsigned long)) */
+typedef void (*pose_cb)(float *pose, unsigned long ts);
 /* IMU raw layout (Beast/Luma): gyro xyz, accel xyz, mag xyz, temp (10 floats) */
 #define IMU_MODE_RAW   0
+#define IMU_MODE_POSE  1
 #define NATIVE_DOF_OFF 0
 
 static XRH (*xr_create)(int);
@@ -70,6 +73,12 @@ static int (*xr_shutdown)(XRH);
 static void (*xr_destroy)(XRH);
 static int (*xr_set_display_mode)(XRH, int);
 static int (*xr_get_display_mode)(XRH);
+/* pose / VIO probe (does the Beast expose a fused or 6DoF pose?) */
+static void (*xr_reg_pose)(pose_cb);            /* register_pose_callback */
+static int  (*xr_get_gl_pose)(XRH, float*, double);   /* get_gl_pose_carina(handle,out,ts) */
+static int  g_probe_gl = 0;
+static long g_pose_n = 0;
+static double g_pose_log = 0;
 
 static volatile sig_atomic_t g_run = 1;
 static int g_stall = 0;           /* set when the watchdog trips -> re-exec to recover */
@@ -145,6 +154,20 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
         fprintf(stderr,"ypr % 7.1f % 7.1f % 7.1f | RAWacc % 6.2f % 6.2f % 6.2f | RAWgyr % 6.2f % 6.2f % 6.2f | n %ld\n",
                 yaw,pitch,roll, d[3],d[4],d[5], d[0],d[1],d[2], g_n);
         g_last_log=t;
+    }
+}
+
+/* PROBE: the SDK's onboard fused-pose callback. We don't know the field count, so we
+ * log the first 7 floats - if it's a 3DoF quaternion only, [0..3] move and [4..6] are
+ * static/garbage; if it's 6DoF, [4..6] track lateral/forward translation as you lean.
+ * Harmless if the Beast never emits pose (this just never fires). */
+static void on_pose(float *pse, unsigned long ts){
+    (void)ts; g_pose_n++;
+    double t = now_sec();
+    if (t - g_pose_log >= 0.5){
+        fprintf(stderr,"POSE n %ld | [0..6] % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+                g_pose_n, pse[0],pse[1],pse[2],pse[3], pse[4],pse[5],pse[6]);
+        g_pose_log = t;
     }
 }
 
@@ -230,9 +253,10 @@ int main(int argc,char**argv){
         else if (!strcmp(argv[i],"--gyro-scale")&&i+1<argc) g_gyro_scale=atof(argv[++i]);
         else if (!strcmp(argv[i],"--mag")) g_use_mag=1;
         else if (!strcmp(argv[i],"--sdk-log")) log=3;
+        else if (!strcmp(argv[i],"--probe-gl")) g_probe_gl=1;  /* also poll get_gl_pose (VIO probe) */
         else if (!strcmp(argv[i],"--verbose")||!strcmp(argv[i],"-v")) g_verbose=1;
         else { fprintf(stderr,"usage: %s [--lib DIR] [--port N] [--host IP] [--qmap w,x,y,z] "
-               "[--freq 0..4] [--beta F] [--gyro-scale F] [--mag] [--sdk-log] [-v]\n",argv[0]); return 2; }
+               "[--freq 0..4] [--beta F] [--gyro-scale F] [--mag] [--sdk-log] [--probe-gl] [-v]\n",argv[0]); return 2; }
     }
     if (parse_qmap(qmap,g_qi,g_qs)){ fprintf(stderr,"bad --qmap '%s'\n",qmap); return 2; }
     { const float hz[5]={60,90,120,240,500}; g_dt = 1.0f / hz[(freq>=0&&freq<=4)?freq:2]; }
@@ -257,6 +281,8 @@ int main(int argc,char**argv){
     xr_init  =dlsym(h,"xr_device_provider_initialize");
     xr_start =dlsym(h,"xr_device_provider_start");
     xr_reg_raw=dlsym(h,"register_raw_callback");
+    xr_reg_pose=dlsym(h,"register_pose_callback");
+    xr_get_gl_pose=dlsym(h,"get_gl_pose_carina");
     xr_open_imu=dlsym(h,"open_imu");
     xr_set_dof=dlsym(h,"xr_device_provider_set_display_mode_and_native_dof");
     xr_get_dof=dlsym(h,"xr_device_provider_get_display_mode_and_native_dof");
@@ -284,6 +310,8 @@ int main(int argc,char**argv){
     if(!p){ fprintf(stderr,"viture-bridge: create() failed - glasses not found / USB busy. "
             "Run with sudo (libusb needs /dev/bus/usb) and ensure cdc_acm is unbound.\n"); return 1; }
     xr_reg_raw(p,on_raw);
+    if(xr_reg_pose){ xr_reg_pose(on_pose); fprintf(stderr,"viture-bridge: pose callback registered (probe)\n"); }
+    else fprintf(stderr,"viture-bridge: no register_pose_callback in SDK\n");
     if(xr_init(p,NULL)!=0){ fprintf(stderr,"viture-bridge: initialize failed\n"); return 1; }
     int dm=0x36,nd=0;
     if(xr_get_dof) xr_get_dof(p,&dm,&nd);
@@ -310,10 +338,22 @@ int main(int argc,char**argv){
                         map survives bridge restarts AND watchdog re-execs (the
                         callback only re-reads them on SIGHUP otherwise). */
 
+    if(g_probe_gl && xr_get_gl_pose) fprintf(stderr,"viture-bridge: --probe-gl on (polling get_gl_pose)\n");
+    else if(g_probe_gl) fprintf(stderr,"viture-bridge: --probe-gl requested but get_gl_pose_carina missing\n");
+
     while(g_run) { struct timespec t={0,200000000}; nanosleep(&t,NULL);
         if(g_reload){ g_reload=0; load_tuning();
         }
         if(g_verbose && g_n==0){ static int w=0; if(++w%5==0) fprintf(stderr,"viture-bridge: no IMU yet...\n"); }
+
+        /* VIO probe: poll the carina GL pose. If it returns 0 with a 6DoF transform
+         * (translation in [4..6] that tracks as you lean), the SDK is doing VIO; if
+         * it errors or is static, it isn't (for the Beast over this path). */
+        if(g_probe_gl && xr_get_gl_pose){
+            float gp[16]={0}; int r=xr_get_gl_pose(p,gp,0.0);
+            fprintf(stderr,"GLPOSE r=%d | % .4f % .4f % .4f % .4f | % .4f % .4f % .4f\n",
+                    r, gp[0],gp[1],gp[2],gp[3], gp[4],gp[5],gp[6]);
+        }
 
         /* Stall watchdog. The Beast is a combined DP+USB device: when the display
          * link drops/re-modes (apple-dcp dcp_dptx_disconnect), the SDK's USB read
@@ -342,7 +382,9 @@ int main(int argc,char**argv){
      * only loop back on a watchdog trip. */
     if (g_stall && g_run){
         fprintf(stderr,"viture-bridge: re-exec to recover the IMU stream...\n");
-        sleep(1);                                 /* let cdc_acm settle / USB quiesce */
+        sleep(4);                                 /* settle: re-claiming the IMU too soon
+                                                     after release wedges the Beast's
+                                                     firmware (then only a replug helps) */
         execv("/proc/self/exe", g_argv);
         perror("viture-bridge: execv");           /* only reached if re-exec fails */
         return 3;

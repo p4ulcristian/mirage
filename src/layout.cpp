@@ -379,14 +379,35 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
     bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
     out->bri_handle_x = out->bri_x0 + bf * (out->bri_x1 - out->bri_x0);
 
+    /* window/screen transparency slider: same track, one row below the brightness
+     * slider. Handle position from m->screen_opacity. grab.cpp drives it. */
+    out->tr_track_h  = 0.012f;
+    out->tr_handle_w = 0.026f;
+    out->tr_handle_h = 0.05f;
+    out->tr_x0 = out->track_x0;
+    out->tr_x1 = out->track_x1;
+    out->tr_row_y = out->bri_row_y - out->bri_handle_h * 0.5f - 0.04f - out->tr_handle_h * 0.5f;
+    float tf = (m->screen_opacity - OPAC_MIN) / (OPAC_MAX - OPAC_MIN);
+    tf = tf < 0.0f ? 0.0f : (tf > 1.0f ? 1.0f : tf);
+    out->tr_handle_x = out->tr_x0 + tf * (out->tr_x1 - out->tr_x0);
+
     /* flat/curved toggle: a single button spanning the track, one row below the
-     * brightness slider. Label/highlight reflect the current geometry; a click flips
-     * it (grab.cpp). */
+     * transparency slider. Label/highlight reflect the current geometry; a click
+     * flips it (grab.cpp). */
     const float geo_h = 0.06f;
     out->geo_x0 = out->track_x0;
     out->geo_x1 = out->track_x1;
-    out->geo_y1 = out->bri_row_y - out->bri_handle_h * 0.5f - 0.04f;
+    out->geo_y1 = out->tr_row_y - out->tr_handle_h * 0.5f - 0.04f;
     out->geo_y0 = out->geo_y1 - geo_h;
     out->geo_flat = (m->cfg.geometry == GEOM_FLAT);
+
+    /* background-mode button (black / hdri / passthrough): one row below the
+     * flat/curved toggle. A click cycles m->bg_mode (grab.cpp). */
+    const float pt_h = 0.06f;
+    out->pt_x0 = out->track_x0;
+    out->pt_x1 = out->track_x1;
+    out->pt_y1 = out->geo_y0 - 0.03f;
+    out->pt_y0 = out->pt_y1 - pt_h;
+    out->pt_mode = m->bg_mode;
     return true;
 }

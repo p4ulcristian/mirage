@@ -32,6 +32,9 @@
  * / straight-up-row layout (no bend, but same orientation). */
 enum mirage_geometry { GEOM_CYLINDER = 0, GEOM_FLAT = 1 };
 
+/* what sits behind the windows; cycled by the HUD background-mode button. */
+enum mirage_bg_mode { BG_BLACK = 0, BG_HDRI = 1, BG_PASSTHROUGH = 2, BG_MODE_COUNT = 3 };
+
 struct mirage; /* fwd */
 
 /* One captured virtual display, ready to texture onto a quad. */
@@ -276,6 +279,19 @@ struct mirage {
     int   active_env;
     bool  env_dirty;
     float env_brightness;   /* HUD slider: multiplies the dome intensity (1.0 = as tuned) */
+
+    /* background mode (HUD cycle button): what sits behind the windows.
+     *   BG_BLACK       - nothing (true black -> see-through on the additive optics)
+     *   BG_HDRI        - the environment dome (default)
+     *   BG_PASSTHROUGH - the world-facing camera, head-locked fullscreen
+     * render.cpp owns the camera's lifecycle off this (lazy start / release). */
+    int         bg_mode;        /* mirage_bg_mode */
+    struct cam *cam;
+
+    /* window/screen opacity (HUD transparency slider): screens alpha-blend over the
+     * background at this alpha, so you can fade the wall to see the real world (or the
+     * passthrough) through it. 1.0 = fully opaque (as before). */
+    float       screen_opacity;
     bool running;
 };
 
@@ -308,6 +324,8 @@ typedef struct {
     bool  has_env;       int   env;            /* active_env index          */
     bool  has_brightness; float brightness;    /* env_brightness            */
     bool  has_layout;    char  layout[64];     /* active layout NAME        */
+    bool  has_bg_mode;   int   bg_mode;        /* mirage_bg_mode            */
+    bool  has_opacity;   float opacity;        /* screen_opacity            */
 } mirage_ui_state;
 std::string ui_state_default_path();                      /* $MIRAGE_UI_STATE / XDG path */
 int  ui_state_load(const char *path, mirage_ui_state *s); /* present keys; count          */
@@ -412,15 +430,29 @@ typedef struct {
     float bri_track_h;                     /* track thickness (m)                 */
     float bri_handle_x;                    /* handle centre for current brightness */
     float bri_handle_w, bri_handle_h;      /* handle size (m)                     */
-    /* flat/curved geometry toggle: one button row below the brightness slider */
+    /* window/screen transparency slider: one row below the brightness slider */
+    float tr_row_y;                        /* slider y centre (m)                 */
+    float tr_x0, tr_x1;                    /* track ends (m)                      */
+    float tr_track_h;                      /* track thickness (m)                 */
+    float tr_handle_x;                     /* handle centre for current opacity   */
+    float tr_handle_w, tr_handle_h;        /* handle size (m)                     */
+    /* flat/curved geometry toggle: one button row below the transparency slider */
     float geo_x0, geo_x1;                  /* button horizontal extent (m)        */
     float geo_y0, geo_y1;                  /* button vertical extent (m)          */
     int   geo_flat;                        /* 1 = currently flat (else curved)    */
+    /* background-mode button (black / hdri / passthrough): below the flat/curved toggle */
+    float pt_x0, pt_x1;                    /* button horizontal extent (m)        */
+    float pt_y0, pt_y1;                    /* button vertical extent (m)          */
+    int   pt_mode;                         /* current mirage_bg_mode              */
 } sens_panel;
 
 #define BRI_MIN 0.20f
 #define BRI_MAX 3.00f
 #define BRI_DEF 1.00f
+
+#define OPAC_MIN 0.15f   /* don't let windows vanish entirely */
+#define OPAC_MAX 1.00f
+#define OPAC_DEF 1.00f
 
 #define SENS_GAIN_MIN 1.0f
 #define SENS_GAIN_MAX 16.0f

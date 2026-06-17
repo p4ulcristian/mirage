@@ -150,6 +150,13 @@ int ui_state_load(const char *path, mirage_ui_state *s) {
         std::snprintf(s->layout, sizeof s->layout, "%.*s", (int)v->size(), v->data());
         s->has_layout = true; applied++;
     }
+    if (auto v = tbl["bg_mode"].value<int64_t>()) {
+        int b = (int)*v; if (b < 0) b = 0; if (b >= BG_MODE_COUNT) b = BG_MODE_COUNT - 1;
+        s->bg_mode = b; s->has_bg_mode = true; applied++;
+    }
+    if (auto v = tbl["opacity"].value<double>()) {
+        s->opacity = (float)*v; s->has_opacity = true; applied++;
+    }
     return applied;
 }
 
@@ -165,6 +172,8 @@ bool ui_state_save(const char *path, const struct mirage *m) {
     o << "geometry = \"" << (m->cfg.geometry == GEOM_FLAT ? "flat" : "cylinder") << "\"\n";
     o << "active_env = " << m->active_env << "\n";
     o << "brightness = " << m->env_brightness << "\n";
+    o << "bg_mode = " << m->bg_mode << "\n";          /* 0=black 1=hdri 2=passthrough */
+    o << "opacity = " << m->screen_opacity << "\n";
     if (m->layouts.n > 0 && m->layouts.active >= 0 && m->layouts.active < m->layouts.n)
         o << "layout = \"" << m->layouts.l[m->layouts.active].name << "\"\n";
     return (bool)o;

@@ -2,6 +2,7 @@
 #include "pose.h"
 #include "handle.hpp"
 #include "entity.hpp"
+#include "camera.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,8 +44,9 @@ static const char *FRAG_SRC =
     "uniform vec3 uColor;\n"
     "uniform highp vec2 uTexel;\n"
     "uniform float uSharpen;\n"
+    "uniform float uOpacity;\n"                  /* screen fade (1.0 = opaque) */
     "void main() {\n"
-    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, 1.0); return; }\n"
+    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, uOpacity); return; }\n"
     "  vec3 e = texture2D(uTex, vUV).rgb;\n"
     "  if (uSharpen > 0.0) {\n"
     "    vec3 b = texture2D(uTex, vUV + vec2(0.0, -uTexel.y)).rgb;\n"
@@ -54,7 +56,7 @@ static const char *FRAG_SRC =
     "    vec3 s = e + (e - (b + d + f + h) * 0.25) * uSharpen;\n"
     "    e = clamp(s, min(min(b,d), min(f,h)), max(max(b,d), max(f,h)));\n"
     "  }\n"
-    "  gl_FragColor = vec4(e, 1.0);\n"
+    "  gl_FragColor = vec4(e, uOpacity);\n"
     "}\n";
 
 /* HDRI environment dome: a sphere of world directions around the eye. The vertex
@@ -91,7 +93,7 @@ static const char *DOME_FRAG =
 static struct {
     own::GlProgram prog;
     GLint  aPos, aUV;
-    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen;
+    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen, uOpacity;
     own::GlBuffer vbo;
 
     /* HDRI environment dome */
@@ -117,6 +119,8 @@ static struct {
     int    senscap_w, senscap_h, default_w, default_h, sens_w, sens_h, sens_val;
     own::GlTexture label_bright;            /* "BRIGHT" caption for the env brightness slider */
     int    bright_w, bright_h;
+    own::GlTexture label_trans;             /* "TRANS" caption for the transparency slider */
+    int    trans_w, trans_h;
     /* layout-switcher button captions (one per named layout), baked once at init */
     own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
     int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
@@ -128,6 +132,15 @@ static struct {
      * additive optics, so only the arrow glows - over screens and in the gaps. */
     own::GlTexture cursor_tex;
     int    cursor_w, cursor_h;
+    /* camera passthrough: the decoded camera frame as a texture (re-uploaded only on a
+     * new frame), plus the toggle-button captions. cam_alloc_w/h track the texture's
+     * allocated size so we glTexImage2D once and glTexSubImage2D after. */
+    own::GlTexture cam_tex;
+    int      cam_alloc_w, cam_alloc_h;
+    uint64_t cam_seq;
+    /* background-mode button captions, indexed by mirage_bg_mode */
+    own::GlTexture label_bg[BG_MODE_COUNT];
+    int    bg_w[BG_MODE_COUNT], bg_h[BG_MODE_COUNT];
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
@@ -720,6 +733,9 @@ mirage_status render_init(struct mirage *m) {
     R.uTex    = glGetUniformLocation(R.prog, "uTex");
     R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
     R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
+    R.uOpacity = glGetUniformLocation(R.prog, "uOpacity");
+    glUseProgram(R.prog);
+    glUniform1f(R.uOpacity, 1.0f);   /* default opaque; only the screen draw lowers it */
 
     R.vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
@@ -733,6 +749,12 @@ mirage_status render_init(struct mirage *m) {
     { const float gc[3] = {0.66f, 0.72f, 0.82f};
       R.label_curved = bake_label("CURVED", gc, &R.curved_w, &R.curved_h);
       R.label_flat   = bake_label("FLAT",   gc, &R.flat_w,   &R.flat_h); }
+    /* background-mode button captions (black / hdri / passthrough) */
+    { const float pc[3] = {0.82f, 0.74f, 0.66f};
+      R.label_bg[BG_BLACK]       = bake_label("BG: BLACK",    pc, &R.bg_w[BG_BLACK],       &R.bg_h[BG_BLACK]);
+      R.label_bg[BG_HDRI]        = bake_label("BG: HDRI",     pc, &R.bg_w[BG_HDRI],        &R.bg_h[BG_HDRI]);
+      R.label_bg[BG_PASSTHROUGH] = bake_label("BG: PASSTHRU", pc, &R.bg_w[BG_PASSTHROUGH], &R.bg_h[BG_PASSTHROUGH]); }
+    R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
     /* static shortcut cheat-sheet, one multi-line plaque baked once */
@@ -748,7 +770,9 @@ mirage_status render_init(struct mirage *m) {
       R.label_sens_cap = bake_label("SENS", cap, &R.senscap_w, &R.senscap_h);
       R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h);
       const float bc[3] = {0.72f, 0.88f, 0.78f};   /* green, matches the env row */
-      R.label_bright   = bake_label("BRIGHT", bc, &R.bright_w, &R.bright_h); }
+      R.label_bright   = bake_label("BRIGHT", bc, &R.bright_w, &R.bright_h);
+      const float tc[3] = {0.74f, 0.78f, 0.92f};   /* blue, matches the transparency rail */
+      R.label_trans    = bake_label("TRANS", tc, &R.trans_w, &R.trans_h); }
     R.sens_val = -1;
     /* layout-switcher button captions: one per loaded named layout, upper-cased to
      * match the rest of the HUD. Layouts are parsed before render init, so the set
@@ -921,6 +945,15 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
     solid(sp.bri_handle_x, sp.bri_row_y, sp.bri_handle_w, sp.bri_handle_h, 0.52f, 0.86f, 0.64f);
     label(R.label_bright, sp.bri_x0 - 0.14f, sp.bri_row_y, 0.045f, R.bright_w, R.bright_h);
 
+    /* window transparency slider: same style, amber/blue tint, "TRANS" caption left. */
+    float trW = sp.tr_x1 - sp.tr_x0;
+    solid(0.0f, sp.tr_row_y, trW, sp.tr_track_h, 0.26f, 0.26f, 0.32f);        /* rail */
+    float trFill = sp.tr_handle_x - sp.tr_x0;
+    if (trFill > 1e-4f)
+        solid(sp.tr_x0 + trFill*0.5f, sp.tr_row_y, trFill, sp.tr_track_h, 0.40f, 0.44f, 0.60f);
+    solid(sp.tr_handle_x, sp.tr_row_y, sp.tr_handle_w, sp.tr_handle_h, 0.66f, 0.72f, 0.92f);
+    label(R.label_trans, sp.tr_x0 - 0.14f, sp.tr_row_y, 0.045f, R.trans_w, R.trans_h);
+
     /* flat/curved toggle: one button spanning the track, filled + bright-bordered
      * (it always reflects an active choice), captioned with the current geometry.
      * Amber tint so it reads as distinct from the blue/green switcher rows above. */
@@ -941,8 +974,89 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(tex, cx, cy, lh, tw, th);
     }
 
+    /* background-mode button: cycles black / hdri / passthrough; teal when on a live
+     * background (hdri/passthrough), dim grey for black. Caption shows the mode. */
+    {
+        int mode = sp.pt_mode; if (mode < 0 || mode >= BG_MODE_COUNT) mode = BG_HDRI;
+        float cx = 0.5f * (sp.pt_x0 + sp.pt_x1);
+        float cy = 0.5f * (sp.pt_y0 + sp.pt_y1);
+        float w  = sp.pt_x1 - sp.pt_x0, h = sp.pt_y1 - sp.pt_y0;
+        if (mode == BG_BLACK) {
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border     */
+        } else {
+            solid(cx, cy, w, h, 0.10f, 0.26f, 0.28f);            /* lit teal fill       */
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.86f, 0.90f);  /* bright teal border  */
+        }
+        GLuint tex = R.label_bg[mode];
+        int tw = R.bg_w[mode], th = R.bg_h[mode];
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (th > 0) {
+            float natw = lh * (float)tw / (float)th;
+            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+        }
+        label(tex, cx, cy, lh, tw, th);
+    }
+
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
+}
+
+/* Camera passthrough: start/stop the camera off m->passthrough, pull the newest
+ * frame into R.cam_tex, and draw it as a head-locked fullscreen background (the
+ * Beast cam is head-mounted, so screen-space IS the correct world-lock). Drawn
+ * first, depth-test off, so the windows/wall composite on top. Returns true if a
+ * passthrough background was drawn (so the caller can skip the env dome). */
+static bool draw_passthrough(struct mirage *m) {
+    const char *dev = getenv("MIRAGE_CAM_DEV");
+    if (!dev) dev = "/dev/video1";                 /* Beast world-cam (laptop = video0) */
+
+    bool want = (m->bg_mode == BG_PASSTHROUGH);
+    if (want && !m->cam) {
+        m->cam = cam_start(dev, 1280, 720);
+        if (!m->cam) { m->bg_mode = BG_HDRI; std::print(stderr, "passthrough: camera unavailable\n"); }
+    } else if (!want && m->cam) {
+        cam_stop(m->cam); m->cam = nullptr; R.cam_alloc_w = R.cam_alloc_h = 0;
+    }
+    if (!want || !m->cam) return false;
+
+    const uint8_t *rgb; int cw, ch;
+    if (cam_acquire(m->cam, &rgb, &cw, &ch, &R.cam_seq)) {
+        if (!R.cam_tex) R.cam_tex.gen();
+        glBindTexture(GL_TEXTURE_2D, R.cam_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (cw != R.cam_alloc_w || ch != R.cam_alloc_h) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cw, ch, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            R.cam_alloc_w = cw; R.cam_alloc_h = ch;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cw, ch, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        }
+    }
+    if (!R.cam_tex || R.cam_alloc_w == 0) return false;  /* no frame yet */
+
+    /* fullscreen quad in NDC: the unit QUAD ([-0.5,0.5]) scaled x2, no projection. */
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glUniform1f(R.uYFlip, 0.0f);
+    glUniform1f(R.uSharpen, 0.0f);
+    glUniform1f(R.uHasTex, 1.0f);
+    mat4 ndc = m4_scale(v3(2.0f, 2.0f, 1.0f));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, ndc.m);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, R.cam_tex);
+    glUniform1i(R.uTex, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glEnable(GL_DEPTH_TEST);
+    return true;
 }
 
 void render_frame(struct mirage *m, quat head) {
@@ -956,6 +1070,10 @@ void render_frame(struct mirage *m, quat head) {
     glViewport(0, 0, m->glasses_w, m->glasses_h);
     glClearColor(m->cfg.bg[0], m->cfg.bg[1], m->cfg.bg[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* camera passthrough background (head-locked), drawn when bg_mode == BG_PASSTHROUGH.
+     * Manages the camera lifecycle too; the dome draw below is gated on BG_HDRI. */
+    draw_passthrough(m);
 
     float z = m->zoom > 0.0f ? m->zoom : 1.0f;
     float aspect = (float)m->glasses_w / (float)m->glasses_h;
@@ -1071,8 +1189,9 @@ void render_frame(struct mirage *m, quat head) {
      * wall draws cleanly over it. The dome sphere (radius 50 m) dwarfs the
      * neck-model eye shift (~0.1 m), so the stars stay effectively fixed in world
      * space - the far reference the near windows parallax against as you look around.
-     * cfg.hdri_on gates the whole draw so the "Off" environment hides it. */
-    if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on) {
+     * cfg.hdri_on gates the whole draw so the "Off" environment hides it. The dome
+     * only shows in BG_HDRI mode (BG_BLACK = nothing, BG_PASSTHROUGH = the camera). */
+    if (R.dome_prog && R.dome_vbo && m->cfg.hdri_on && m->bg_mode == BG_HDRI) {
         glUseProgram(R.dome_prog);
         glUniformMatrix4fv(R.dMVP, 1, GL_FALSE, vp.m);
         /* env_brightness is the HUD slider (1.0 = as tuned); guard the zero-init case. */
@@ -1102,6 +1221,11 @@ void render_frame(struct mirage *m, quat head) {
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
 
     glUseProgram(R.prog);
+    /* window/screen transparency: alpha-blend the screens over the background (env
+     * dome / passthrough / black) at m->screen_opacity. At 1.0 this is a no-op (opaque). */
+    bool fade = m->screen_opacity < 0.999f;
+    glUniform1f(R.uOpacity, m->screen_opacity);
+    if (fade) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     for (int i = 0; i < n; i++) {
         screen_t *s = &m->screen[i];
         if (!s->mesh_vbo) continue;
@@ -1133,6 +1257,8 @@ void render_frame(struct mirage *m, quat head) {
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, s->mesh_verts);
     }
+    if (fade) glDisable(GL_BLEND);
+    glUniform1f(R.uOpacity, 1.0f);   /* restore: plaques/HUD/cursor stay opaque */
 
     /* Status plaques under the centre-column screen, pinned to its frame so they
      * track the wall as you pan: the FPS counter on top, the shortcut cheat-sheet
@@ -1291,6 +1417,9 @@ void render_finish(struct mirage *m) {
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
     R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
     R.label_help.reset();
+    for (int i = 0; i < BG_MODE_COUNT; i++) R.label_bg[i].reset();
+    R.label_trans.reset(); R.cam_tex.reset();
+    if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
     for (int i = 0; i < m->n_screen; i++) {
         if (m->screen[i].mesh_vbo) { glDeleteBuffers(1, &m->screen[i].mesh_vbo); m->screen[i].mesh_vbo = 0; }
