@@ -113,6 +113,8 @@ static struct {
      * shown on the toggle button below the brightness slider). */
     own::GlTexture label_flat, label_curved;
     int    flat_w, flat_h, curved_w, curved_h;
+    own::GlTexture label_tilt, label_level;     /* head-tilt toggle captions */
+    int    tilt_w, tilt_h, level_w, level_h;
     /* live FPS plaque: re-baked only when the integer value changes */
     own::GlTexture label_fps;
     int    fps_w, fps_h, fps_val;
@@ -147,9 +149,6 @@ static struct {
     /* background-mode button captions, indexed by mirage_bg_mode */
     own::GlTexture label_bg[BG_MODE_COUNT];
     int    bg_w[BG_MODE_COUNT], bg_h[BG_MODE_COUNT];
-    /* tracking-tier button captions, indexed by mirage_track_mode */
-    own::GlTexture label_tk[TRACK_MODE_COUNT];
-    int    tk_w[TRACK_MODE_COUNT], tk_h[TRACK_MODE_COUNT];
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
@@ -867,16 +866,15 @@ mirage_status render_init(struct mirage *m) {
     { const float gc[3] = {0.66f, 0.72f, 0.82f};
       R.label_curved = bake_label("CURVED", gc, &R.curved_w, &R.curved_h);
       R.label_flat   = bake_label("FLAT",   gc, &R.flat_w,   &R.flat_h); }
+    /* head-tilt toggle captions (one shown at a time on the toggle button) */
+    { const float gc[3] = {0.70f, 0.80f, 0.92f};
+      R.label_tilt  = bake_label("TILT: ON",  gc, &R.tilt_w,  &R.tilt_h);
+      R.label_level = bake_label("TILT: OFF", gc, &R.level_w, &R.level_h); }
     /* background-mode button captions (black / hdri / passthrough) */
     { const float pc[3] = {0.82f, 0.74f, 0.66f};
       R.label_bg[BG_BLACK]       = bake_label("BG: BLACK",    pc, &R.bg_w[BG_BLACK],       &R.bg_h[BG_BLACK]);
       R.label_bg[BG_HDRI]        = bake_label("BG: HDRI",     pc, &R.bg_w[BG_HDRI],        &R.bg_h[BG_HDRI]);
       R.label_bg[BG_PASSTHROUGH] = bake_label("BG: PASSTHRU", pc, &R.bg_w[BG_PASSTHROUGH], &R.bg_h[BG_PASSTHROUGH]); }
-    /* tracking-tier button captions (3DoF / 3DoF+) */
-    { const float pc[3] = {0.82f, 0.74f, 0.66f};
-      R.label_tk[TRACK_3DOF]   = bake_label("3DoF",  pc, &R.tk_w[TRACK_3DOF],   &R.tk_h[TRACK_3DOF]);
-      R.label_tk[TRACK_NECK]   = bake_label("3DoF+", pc, &R.tk_w[TRACK_NECK],   &R.tk_h[TRACK_NECK]);
-      R.label_tk[TRACK_CAMERA] = bake_label("6DoF*", pc, &R.tk_w[TRACK_CAMERA], &R.tk_h[TRACK_CAMERA]); }
     worldvio_start(nullptr);   /* 6DoF-lite optical-flow estimator (fed by draw_passthrough) */
     R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
@@ -1121,26 +1119,27 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(tex, cx, cy, lh, tw, th);
     }
 
-    /* tracking-confidence indicator (read-only): how much the world-cam parallax is
-     * contributing right now - a dot that goes dim-red (coasting on the neck model:
-     * blank wall / dark / fast motion) -> bright green (solid camera 6DoF tracking),
-     * beside the "6DoF*" caption. One fused mode, so this just shows it working. */
+    /* head-tilt (roll) toggle: lit blue when head roll is tracked (screens tilt with you),
+     * dim grey when horizon-locked. Click flips cfg.roll_damp 0<->1 (grab.cpp). */
     {
-        float conf = worldvio_confidence(); if (conf < 0) conf = 0; if (conf > 1) conf = 1;
-        float w = sp.tk_x1 - sp.tk_x0, h = sp.tk_y1 - sp.tk_y0;
-        float cy = 0.5f * (sp.tk_y0 + sp.tk_y1);
-        float ds = h * 0.45f;
-        float dotx = sp.tk_x0 + ds * 0.9f;
-        float r = 0.60f * (1.0f - conf) + 0.10f;   /* low: reddish     */
-        float gg = 0.20f + 0.65f * conf;           /* high: green      */
-        float b = 0.15f;
-        solid(dotx, cy, ds, ds, r, gg, b);
-        outline(dotx, cy, ds, ds, 0.004f, 0.5f, 0.5f, 0.5f);
-        GLuint tex = R.label_tk[TRACK_CAMERA];
-        int tw = R.tk_w[TRACK_CAMERA], th = R.tk_h[TRACK_CAMERA];
-        float lh = 0.032f, maxw = (w - ds*2.2f) * 0.95f;
-        if (th > 0) { float natw = lh * (float)tw / (float)th; if (natw > maxw) lh = maxw * (float)th / (float)tw; }
-        label(tex, dotx + ds*1.1f + lh*0.5f, cy, lh, tw, th);
+        float cx = 0.5f * (sp.tl_x0 + sp.tl_x1);
+        float cy = 0.5f * (sp.tl_y0 + sp.tl_y1);
+        float w  = sp.tl_x1 - sp.tl_x0, h = sp.tl_y1 - sp.tl_y0;
+        if (sp.tl_on) {
+            solid(cx, cy, w, h, 0.12f, 0.20f, 0.32f);            /* lit blue fill       */
+            outline(cx, cy, w, h, 0.006f, 0.45f, 0.70f, 0.95f);  /* bright blue border  */
+        } else {
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border     */
+        }
+        GLuint tex = sp.tl_on ? R.label_tilt : R.label_level;
+        int tw = sp.tl_on ? R.tilt_w : R.level_w;
+        int th = sp.tl_on ? R.tilt_h : R.level_h;
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (th > 0) {
+            float natw = lh * (float)tw / (float)th;
+            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+        }
+        label(tex, cx, cy, lh, tw, th);
     }
 
     glDisable(GL_BLEND);
@@ -1243,20 +1242,24 @@ void render_frame(struct mirage *m, quat head) {
     /* zoom narrows the field of view (zoom in = see less, bigger) */
     mat4 proj = m4_perspective((m->cfg.fov_deg / z) * (float)M_PI/180.0f, aspect, 0.05f, 600.0f);
 
-    /* Reshape the head orientation for comfort, via a swing-twist split instead
-     * of euler yaw/pitch/roll. "Swing" is the look direction (combined yaw+pitch
-     * off the recenter forward); "twist" is roll about that forward. We amplify
-     * the swing so the side screens need less neck turn, and damp the twist so
-     * the wall stays level. This is gimbal-lock-free: the old euler version blew
-     * up when you looked near straight up/down (lying down), spinning the view.
-     * Swing only has a singularity looking dead backwards, which never happens.
-     * NOTE: yaw and pitch share one gain here (swing is isotropic); yaw_gain is
-     * used and should equal pitch_gain. Identity when look_gain=1, roll_damp=1. */
-    quat swing, twist;
-    q_swing_twist(head, v3(0.0f, 0.0f, -1.0f), &swing, &twist);
-    swing = q_scale_angle(swing, m->cfg.yaw_gain);
-    twist = q_scale_angle(twist, m->cfg.roll_damp);
-    head  = q_norm(q_mul(swing, twist));
+    /* Reshape the head orientation for comfort as proper yaw / pitch / roll. Rebuilding from
+     * YPR (yaw about WORLD up, pitch about the resulting right, roll about forward) keeps the
+     * horizon dead level at every yaw. The old swing-twist split sneaked roll back in once you
+     * were BOTH turned and looking up/down (the horizon tilted off-centre - clean dead-ahead,
+     * tilted when already looking to the side). roll_damp gates head roll (0 = locked level,
+     * 1 = tilt with your head). Pitch is clamped just shy of +-90 so the YPR singularity
+     * (looking straight up/down) can never spin the view. Identity when the gains are 1. */
+    {
+        float yaw, pitch, roll;
+        q_to_euler_ypr(head, &yaw, &pitch, &roll);
+        yaw   *= m->cfg.yaw_gain;
+        pitch *= m->cfg.pitch_gain;
+        roll  *= m->cfg.roll_damp;
+        const float PLIM = 1.48f;                  /* ~85 deg: stay off the gimbal singularity */
+        if (pitch >  PLIM) pitch =  PLIM;
+        if (pitch < -PLIM) pitch = -PLIM;
+        head = q_from_euler_ypr(yaw, pitch, roll);
+    }
 
     /* Reading-stability deadband. The comfort gains above amplify head tremor
      * 2.5-3x, so even a still head leaves text shimmering. We hold the last
@@ -1295,6 +1298,13 @@ void render_frame(struct mirage *m, quat head) {
             float db  = m->cfg.read_deadband_deg * (float)M_PI/180.0f * (1.0f - mv);
             float follow = ang > 1e-6f ? (ang - db) / ang : 0.0f;
             if (follow < 0.0f) follow = 0.0f;              /* inside deadband: freeze */
+            /* Keep a light low-pass even while moving. The IMU arrives in BURSTS, so a full
+             * snap (follow=1) lets that burst unevenness through as frame-to-frame velocity
+             * ripple (the residual "not smooth while moving"). Capping follow makes the
+             * presented pose low-pass the bursts; the forward-prediction already leads by
+             * enough to cover the ~1 frame of latency this adds. */
+            const float FOLLOW_MAX = 0.5f;
+            if (follow > FOLLOW_MAX) follow = FOLLOW_MAX;
             presented = q_nlerp(presented, head, follow);
         }
         head = presented;
@@ -1309,6 +1319,30 @@ void render_frame(struct mirage *m, quat head) {
         float groll;
         q_to_euler_ypr(head, &m->gaze_yaw, &m->gaze_pitch, &groll);
         m->gaze_have = true;
+    }
+
+    /* Per-frame VIEW TRACE (set MIRAGE_VIEW_TRACE=1): logs what actually reaches the eye so
+     * the fast-turn "jump" can be SEEN in the data. raw = pose before prediction/deadband;
+     * final = the rendered view (prediction + deadband + gain baked in); off = parallax. If
+     * `final` overshoots/reverses vs `raw` -> render extras; if `raw` itself wobbles ->
+     * upstream (bridge/fusion). Throttled implicitly by frame rate (~120 Hz). */
+    {
+        static FILE *vtr = (FILE *)-1;
+        if (vtr == (FILE *)-1) { const char *e = getenv("MIRAGE_VIEW_TRACE");
+                                 vtr = (e && *e) ? fopen("/tmp/mirage-view-trace.log", "w") : NULL; }
+        if (vtr) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            double t = ts.tv_sec + ts.tv_nsec / 1e9;
+            float ry, rp, rr, fy, fp, fr;
+            q_to_euler_ypr(pose_latest(),  &ry, &rp, &rr);   /* raw, pre-predict/deadband */
+            q_to_euler_ypr(head,           &fy, &fp, &fr);   /* final rendered view       */
+            vec3 off = worldvio_eye_offset();
+            float sp = pose_speed() * 180.0f / (float)M_PI;  /* physical head speed deg/s */
+            fprintf(vtr, "%.4f raw[% 7.2f % 7.2f % 7.2f] fin[% 7.2f % 7.2f % 7.2f] sp%6.1f off[% .4f % .4f % .4f]\n",
+                    t, ry*57.2958f, rp*57.2958f, rr*57.2958f, fy*57.2958f, fp*57.2958f, fr*57.2958f,
+                    sp, off.x, off.y, off.z);
+            fflush(vtr);
+        }
     }
 
     /* drive the calibration overlay's state machine off the live head pose
@@ -1595,9 +1629,9 @@ void render_finish(struct mirage *m) {
     R.prog.reset();   R.vbo.reset();
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
     R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
+    R.label_tilt.reset(); R.label_level.reset();
     R.label_help.reset();
     for (int i = 0; i < BG_MODE_COUNT; i++) R.label_bg[i].reset();
-    for (int i = 0; i < TRACK_MODE_COUNT; i++) R.label_tk[i].reset();
     R.label_trans.reset(); R.cam_tex.reset();
     worldvio_stop();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */

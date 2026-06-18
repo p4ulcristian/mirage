@@ -34,12 +34,6 @@ enum mirage_geometry { GEOM_CYLINDER = 0, GEOM_FLAT = 1 };
 
 /* what sits behind the windows; cycled by the HUD background-mode button. */
 enum mirage_bg_mode { BG_BLACK = 0, BG_HDRI = 1, BG_PASSTHROUGH = 2, BG_MODE_COUNT = 3 };
-/* Head-position tracking tier, cycled by the HUD tracking button. TRACK_3DOF =
- * orientation only (screens pinned to a direction). TRACK_NECK = 3DoF+: synthesise the
- * eye's neck-arc translation from the rotation so screens stop swimming on head turns.
- * TRACK_CAMERA = 6DoF-lite: neck model PLUS world-cam optical-flow parallax, so real
- * lean/sway translation moves the screens (see worldvio.cpp). */
-enum mirage_track_mode { TRACK_3DOF = 0, TRACK_NECK = 1, TRACK_CAMERA = 2, TRACK_MODE_COUNT = 3 };
 
 struct mirage; /* fwd */
 
@@ -296,7 +290,6 @@ struct mirage {
      *   BG_PASSTHROUGH - the world-facing camera, head-locked fullscreen
      * render.cpp owns the camera's lifecycle off this (lazy start / release). */
     int         bg_mode;        /* mirage_bg_mode */
-    int         track_mode;     /* mirage_track_mode: 3DoF / 3DoF+ (neck model) */
     struct cam *cam;
 
     /* window/screen opacity (HUD transparency slider): screens alpha-blend over the
@@ -337,7 +330,6 @@ typedef struct {
     bool  has_layout;    char  layout[64];     /* active layout NAME        */
     bool  has_bg_mode;   int   bg_mode;        /* mirage_bg_mode            */
     bool  has_opacity;   float opacity;        /* screen_opacity            */
-    bool  has_track_mode; int  track_mode;     /* mirage_track_mode         */
 } mirage_ui_state;
 std::string ui_state_default_path();                      /* $MIRAGE_UI_STATE / XDG path */
 int  ui_state_load(const char *path, mirage_ui_state *s); /* present keys; count          */
@@ -456,10 +448,10 @@ typedef struct {
     float pt_x0, pt_x1;                    /* button horizontal extent (m)        */
     float pt_y0, pt_y1;                    /* button vertical extent (m)          */
     int   pt_mode;                         /* current mirage_bg_mode              */
-    /* tracking-tier button (3DoF / 3DoF+): below the background-mode button */
-    float tk_x0, tk_x1;                    /* button horizontal extent (m)        */
-    float tk_y0, tk_y1;                    /* button vertical extent (m)          */
-    int   tk_mode;                         /* current mirage_track_mode           */
+    /* head-tilt (roll) toggle: below the background-mode button */
+    float tl_x0, tl_x1;                    /* button horizontal extent (m)        */
+    float tl_y0, tl_y1;                    /* button vertical extent (m)          */
+    int   tl_on;                           /* 1 = head roll tracked, 0 = horizon-locked */
 } sens_panel;
 
 #define BRI_MIN 0.20f
@@ -472,7 +464,7 @@ typedef struct {
 
 #define SENS_GAIN_MIN 1.0f
 #define SENS_GAIN_MAX 16.0f
-#define SENS_GAIN_DEF 8.0f    /* matches config.cpp yaw_gain/pitch_gain default */
+#define SENS_GAIN_DEF 1.0f    /* matches config.cpp yaw_gain/pitch_gain default (1:1, natural) */
 
 /* Fill *out with the slider geometry for the current frame; false if there's no
  * screen to hang it under. Shared by render (draw) and grab (hit-test). */

@@ -92,7 +92,12 @@ struct State {
 static State W;
 
 static const worldvio_cfg DEFAULTS = {
-    .trans_gain = 0.0025f, .leak_tau_s = 3.0f, .flow_clamp = 14.0f,  /* leak_tau = HOLD time at full confidence */
+    /* trans_gain = 0 -> parallax OFF by default. A view-trace (2026-06-18) measured this
+     * monocular optical-flow parallax injecting -26..+10 cm of spurious sideways swim with
+     * 245 direction reversals during head turns (the "jumps back and forth" artefact) -
+     * single-camera flow can't separate rotation from translation. The neck-model 3DoF+ is
+     * stable and swim-free. Opt back in for experiments with MIRAGE_WORLDVIO_GAIN=0.0025. */
+    .trans_gain = 0.0f, .leak_tau_s = 3.0f, .flow_clamp = 14.0f,
     .invert_x = false, .invert_y = false,
 };
 

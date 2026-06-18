@@ -11,7 +11,7 @@
  * image shift, subtracts the IMU-predicted rotational shift, and integrates the
  * residual (with a leak, so monocular drift bleeds off) into an eye offset.
  *
- * Call worldvio_feed() from the render thread each frame when TRACK_CAMERA is active;
+ * Call worldvio_feed() from the render thread each frame when the world cam is live;
  * read worldvio_eye_offset() for the parallax translation to add to the view.
  */
 #ifndef MIRAGE_WORLDVIO_H

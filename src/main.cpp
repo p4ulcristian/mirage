@@ -197,7 +197,6 @@ int main(void) {
     M.env_brightness = BRI_DEF;   /* HUD brightness slider starts centred (1.0 = as tuned) */
     M.screen_opacity = OPAC_DEF;  /* windows fully opaque until the transparency slider moves */
     M.bg_mode = BG_HDRI;          /* default background = the environment dome */
-    M.track_mode = TRACK_CAMERA;  /* default 6DoF* (world-cam parallax); cycle down if wanted */
 
     /* device/tracking/optics calibration: overlay profile.toml on the defaults and
      * stash the result, so it can be re-stamped after every layout switch (layouts
@@ -248,7 +247,12 @@ int main(void) {
     if (ui.has_env)        env_switch(&M, ui.env);
     if (ui.has_bg_mode)    M.bg_mode       = ui.bg_mode;     /* render starts the cam on frame 1 if PASSTHROUGH */
     if (ui.has_opacity)    M.screen_opacity = ui.opacity;
-    if (ui.has_track_mode) M.track_mode    = ui.track_mode;
+    /* Live A/B for the forward-prediction horizon (0 = off). Lets you feel the
+     * fast-turn overshoot with/without prediction without a rebuild per value. */
+    if (const char *pe = getenv("MIRAGE_PREDICT_MS")) {
+        M.cfg.pose_predict_ms = (float)atof(pe);
+        std::print(stderr, "mirage: pose_predict_ms override = {} ms\n", M.cfg.pose_predict_ms);
+    }
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);

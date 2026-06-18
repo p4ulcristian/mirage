@@ -54,6 +54,8 @@ static struct {
     bool smooth_on;       /* runtime A/B toggle; raw passthrough when false  */
     uint64_t last_sample_us;
     uint32_t sample_count; /* raw samples since last pose_take_sample_count() */
+    uint64_t rate_win_us;  /* start of the current sample-rate window (us)    */
+    uint32_t rate_win_n;   /* samples counted in the current rate window      */
     uint32_t recenter_gen; /* bumps on every recenter; lets render reseed its deadband */
     int fd;          /* listening socket / source fd             */
 
@@ -85,7 +87,7 @@ static struct {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .raw = {1,0,0,0}, .prev_raw = {1,0,0,0}, .smoothed = {1,0,0,0},
     .reference = {1,0,0,0},
-    .dvel = {1,0,0,0}, .sample_dt = 0.003f,
+    .dvel = {1,0,0,0}, .sample_dt = 0.008f,   /* ~124 Hz true period; refined from a windowed mean */
     .smooth_on = true,
     .fd = -1,
     .pos_fd = -1,
@@ -224,12 +226,22 @@ static void submit_raw(quat raw) {
      * photon horizon with q_scale_angle, so the wall stays nailed to the world while
      * you turn (the difference between readable and smeary text in motion). */
     if (had_signal) {
-        float vdt = (float)(t - P.last_sample_us) / 1000000.0f;
-        if (vdt < 1e-4f) vdt = 1e-4f;
-        if (vdt > 0.1f)  vdt = 0.1f;
         quat dq = q_mul(P.smoothed, q_conj(prev_smoothed));   /* world-frame step */
         P.dvel = q_nlerp(P.dvel, dq, 0.5f);                   /* light smoothing  */
-        P.sample_dt += 0.05f * (vdt - P.sample_dt);
+        /* Sample period for the prediction time base (pose_predicted scales dvel by
+         * horizon/sample_dt). Do NOT derive it from the instantaneous arrival gap: USB
+         * delivery is BURSTY, so the in-burst gaps collapse toward zero and would drag
+         * sample_dt down, making the prediction over-extrapolate and then snap back when
+         * the next burst lands - the "jitters back and forth on a fast turn" artefact.
+         * Measure the TRUE mean period over a ~1 s window (count / elapsed) instead;
+         * bursts average out, so the time base stays steady. */
+        if (P.rate_win_us == 0) P.rate_win_us = t;
+        P.rate_win_n++;
+        if (t - P.rate_win_us >= 1000000ULL) {
+            float per = (float)((double)(t - P.rate_win_us) / 1e6 / (double)P.rate_win_n);
+            if (per > 1e-4f && per < 0.1f) P.sample_dt = per;
+            P.rate_win_us = t; P.rate_win_n = 0;
+        }
     }
 
     /* --- diagnostics: orientation jumps while (nearly) still, plus a heartbeat ---
@@ -597,11 +609,23 @@ quat pose_predicted(float horizon_s) {
     quat smoothed = P.smoothed, ref = P.reference, dvel = P.dvel;
     float sdt = P.sample_dt;
     bool have = P.have_signal;
+    uint64_t last_us = P.last_sample_us;
     pthread_mutex_unlock(&P.lock);
     if (!have) return q_identity();
+    /* Render (120 fps) outruns the IMU, and arrival is bursty, so a FIXED-horizon prediction
+     * returns the SAME value between samples -> the view steps (the residual "not smooth while
+     * moving"). Add the wall-time elapsed since the last sample to the horizon so the pose keeps
+     * GLIDING along its angular velocity between updates, then snaps to truth when one lands. */
+    float elapsed = last_us ? (float)(now_us() - last_us) / 1e6f : 0.0f;
+    if (elapsed < 0.0f) elapsed = 0.0f;
+    if (elapsed > 0.05f) elapsed = 0.05f;       /* cap a stale gap so a stall can't fling */
+    horizon_s += elapsed;
     if (horizon_s > 1e-4f && sdt > 1e-5f) {
         float scale = horizon_s / sdt;
-        if (scale > 8.0f) scale = 8.0f;             /* cap forward extrapolation */
+        /* Cap forward extrapolation. With a correct sample_dt (~8ms) and an 18ms horizon
+         * this sits ~2.25, so the cap never bites in normal use; it only bounds a transient
+         * sample_dt dip (e.g. during the 1s rate-window warmup) so the view can't fling. */
+        if (scale > 3.0f) scale = 3.0f;
         quat dq = q_scale_angle(dvel, scale);       /* per-sample step -> horizon */
         smoothed = q_mul(dq, smoothed);             /* world-frame left-multiply  */
     }

@@ -135,7 +135,15 @@ static int g_qi[4]; static double g_qs[4];      /* output quaternion remap */
  * mirage's RayNeo-tuned device->world remap. Derive afresh with viture-calibrate.py. */
 static int g_mi[3]={2,0,1}; static float g_ms[3]={-1,1,-1};
 static double g_gyro_scale = 1.0;                /* Beast gyro is already rad/s (peak ~7 = ~420 deg/s) */
-static float g_dt = 1.0f/120.0f;                 /* fixed sample dt (SDK streams at a set rate) - avoids wall-clock jitter that shows as tremor */
+static float g_dt = 1.0f/120.0f;                 /* nominal sample dt from the SDK rate; superseded at runtime by g_dt_meas */
+/* Measured-rate dt: the nominal g_dt is usually WRONG (Beast streams ~124Hz, not 120) and a
+ * few-% dt scale error drifts the integrator AND skews VQF's rest/bias time-windows - one bad
+ * constant degrades drift, tracking lag and jitter at once. We measure the TRUE mean rate from
+ * the monotonic clock over a 1s window and feed THAT (still effectively constant, so no
+ * per-sample batching tremor, but the correct constant). g_prev_ts tracks the device timestamp
+ * delta for diagnostics - if that clock proves clean, a future per-sample dt is even better. */
+static double g_rate_t0 = 0; static long g_rate_n0 = 0; static float g_dt_meas = 0;
+static uint64_t g_prev_ts = 0; static double g_ts_d_ema = 0;
 static int g_verbose, g_use_mag;
 static int g_seeded = 0;
 static float g_gyro_bias[3] = {0,0,0};
@@ -158,10 +166,29 @@ static void qrot(const double q[4], const double v[3], double out[3]){
 }
 
 static void on_raw(float *d, uint64_t ts, uint64_t vsync){
-    (void)ts; (void)vsync;
-    /* fixed dt from the SDK's streaming rate - wall-clock dt in this callback
-     * jitters badly (batched delivery) and that integration jitter is the tremor. */
-    float dt = g_dt;
+    (void)vsync;
+    double tw = now_sec();
+
+    /* Measure the true mean sample rate over a 1s window -> dt. Constant within the window
+     * (no per-sample wall-clock jitter, which IS the tremor under batched delivery), but the
+     * constant is now CORRECT instead of a hard-coded guess. EMA across windows so it settles
+     * smoothly and tracks any slow rate change. */
+    if (g_rate_t0 == 0){ g_rate_t0 = tw; g_rate_n0 = g_n; }
+    else if (tw - g_rate_t0 >= 1.0){
+        double r = (double)(g_n - g_rate_n0) / (tw - g_rate_t0);
+        if (r > 30.0 && r < 2000.0){               /* sane IMU-rate band */
+            float dtm = (float)(1.0/r);
+            g_dt_meas = (g_dt_meas > 0) ? 0.5f*g_dt_meas + 0.5f*dtm : dtm;
+        }
+        g_rate_t0 = tw; g_rate_n0 = g_n;
+    }
+    float dt = (g_dt_meas > 0) ? g_dt_meas : g_dt;
+
+    /* Device-clock delta (diagnostic only - unit unknown until we read the log). If this is a
+     * clean monotonic MCU timestamp it's the ideal per-sample dt source for a later refinement. */
+    uint64_t ts_d = (g_prev_ts && ts > g_prev_ts) ? ts - g_prev_ts : 0;
+    g_prev_ts = ts;
+    if (ts_d) g_ts_d_ema = g_ts_d_ema>0 ? 0.99*g_ts_d_ema + 0.01*(double)ts_d : (double)ts_d;
 
     /* input axis remap (Beast sensor frame -> AHRS frame): apply the same
      * permutation/signs to gyro, accel and mag so the fused frame is consistent. */
@@ -233,7 +260,7 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
         if (m<g_mag_min[k]) g_mag_min[k]=m;
         if (m>g_mag_max[k]) g_mag_max[k]=m; }
 
-    double t = now_sec();
+    double t = tw;
     g_last_raw = t;               /* feed the stall watchdog */
     if (g_verbose && t-g_last_log>=0.25){
         /* euler from the fused (pre-qmap) quaternion - same for either filter */
@@ -241,10 +268,11 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
         float yaw,pitch,roll; rayneo_ahrs_euler(&tmp,&yaw,&pitch,&roll);
         if (g_use_vqf){
             double bias[3]={0,0,0}; vqf_get_bias(g_vqf,bias);
-            fprintf(stderr,"[VQF%s] ypr % 7.1f % 7.1f % 7.1f | bias(deg/s) % 5.2f % 5.2f % 5.2f | rest %d magrej %d | n %ld\n",
+            fprintf(stderr,"[VQF%s] ypr % 7.1f % 7.1f % 7.1f | bias(deg/s) % 5.2f % 5.2f % 5.2f | rest %d magrej %d | rate %.1fHz tsd %.0f | n %ld\n",
                     g_use_mag?"+mag":"", yaw,pitch,roll,
                     bias[0]*57.2958,bias[1]*57.2958,bias[2]*57.2958,
-                    vqf_rest_detected(g_vqf), vqf_mag_dist_detected(g_vqf), g_n);
+                    vqf_rest_detected(g_vqf), vqf_mag_dist_detected(g_vqf),
+                    g_dt_meas>0?1.0/g_dt_meas:0.0, g_ts_d_ema, g_n);
         } else {
             float mm = sqrtf(d[6]*d[6]+d[7]*d[7]+d[8]*d[8]);
             fprintf(stderr,"[MADG] ypr % 7.1f % 7.1f % 7.1f | acc % 6.2f % 6.2f % 6.2f | gyr % 6.2f % 6.2f % 6.2f "

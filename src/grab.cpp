@@ -250,6 +250,9 @@ static void tr_set_from_local(struct mirage *m, const sens_panel *sp, float lx) 
     m->screen_opacity = OPAC_MIN + frac * (OPAC_MAX - OPAC_MIN);
 }
 
+/* radians of world spin per unit of 3-finger horizontal swipe (tune to taste) */
+static const float WORLD_SPIN_SCALE = 0.004f;
+
 static void do_zoom(grab_state *g, double scroll_v) {
     /* scroll up (negative v) zooms in; multiplicative for even feel */
     float z = g->m->zoom > 0.0f ? g->m->zoom : 1.0f;
@@ -338,12 +341,9 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         double dx = rdx * g->sens;
         double dy = rdy * g->sens;
         if (g->world_drag) {
-            /* Grabbed empty space: horizontal drag spins the whole world about the
-             * eye (yaw only - vertical is ignored, so the wall stays level). The
-             * cursor itself holds still while the screens sweep past under it. */
-            g->m->world_yaw -= (float)dx;
-            while (g->m->world_yaw >  (float)M_PI) g->m->world_yaw -= 2.0f*(float)M_PI;
-            while (g->m->world_yaw < -(float)M_PI) g->m->world_yaw += 2.0f*(float)M_PI;
+            /* Grabbed empty space: drag no longer spins the world (that moved to the
+             * 3-finger horizontal swipe). A press on the gap just parks the cursor -
+             * we swallow the drag so it neither rotates nor jumps the cursor. */
         } else {
             /* +yaw = viewer's left (see layout.c), so finger-right (dx>0) lowers yaw;
              * finger-down (dy>0) lowers pitch. Equal finger travel = equal angle
@@ -429,6 +429,17 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     ly >= sp.pt_y0 && ly <= sp.pt_y1) {
                     g->m->bg_mode = (g->m->bg_mode + 1) % BG_MODE_COUNT;
                     ui_persist(g->m);                /* remember background mode across restarts */
+                    g->sens_click = true;            /* swallow the matching release  */
+                    break;
+                }
+                /* head-tilt toggle: flip horizon-lock <-> full head roll. roll_damp lives
+                 * in the main profile, so persist it the same way as the sens gains. */
+                if (lx >= sp.tl_x0 && lx <= sp.tl_x1 &&
+                    ly >= sp.tl_y0 && ly <= sp.tl_y1) {
+                    g->m->cfg.roll_damp = (g->m->cfg.roll_damp > 0.5f) ? 0.0f : 1.0f;
+                    sens_persist(g->m);              /* remember head-tilt across restarts */
+                    std::print(stderr, "grab: head tilt {}\n",
+                               g->m->cfg.roll_damp > 0.5f ? "on" : "off (horizon lock)");
                     g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
@@ -525,7 +536,20 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         if (calib_active(g->m)) break;
         struct libinput_event_gesture *gz = libinput_event_get_gesture_event(ev);
         if (libinput_event_gesture_get_finger_count(gz) != 3) break;
-        do_zoom(g, -libinput_event_gesture_get_dy(gz));
+        /* 3-finger HORIZONTAL = spin the whole world about the eye (moved here off the old
+         * empty-space drag); 3-finger VERTICAL = telephoto zoom. Route each event to its
+         * DOMINANT axis so a sideways slide never leaks into zoom (and vice-versa). */
+        {
+            double gdx = libinput_event_gesture_get_dx(gz);
+            double gdy = libinput_event_gesture_get_dy(gz);
+            if (fabs(gdx) > fabs(gdy)) {
+                g->m->world_yaw -= (float)(gdx * WORLD_SPIN_SCALE);
+                while (g->m->world_yaw >  (float)M_PI) g->m->world_yaw -= 2.0f*(float)M_PI;
+                while (g->m->world_yaw < -(float)M_PI) g->m->world_yaw += 2.0f*(float)M_PI;
+            } else {
+                do_zoom(g, -gdy);
+            }
+        }
         break;
     }
     default: break;

@@ -62,14 +62,15 @@ void mirage_config_defaults(mirage_config *c) {
     c->pose_beta         = 1.0f;   /* responsiveness in motion; higher = less lag   */
     c->pose_drift_tau    = 1.0f;   /* cancel 6-axis heading creep when still (s); 0 = off */
     c->pose_predict_ms   = 18.0f;  /* forward-predict head ~18 ms so the wall stays nailed mid-turn (0 = off) */
-    c->yaw_gain          = 8.0f;   /* >1 amplifies head yaw: the scene swings faster than the head, so the
-                                    * side screens need less neck turn. 1.0 = 1:1 world-fixed (nailed in
-                                    * space like a real monitor). (Verified direction empirically via the
-                                    * gaze readout: yaw_gain=-1 tracked inverted, so + is correct after the
-                                    * IMU axis remap.) */
-    c->pitch_gain        = 8.0f;   /* amplify up/down look too, so top/bottom rows need less neck tilt */
+    c->yaw_gain          = 1.0f;   /* 1.0 = 1:1 world-fixed: the scene is nailed in space like a real
+                                    * monitor and your head moves naturally through it (the honest anchored
+                                    * feel, and it doesn't amplify IMU jitter). Slide >1 to swing the scene
+                                    * faster than the head so wide layouts need less neck turn. (Direction
+                                    * verified via the gaze readout: yaw_gain=-1 tracked inverted, so + is
+                                    * correct after the IMU axis remap.) */
+    c->pitch_gain        = 1.0f;   /* up/down look: keep equal to yaw_gain (swing is isotropic) */
     c->roll_damp         = 0.0f;   /* no tilt: fully horizon-locked (head roll ignored) */
-    c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still (8x gain amplifies jitter hard) */
+    c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still */
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
     c->facecam_enable        = true;  /* ON for desk use: lateral lean parallax from the webcam. Needs a

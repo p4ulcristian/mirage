@@ -410,13 +410,13 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
     out->pt_y0 = out->pt_y1 - pt_h;
     out->pt_mode = m->bg_mode;
 
-    /* tracking-tier button (3DoF / 3DoF+): one row below the background-mode button.
-     * A click cycles m->track_mode (grab.cpp). */
-    const float tk_h = 0.06f;
-    out->tk_x0 = out->track_x0;
-    out->tk_x1 = out->track_x1;
-    out->tk_y1 = out->pt_y0 - 0.03f;
-    out->tk_y0 = out->tk_y1 - tk_h;
-    out->tk_mode = m->track_mode;
+    /* head-tilt (roll) toggle: one row below the background-mode button. A click flips
+     * cfg.roll_damp between 1 (screens tilt with your head) and 0 (horizon-locked). */
+    const float tl_h = 0.06f;
+    out->tl_x0 = out->track_x0;
+    out->tl_x1 = out->track_x1;
+    out->tl_y1 = out->pt_y0 - 0.03f;
+    out->tl_y0 = out->tl_y1 - tl_h;
+    out->tl_on = (m->cfg.roll_damp > 0.5f) ? 1 : 0;
     return true;
 }

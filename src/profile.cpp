@@ -157,10 +157,6 @@ int ui_state_load(const char *path, mirage_ui_state *s) {
     if (auto v = tbl["opacity"].value<double>()) {
         s->opacity = (float)*v; s->has_opacity = true; applied++;
     }
-    if (auto v = tbl["track_mode"].value<int64_t>()) {
-        int t = (int)*v; if (t < 0) t = 0; if (t >= TRACK_MODE_COUNT) t = TRACK_MODE_COUNT - 1;
-        s->track_mode = t; s->has_track_mode = true; applied++;
-    }
     return applied;
 }
 
@@ -178,7 +174,6 @@ bool ui_state_save(const char *path, const struct mirage *m) {
     o << "brightness = " << m->env_brightness << "\n";
     o << "bg_mode = " << m->bg_mode << "\n";          /* 0=black 1=hdri 2=passthrough */
     o << "opacity = " << m->screen_opacity << "\n";
-    o << "track_mode = " << m->track_mode << "\n";    /* 0=3DoF 1=3DoF+ (neck model)  */
     if (m->layouts.n > 0 && m->layouts.active >= 0 && m->layouts.active < m->layouts.n)
         o << "layout = \"" << m->layouts.l[m->layouts.active].name << "\"\n";
     return (bool)o;
