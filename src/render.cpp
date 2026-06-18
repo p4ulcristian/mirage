@@ -141,6 +141,9 @@ static struct {
     /* background-mode button captions, indexed by mirage_bg_mode */
     own::GlTexture label_bg[BG_MODE_COUNT];
     int    bg_w[BG_MODE_COUNT], bg_h[BG_MODE_COUNT];
+    /* tracking-tier button captions, indexed by mirage_track_mode */
+    own::GlTexture label_tk[TRACK_MODE_COUNT];
+    int    tk_w[TRACK_MODE_COUNT], tk_h[TRACK_MODE_COUNT];
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
@@ -754,6 +757,10 @@ mirage_status render_init(struct mirage *m) {
       R.label_bg[BG_BLACK]       = bake_label("BG: BLACK",    pc, &R.bg_w[BG_BLACK],       &R.bg_h[BG_BLACK]);
       R.label_bg[BG_HDRI]        = bake_label("BG: HDRI",     pc, &R.bg_w[BG_HDRI],        &R.bg_h[BG_HDRI]);
       R.label_bg[BG_PASSTHROUGH] = bake_label("BG: PASSTHRU", pc, &R.bg_w[BG_PASSTHROUGH], &R.bg_h[BG_PASSTHROUGH]); }
+    /* tracking-tier button captions (3DoF / 3DoF+) */
+    { const float pc[3] = {0.82f, 0.74f, 0.66f};
+      R.label_tk[TRACK_3DOF] = bake_label("3DoF",  pc, &R.tk_w[TRACK_3DOF], &R.tk_h[TRACK_3DOF]);
+      R.label_tk[TRACK_NECK] = bake_label("3DoF+", pc, &R.tk_w[TRACK_NECK], &R.tk_h[TRACK_NECK]); }
     R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
@@ -997,6 +1004,29 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(tex, cx, cy, lh, tw, th);
     }
 
+    /* tracking-tier button: cycles 3DoF / 3DoF+ (neck model). Amber when 3DoF+ (position
+     * active), dim grey for plain 3DoF. Caption shows the mode. */
+    {
+        int mode = sp.tk_mode; if (mode < 0 || mode >= TRACK_MODE_COUNT) mode = TRACK_NECK;
+        float cx = 0.5f * (sp.tk_x0 + sp.tk_x1);
+        float cy = 0.5f * (sp.tk_y0 + sp.tk_y1);
+        float w  = sp.tk_x1 - sp.tk_x0, h = sp.tk_y1 - sp.tk_y0;
+        if (mode == TRACK_3DOF) {
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border   */
+        } else {
+            solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* amber fill         */
+            outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border*/
+        }
+        GLuint tex = R.label_tk[mode];
+        int tw = R.tk_w[mode], th = R.tk_h[mode];
+        float lh = 0.038f, maxw = w * 0.86f;
+        if (th > 0) {
+            float natw = lh * (float)tw / (float)th;
+            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+        }
+        label(tex, cx, cy, lh, tw, th);
+    }
+
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -1164,12 +1194,16 @@ void render_frame(struct mirage *m, quat head) {
      *    the eye sits ahead/above a neck pivot, so a turn sweeps it through an arc. This is
      *    the only translational depth cue available from the 3DoF stream alone. */
     vec3 eye_world;
-    if (m->cfg.facecam_enable && pose_position_active()) {
+    if (m->track_mode == TRACK_3DOF) {
+        /* pure orientation: no eye translation at all (screens pinned to a direction) */
+        eye_world = v3(0.0f, 0.0f, 0.0f);
+    } else if (m->cfg.facecam_enable && pose_position_active()) {
         vec3 hp = pose_position(m->cfg.pose_predict_ms * 0.001f);
         eye_world = v3(hp.x * m->cfg.facecam_lateral_gain,
                        hp.y * m->cfg.facecam_lateral_gain,
                        hp.z * m->cfg.facecam_depth_gain);
     } else {
+        /* 3DoF+ neck model: synthesise the eye's neck-arc translation from rotation */
         eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
     }
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
@@ -1418,6 +1452,7 @@ void render_finish(struct mirage *m) {
     R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
     R.label_help.reset();
     for (int i = 0; i < BG_MODE_COUNT; i++) R.label_bg[i].reset();
+    for (int i = 0; i < TRACK_MODE_COUNT; i++) R.label_tk[i].reset();
     R.label_trans.reset(); R.cam_tex.reset();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */

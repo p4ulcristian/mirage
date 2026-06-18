@@ -409,5 +409,14 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
     out->pt_y1 = out->geo_y0 - 0.03f;
     out->pt_y0 = out->pt_y1 - pt_h;
     out->pt_mode = m->bg_mode;
+
+    /* tracking-tier button (3DoF / 3DoF+): one row below the background-mode button.
+     * A click cycles m->track_mode (grab.cpp). */
+    const float tk_h = 0.06f;
+    out->tk_x0 = out->track_x0;
+    out->tk_x1 = out->track_x1;
+    out->tk_y1 = out->pt_y0 - 0.03f;
+    out->tk_y0 = out->tk_y1 - tk_h;
+    out->tk_mode = m->track_mode;
     return true;
 }
