@@ -90,7 +90,14 @@ echo "[glasses] sweeping your windows onto the virtual screens..."
 python3 "$HERE/scripts/sweep.py" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
 echo "[glasses] launching mirage fullscreen on $GLASSES (trackpad capture is always on; Super+Shift+Q quits)"
-# 6DoF-lite optical-flow backend: default to the OpenCV LK path (worker thread); override
-# by exporting MIRAGE_WORLDVIO=proj before launch. Only matters in the 6DoF* tracking tier.
-MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}" ./mirage >/tmp/mirage.log 2>&1
+# Optional test knobs (empty = built-in defaults). Set MIRAGE_PREDICT_MS=0 to disable
+# forward-prediction, or MIRAGE_WORLDVIO_GAIN=0 to disable world-cam parallax, when isolating.
+PREDICT_MS="${MIRAGE_PREDICT_MS:-}"
+WORLDVIO_GAIN="${MIRAGE_WORLDVIO_GAIN:-}"
+# 6DoF-lite optical-flow backend: OpenCV LK path (worker thread); override with MIRAGE_WORLDVIO=proj.
+export MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}"
+[ -n "$PREDICT_MS" ]    && export MIRAGE_PREDICT_MS="$PREDICT_MS"
+[ -n "$WORLDVIO_GAIN" ] && export MIRAGE_WORLDVIO_GAIN="$WORLDVIO_GAIN"
+# DIAG (off): export MIRAGE_VIEW_TRACE=1 -> per-frame view trace to /tmp/mirage-view-trace.log
+./mirage >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
