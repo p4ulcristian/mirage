@@ -3,6 +3,7 @@
 #include "handle.hpp"
 #include "entity.hpp"
 #include "camera.h"
+#include "worldvio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,11 @@
 
 #include "stb_truetype.h"
 #include <wayland-egl.h>
+
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
 
 /* profiling timing helper: milliseconds between two monotonic samples. */
 static double prof_ms(struct timespec a, struct timespec b) {
@@ -181,24 +187,117 @@ static GLuint compile(GLenum type, const char *src) {
  * back to compositing, capping us below the panel's refresh). The glasses optics
  * are additive, so we never needed per-pixel alpha anyway - black reads as
  * transparent regardless. */
-static EGLConfig choose_config(EGLDisplay dpy) {
+static int g_msaa_samples = 0;   /* samples actually granted (logged at init) */
+
+/* Try for a 0-alpha (true XRGB8888) config at exactly `want` samples. Returns NULL
+ * if none qualifies; at want==0 we relax the 0-alpha requirement as a last resort. */
+static EGLConfig pick_cfg(EGLDisplay dpy, int want, int *got) {
     const EGLint attrs[] = {
         EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0,
+        EGL_SAMPLE_BUFFERS,  want > 0 ? 1 : 0,
+        EGL_SAMPLES,         want,
         EGL_NONE
     };
-    EGLConfig cfgs[32];
+    EGLConfig cfgs[64];
     EGLint n = 0;
-    if (!eglChooseConfig(dpy, attrs, cfgs, 32, &n) || n < 1) return NULL;
-    /* eglChooseConfig's ALPHA_SIZE is a minimum, so it can still hand back an
-     * alpha config; pick one with EXACTLY 0 alpha bits (true XRGB8888). */
+    if (!eglChooseConfig(dpy, attrs, cfgs, 64, &n) || n < 1) return NULL;
+    /* eglChooseConfig's ALPHA_SIZE/SAMPLES are minimums, so it can still hand back
+     * an alpha or under-sampled config; pick one with EXACTLY 0 alpha bits and at
+     * least the samples we asked for. */
     for (EGLint i = 0; i < n; i++) {
-        EGLint a = 8;
+        EGLint a = 8, sm = 0;
         eglGetConfigAttrib(dpy, cfgs[i], EGL_ALPHA_SIZE, &a);
-        if (a == 0) return cfgs[i];
+        eglGetConfigAttrib(dpy, cfgs[i], EGL_SAMPLES,    &sm);
+        if (a == 0 && sm >= want) { if (got) *got = sm; return cfgs[i]; }
     }
-    return cfgs[0];
+    if (want == 0) { if (got) *got = 0; return cfgs[0]; }   /* relax alpha only at 0x */
+    return NULL;
+}
+
+/* A multisampled WINDOW surface: EGL resolves it to a single-sample XRGB8888 buffer
+ * on swap, so the compositor still gets the opaque buffer it direct-scans-out (the
+ * resolve target is presentable) while screen-edge geometry gets MSAA for ~free on
+ * the tiled GPU. Falls back to 0x if the GPU won't give a multisampled 0-alpha config. */
+static EGLConfig choose_config(EGLDisplay dpy, int samples) {
+    EGLConfig c = NULL; int got = 0;
+    if (samples > 1) c = pick_cfg(dpy, samples, &got);
+    if (!c)          c = pick_cfg(dpy, 0, &got);
+    g_msaa_samples = got;
+    return c;
+}
+
+/* ---- screen mip chain --------------------------------------------------------
+ * The captured frame lives in a dmabuf imported as an EGLImage-external texture:
+ * immutable, single level, NO mip chain - so deep minification (the desktop squeezed
+ * onto the arc) can only sample the base level and sparkles. We mirror it into a
+ * normal texture WITH a mip chain and draw that instead: trilinear minification
+ * averages the right footprint, killing the shimmer the base-level taps + aniso
+ * can't fully reach. The mirror is a GPU blit (sample external -> render into the
+ * mip texture via an FBO) + glGenerateMipmap, done only when a new frame lands. */
+static GLuint g_mip_fbo  = 0;       /* shared FBO for the external -> mip blit      */
+static bool   g_npot     = false;   /* GLES2 needs this for mipmapped NPOT textures */
+static float  g_aniso_r  = 1.0f;    /* max anisotropy (re-queried render-side)      */
+
+/* Mirror s->tex (EGLImage external, just refreshed) into s->mip_tex and regenerate
+ * its mip chain. Self-contained: binds/restores its own FBO + viewport + GL state.
+ * No-op (leaving the draw to fall back to s->tex) if mipmapped NPOT isn't supported
+ * or the FBO won't complete. uMVP/uTexel/program are set fresh by the caller's draw,
+ * so we don't bother restoring them. */
+static void screen_update_mip(struct mirage *m, screen_t *s) {
+    if (!g_npot || s->width <= 0 || s->height <= 0) return;
+    if (!s->mip_tex) {
+        glGenTextures(1, &s->mip_tex);
+        glBindTexture(GL_TEXTURE_2D, s->mip_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s->width, s->height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (g_aniso_r > 1.0f)
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, g_aniso_r);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_mip_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->mip_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        /* this GPU won't render into the mirror; drop it and stay on the base level */
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteTextures(1, &s->mip_tex); s->mip_tex = 0;
+        g_npot = false;                 /* don't keep retrying every frame */
+        std::print(stderr, "render: mip FBO incomplete; mipmaps disabled\n");
+        return;
+    }
+
+    glViewport(0, 0, s->width, s->height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glUseProgram(R.prog);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glEnableVertexAttribArray(R.aUV);
+    glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s->tex);
+    glUniform1i(R.uTex, 0);
+    glUniform1f(R.uHasTex, 1.0f);
+    glUniform1f(R.uSharpen, 0.0f);                 /* straight copy; sharpen on final draw */
+    glUniform1f(R.uOpacity, 1.0f);
+    /* Render-to-texture is y-flipped vs sampling, so flip here: the mirror then holds
+     * the SAME texel layout as s->tex and the final draw keeps using s->y_invert. */
+    glUniform1f(R.uYFlip, 1.0f);
+    mat4 fill = m4_scale(v3(2.0f, 2.0f, 1.0f));     /* QUAD [-0.5,0.5] -> clip [-1,1] */
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, fill.m);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, s->mip_tex);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glEnable(GL_DEPTH_TEST);
+    (void)m;
 }
 
 /* Build a curved screen: a vertical triangle strip swept along an arc of a
@@ -690,7 +789,7 @@ mirage_status render_init(struct mirage *m) {
         return std::unexpected("eglInitialize failed");
     if (!eglBindAPI(EGL_OPENGL_ES_API))
         return std::unexpected("eglBindAPI failed");
-    m->ecfg = choose_config(m->edpy);
+    m->ecfg = choose_config(m->edpy, m->cfg.msaa_samples);
     if (!m->ecfg) return std::unexpected("no matching EGL config");
 
     const EGLint ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
@@ -746,6 +845,22 @@ mirage_status render_init(struct mirage *m) {
 
     glEnable(GL_DEPTH_TEST);
 
+    /* mipmap support: GLES2 only allows a mip chain on non-power-of-two textures
+     * (every desktop resolution) with GL_OES_texture_npot. Without it, leave g_npot
+     * false so screen_update_mip is a no-op and we keep the base-level path. */
+    {
+        const char *ext = (const char*)glGetString(GL_EXTENSIONS);
+        g_npot = m->cfg.mipmap && ext && strstr(ext, "GL_OES_texture_npot");
+        if (ext && strstr(ext, "GL_EXT_texture_filter_anisotropic")) {
+            GLfloat amax = 1.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &amax);
+            g_aniso_r = amax;
+        }
+        if (g_npot) glGenFramebuffers(1, &g_mip_fbo);
+        std::print(stderr, "render: MSAA {}x, mipmaps {}\n",
+                g_msaa_samples, g_npot ? "on" : (m->cfg.mipmap ? "unsupported" : "off"));
+    }
+
     render_rebuild_meshes(m);
 
     /* flat/curved toggle captions (one shown at a time on the toggle button) */
@@ -759,8 +874,10 @@ mirage_status render_init(struct mirage *m) {
       R.label_bg[BG_PASSTHROUGH] = bake_label("BG: PASSTHRU", pc, &R.bg_w[BG_PASSTHROUGH], &R.bg_h[BG_PASSTHROUGH]); }
     /* tracking-tier button captions (3DoF / 3DoF+) */
     { const float pc[3] = {0.82f, 0.74f, 0.66f};
-      R.label_tk[TRACK_3DOF] = bake_label("3DoF",  pc, &R.tk_w[TRACK_3DOF], &R.tk_h[TRACK_3DOF]);
-      R.label_tk[TRACK_NECK] = bake_label("3DoF+", pc, &R.tk_w[TRACK_NECK], &R.tk_h[TRACK_NECK]); }
+      R.label_tk[TRACK_3DOF]   = bake_label("3DoF",  pc, &R.tk_w[TRACK_3DOF],   &R.tk_h[TRACK_3DOF]);
+      R.label_tk[TRACK_NECK]   = bake_label("3DoF+", pc, &R.tk_w[TRACK_NECK],   &R.tk_h[TRACK_NECK]);
+      R.label_tk[TRACK_CAMERA] = bake_label("6DoF*", pc, &R.tk_w[TRACK_CAMERA], &R.tk_h[TRACK_CAMERA]); }
+    worldvio_start(nullptr);   /* 6DoF-lite optical-flow estimator (fed by draw_passthrough) */
     R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
     R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
@@ -1012,9 +1129,12 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         float cy = 0.5f * (sp.tk_y0 + sp.tk_y1);
         float w  = sp.tk_x1 - sp.tk_x0, h = sp.tk_y1 - sp.tk_y0;
         if (mode == TRACK_3DOF) {
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border   */
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border    */
+        } else if (mode == TRACK_CAMERA) {
+            solid(cx, cy, w, h, 0.10f, 0.26f, 0.28f);            /* teal fill (camera) */
+            outline(cx, cy, w, h, 0.006f, 0.40f, 0.86f, 0.90f);  /* bright teal border */
         } else {
-            solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* amber fill         */
+            solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* amber fill (3DoF+)  */
             outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border*/
         }
         GLuint tex = R.label_tk[mode];
@@ -1036,21 +1156,38 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
  * Beast cam is head-mounted, so screen-space IS the correct world-lock). Drawn
  * first, depth-test off, so the windows/wall composite on top. Returns true if a
  * passthrough background was drawn (so the caller can skip the env dome). */
-static bool draw_passthrough(struct mirage *m) {
+static bool draw_passthrough(struct mirage *m, quat head) {
     const char *dev = getenv("MIRAGE_CAM_DEV");
     if (!dev) dev = "/dev/video1";                 /* Beast world-cam (laptop = video0) */
 
-    bool want = (m->bg_mode == BG_PASSTHROUGH);
+    /* The world cam is wanted for passthrough display AND for 6DoF-lite optical flow,
+     * so keep it open if either needs it (one owner, no double-open). */
+    bool pass = (m->bg_mode == BG_PASSTHROUGH);
+    bool vio  = (m->track_mode == TRACK_CAMERA);
+    bool want = pass || vio;
     if (want && !m->cam) {
         m->cam = cam_start(dev, 1280, 720);
-        if (!m->cam) { m->bg_mode = BG_HDRI; std::print(stderr, "passthrough: camera unavailable\n"); }
+        if (!m->cam) { if (pass) m->bg_mode = BG_HDRI; std::print(stderr, "world cam unavailable\n"); }
+        else worldvio_reset();
     } else if (!want && m->cam) {
         cam_stop(m->cam); m->cam = nullptr; R.cam_alloc_w = R.cam_alloc_h = 0;
     }
-    if (!want || !m->cam) return false;
+    if (!m->cam) return false;
 
-    const uint8_t *rgb; int cw, ch;
-    if (cam_acquire(m->cam, &rgb, &cw, &ch, &R.cam_seq)) {
+    const uint8_t *rgb = nullptr; int cw = 0, ch = 0;
+    bool fresh = cam_acquire(m->cam, &rgb, &cw, &ch, &R.cam_seq);
+
+    /* 6DoF-lite: feed each fresh frame to the optical-flow estimator (with the head
+     * orientation, so it can subtract rotation and keep the translation parallax). */
+    if (vio && fresh && rgb) {
+        struct timespec ct; clock_gettime(CLOCK_MONOTONIC, &ct);
+        double t = ct.tv_sec + ct.tv_nsec * 1e-9;
+        worldvio_feed(rgb, cw, ch, head, t, 70.0f /* Beast world-cam HFOV est; tune */);
+    }
+
+    if (!pass) return false;   /* 6DoF-only: camera ran for tracking, no passthrough draw */
+
+    if (fresh && rgb) {
         if (!R.cam_tex) R.cam_tex.gen();
         glBindTexture(GL_TEXTURE_2D, R.cam_tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1103,7 +1240,7 @@ void render_frame(struct mirage *m, quat head) {
 
     /* camera passthrough background (head-locked), drawn when bg_mode == BG_PASSTHROUGH.
      * Manages the camera lifecycle too; the dome draw below is gated on BG_HDRI. */
-    draw_passthrough(m);
+    draw_passthrough(m, head);
 
     float z = m->zoom > 0.0f ? m->zoom : 1.0f;
     float aspect = (float)m->glasses_w / (float)m->glasses_h;
@@ -1197,6 +1334,12 @@ void render_frame(struct mirage *m, quat head) {
     if (m->track_mode == TRACK_3DOF) {
         /* pure orientation: no eye translation at all (screens pinned to a direction) */
         eye_world = v3(0.0f, 0.0f, 0.0f);
+    } else if (m->track_mode == TRACK_CAMERA) {
+        /* 6DoF-lite: neck model (rotation arc) PLUS world-cam optical-flow parallax (real
+         * lean/sway translation the neck model is blind to). worldvio decays to rest, so
+         * with no/poor camera signal this gracefully degrades to the neck model. */
+        eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
+        eye_world = v3_add(eye_world, worldvio_eye_offset());
     } else if (m->cfg.facecam_enable && pose_position_active()) {
         vec3 hp = pose_position(m->cfg.pose_predict_ms * 0.001f);
         eye_world = v3(hp.x * m->cfg.facecam_lateral_gain,
@@ -1254,6 +1397,22 @@ void render_frame(struct mirage *m, quat head) {
     int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
 
+    /* Refresh the mip chain of any screen that captured a new frame (cfg.mipmap).
+     * Done in its own pass so its FBO/viewport churn doesn't interleave with the
+     * wall draw; restore the glasses viewport afterwards. */
+    if (m->cfg.mipmap && g_npot) {
+        bool built = false;
+        for (int i = 0; i < n; i++) {
+            screen_t *s = &m->screen[i];
+            if (s->have_tex && s->tex_dirty && s->mesh_vbo) {
+                screen_update_mip(m, s);
+                s->tex_dirty = false;
+                built = true;
+            }
+        }
+        if (built) glViewport(0, 0, m->glasses_w, m->glasses_h);
+    }
+
     glUseProgram(R.prog);
     /* window/screen transparency: alpha-blend the screens over the background (env
      * dome / passthrough / black) at m->screen_opacity. At 1.0 this is a no-op (opaque). */
@@ -1276,7 +1435,9 @@ void render_frame(struct mirage *m, quat head) {
 
         if (s->have_tex) {
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, s->tex);
+            /* prefer the mipmapped mirror (trilinear minification); fall back to the
+             * raw EGLImage when mipmaps are off/unsupported for this screen. */
+            glBindTexture(GL_TEXTURE_2D, (m->cfg.mipmap && s->mip_tex) ? s->mip_tex : s->tex);
             glUniform1i(R.uTex, 0);
             glUniform1f(R.uHasTex, 1.0f);
             glUniform1f(R.uYFlip, s->y_invert ? 1.0f : 0.0f);
@@ -1454,6 +1615,7 @@ void render_finish(struct mirage *m) {
     for (int i = 0; i < BG_MODE_COUNT; i++) R.label_bg[i].reset();
     for (int i = 0; i < TRACK_MODE_COUNT; i++) R.label_tk[i].reset();
     R.label_trans.reset(); R.cam_tex.reset();
+    worldvio_stop();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
     for (int i = 0; i < m->n_screen; i++) {

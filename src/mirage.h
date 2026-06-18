@@ -37,8 +37,9 @@ enum mirage_bg_mode { BG_BLACK = 0, BG_HDRI = 1, BG_PASSTHROUGH = 2, BG_MODE_COU
 /* Head-position tracking tier, cycled by the HUD tracking button. TRACK_3DOF =
  * orientation only (screens pinned to a direction). TRACK_NECK = 3DoF+: synthesise the
  * eye's neck-arc translation from the rotation so screens stop swimming on head turns.
- * (TRACK_CAMERA, world-cam VIO-lite, will be appended here once its backend lands.) */
-enum mirage_track_mode { TRACK_3DOF = 0, TRACK_NECK = 1, TRACK_MODE_COUNT = 2 };
+ * TRACK_CAMERA = 6DoF-lite: neck model PLUS world-cam optical-flow parallax, so real
+ * lean/sway translation moves the screens (see worldvio.cpp). */
+enum mirage_track_mode { TRACK_3DOF = 0, TRACK_NECK = 1, TRACK_CAMERA = 2, TRACK_MODE_COUNT = 3 };
 
 struct mirage; /* fwd */
 
@@ -57,7 +58,9 @@ typedef struct {
     uint32_t              stride;
     struct wl_buffer     *buffer;
     EGLImageKHR           image;
-    GLuint                tex;
+    GLuint                tex;        /* dmabuf EGLImage, level 0 only (no mip chain) */
+    GLuint                mip_tex;    /* mirror of tex with a full mip chain (cfg.mipmap) */
+    bool                  tex_dirty;  /* a new frame landed; rebuild the mip chain next draw */
 
     /* per-frame capture state (ext-image-copy-capture-v1) */
     struct ext_image_copy_capture_session_v1 *session;  /* persistent per output */
@@ -123,6 +126,8 @@ typedef struct {
     bool  facecam_fusion;       /* fuse IMU linear-accel for low-latency position (VOR-style);
                                  * needs the rayneo bridge to emit accel. Off = camera-only */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
+    int   msaa_samples;         /* MSAA sample count for the window surface (0/1 = off); init-time only */
+    bool  mipmap;               /* trilinear minification: mirror each screen into a mipmapped texture */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
 
     /* HDRI environment dome: an equirectangular image drawn as an infinite,

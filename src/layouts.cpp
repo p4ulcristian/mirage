@@ -114,6 +114,8 @@ static void apply_globals(mirage_config *cfg, const toml::table &t) {
     if (auto v = t["arc"].value<double>())         cfg->screen_arc_deg    = (float)*v;
     if (auto v = t["fov"].value<double>())         cfg->fov_deg           = (float)*v;
     if (auto v = t["sharpen"].value<double>())     cfg->sharpen           = (float)*v;
+    if (auto v = t["msaa"].value<int64_t>())       cfg->msaa_samples      = (int)*v;
+    if (auto b = t["mipmap"].value<bool>())        cfg->mipmap            = *b;
     if (auto v = t["yaw_gain"].value<double>())    cfg->yaw_gain          = (float)*v;
     if (auto v = t["pitch_gain"].value<double>())  cfg->pitch_gain        = (float)*v;
     if (auto v = t["geometry"].value<std::string>())

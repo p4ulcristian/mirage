@@ -524,6 +524,18 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         if (v == 0.0) g->scroll_acc = 0.0;   /* reset on finger lift */
         break;
     }
+    /* Three-finger vertical swipe -> telephoto zoom (no Cmd needed). libinput
+     * delivers 3/4-finger swipes as gesture events through the same grabbed-
+     * trackpad queue, so the compositor never sees them (no workspace-swipe
+     * clash). Two-finger scroll is already spoken for, so three fingers is the
+     * free gesture. dy<0 (swipe up) zooms in, matching Cmd+scroll-up. */
+    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
+        if (calib_active(g->m)) break;
+        struct libinput_event_gesture *gz = libinput_event_get_gesture_event(ev);
+        if (libinput_event_gesture_get_finger_count(gz) != 3) break;
+        do_zoom(g, libinput_event_gesture_get_dy(gz));
+        break;
+    }
     default: break;
     }
 }

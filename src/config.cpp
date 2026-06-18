@@ -86,6 +86,8 @@ void mirage_config_defaults(mirage_config *c) {
                                        * the diag log showed it causing the still-jumps. Depth is
                                        * disabled and lean is slow, so camera-only position is better. */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
+    c->msaa_samples      = 4;      /* 4x MSAA on the screen-edge geometry (0 = off); cheap on the tiled GPU */
+    c->mipmap            = true;   /* trilinear minification kills deep-minified sparkle the base level can't */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
     strcpy(c->hdri_path, "hdri/starmap_2020_4k.hdr");  /* NASA Deep Star Maps 2020, 4K */
