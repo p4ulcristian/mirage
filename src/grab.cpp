@@ -432,14 +432,6 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
-                /* tracking-tier button: cycle 3DoF -> 3DoF+ (neck model). */
-                if (lx >= sp.tk_x0 && lx <= sp.tk_x1 &&
-                    ly >= sp.tk_y0 && ly <= sp.tk_y1) {
-                    g->m->track_mode = (g->m->track_mode + 1) % TRACK_MODE_COUNT;
-                    ui_persist(g->m);                /* remember tracking tier across restarts */
-                    g->sens_click = true;
-                    break;
-                }
                 /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
                 float bri_band = fmaxf(sp.bri_handle_h, sp.bri_track_h) * 0.5f + 0.03f;
                 if (lx >= sp.bri_x0 - 0.05f && lx <= sp.bri_x1 + 0.05f &&

@@ -47,6 +47,11 @@ vec3 worldvio_eye_offset(void);
 /* True once it has processed enough frames to give a usable estimate. */
 bool worldvio_active(void);
 
+/* 0..1 confidence in the current camera estimate (from the RANSAC inlier count). The
+ * eye offset above is already scaled by this, so it auto-fades to the neck model when
+ * the camera can't see well; exposed for an optional HUD indicator. */
+float worldvio_confidence(void);
+
 /* Drop history (call on recenter / mode switch / camera (re)start). */
 void worldvio_reset(void);
 

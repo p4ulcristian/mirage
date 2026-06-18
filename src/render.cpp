@@ -1121,30 +1121,26 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
         label(tex, cx, cy, lh, tw, th);
     }
 
-    /* tracking-tier button: cycles 3DoF / 3DoF+ (neck model). Amber when 3DoF+ (position
-     * active), dim grey for plain 3DoF. Caption shows the mode. */
+    /* tracking-confidence indicator (read-only): how much the world-cam parallax is
+     * contributing right now - a dot that goes dim-red (coasting on the neck model:
+     * blank wall / dark / fast motion) -> bright green (solid camera 6DoF tracking),
+     * beside the "6DoF*" caption. One fused mode, so this just shows it working. */
     {
-        int mode = sp.tk_mode; if (mode < 0 || mode >= TRACK_MODE_COUNT) mode = TRACK_NECK;
-        float cx = 0.5f * (sp.tk_x0 + sp.tk_x1);
+        float conf = worldvio_confidence(); if (conf < 0) conf = 0; if (conf > 1) conf = 1;
+        float w = sp.tk_x1 - sp.tk_x0, h = sp.tk_y1 - sp.tk_y0;
         float cy = 0.5f * (sp.tk_y0 + sp.tk_y1);
-        float w  = sp.tk_x1 - sp.tk_x0, h = sp.tk_y1 - sp.tk_y0;
-        if (mode == TRACK_3DOF) {
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border    */
-        } else if (mode == TRACK_CAMERA) {
-            solid(cx, cy, w, h, 0.10f, 0.26f, 0.28f);            /* teal fill (camera) */
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.86f, 0.90f);  /* bright teal border */
-        } else {
-            solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* amber fill (3DoF+)  */
-            outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border*/
-        }
-        GLuint tex = R.label_tk[mode];
-        int tw = R.tk_w[mode], th = R.tk_h[mode];
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (th > 0) {
-            float natw = lh * (float)tw / (float)th;
-            if (natw > maxw) lh = maxw * (float)th / (float)tw;
-        }
-        label(tex, cx, cy, lh, tw, th);
+        float ds = h * 0.45f;
+        float dotx = sp.tk_x0 + ds * 0.9f;
+        float r = 0.60f * (1.0f - conf) + 0.10f;   /* low: reddish     */
+        float gg = 0.20f + 0.65f * conf;           /* high: green      */
+        float b = 0.15f;
+        solid(dotx, cy, ds, ds, r, gg, b);
+        outline(dotx, cy, ds, ds, 0.004f, 0.5f, 0.5f, 0.5f);
+        GLuint tex = R.label_tk[TRACK_CAMERA];
+        int tw = R.tk_w[TRACK_CAMERA], th = R.tk_h[TRACK_CAMERA];
+        float lh = 0.032f, maxw = (w - ds*2.2f) * 0.95f;
+        if (th > 0) { float natw = lh * (float)tw / (float)th; if (natw > maxw) lh = maxw * (float)th / (float)tw; }
+        label(tex, dotx + ds*1.1f + lh*0.5f, cy, lh, tw, th);
     }
 
     glDisable(GL_BLEND);
@@ -1163,7 +1159,7 @@ static bool draw_passthrough(struct mirage *m, quat head) {
     /* The world cam is wanted for passthrough display AND for 6DoF-lite optical flow,
      * so keep it open if either needs it (one owner, no double-open). */
     bool pass = (m->bg_mode == BG_PASSTHROUGH);
-    bool vio  = (m->track_mode == TRACK_CAMERA);
+    bool vio  = true;            /* single fused mode: the optical-flow estimator always runs */
     bool want = pass || vio;
     if (want && !m->cam) {
         m->cam = cam_start(dev, 1280, 720);
@@ -1330,25 +1326,13 @@ void render_frame(struct mirage *m, quat head) {
      *  - NECK MODEL (fallback): with no webcam signal, synthesise the arc from rotation -
      *    the eye sits ahead/above a neck pivot, so a turn sweeps it through an arc. This is
      *    the only translational depth cue available from the 3DoF stream alone. */
-    vec3 eye_world;
-    if (m->track_mode == TRACK_3DOF) {
-        /* pure orientation: no eye translation at all (screens pinned to a direction) */
-        eye_world = v3(0.0f, 0.0f, 0.0f);
-    } else if (m->track_mode == TRACK_CAMERA) {
-        /* 6DoF-lite: neck model (rotation arc) PLUS world-cam optical-flow parallax (real
-         * lean/sway translation the neck model is blind to). worldvio decays to rest, so
-         * with no/poor camera signal this gracefully degrades to the neck model. */
-        eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
-        eye_world = v3_add(eye_world, worldvio_eye_offset());
-    } else if (m->cfg.facecam_enable && pose_position_active()) {
-        vec3 hp = pose_position(m->cfg.pose_predict_ms * 0.001f);
-        eye_world = v3(hp.x * m->cfg.facecam_lateral_gain,
-                       hp.y * m->cfg.facecam_lateral_gain,
-                       hp.z * m->cfg.facecam_depth_gain);
-    } else {
-        /* 3DoF+ neck model: synthesise the eye's neck-arc translation from rotation */
-        eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
-    }
+    /* ONE fused tracking mode: IMU orientation (the view rotation, via `head`) + neck-model
+     * rotation arc + confidence-gated world-cam optical-flow parallax. worldvio already
+     * scales its offset by camera confidence and leaks to rest, so when the camera sees
+     * well you get real lean/sway 6DoF, and when it can't (blank wall, dark, blur) it fades
+     * smoothly back to the rock-solid neck model. No mode switch - it always does its best. */
+    vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
+    eye_world = v3_add(eye_world, worldvio_eye_offset());
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);

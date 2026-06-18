@@ -26,6 +26,7 @@
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <opencv2/calib3d.hpp>   /* estimateAffinePartial2D (RANSAC) */
 
 #define DSW 160
 #define DSH 90
@@ -34,6 +35,9 @@
 #define CV_PROC_W   640    /* cv: process width (downsampled for speed); aspect kept */
 #define CV_MAX_PTS  220
 #define CV_MIN_PTS  40
+#define CV_REFILL   150    /* top up features when the tracked set thins below this (keeps
+                            * the set dense -> stable median -> no shimmer from churn) */
+#define CV_ERR_MAX  16.0f  /* drop LK points whose tracking error exceeds this */
 
 enum Backend { BK_PROJ = 0, BK_CV = 1 };
 
@@ -47,6 +51,11 @@ struct State {
 
     std::mutex   pos_mtx;
     vec3         pos{0,0,0};        /* integrated eye translation (m), leaked */
+    vec3         pos_smooth{0,0,0}; /* low-passed output (what render reads) - kills shimmer */
+    float        conf = 0.0f;       /* 0..1 camera-estimate confidence (RANSAC inliers) */
+    float        deadband = 0.4f;   /* ignore residual flow below this (DSW px) - still-jitter */
+    float        out_alpha = 0.25f; /* output EMA: lower = smoother/laggier */
+    int          method = 0;        /* cv global-motion: 0 = RANSAC similarity, 1 = median */
 
     /* proj backend (render thread) */
     bool   have_prev = false;
@@ -80,7 +89,7 @@ static double mono(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
 /* Common: turn a measured image shift (dx,dy, in `scale` px = focal-px units of the
  * processing image) into an integrated eye offset, with rotation subtracted + leak. */
 static void integrate(float dx_obs, float dy_obs, quat head, double dt, float scale_w,
-                      float hfov_deg, const char *tag){
+                      float hfov_deg, const char *tag, float conf){
     quat dq = q_mul(head, q_conj(W.head_prev));
     float s = (dq.w < 0) ? -1.0f : 1.0f;
     float yaw_d   = 2.0f * s * dq.y;     /* rad about world up (y)    */
@@ -89,6 +98,12 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
     float dx_rot = -yaw_d   * f;
     float dy_rot =  pitch_d * f;
     float rx = dx_obs - dx_rot, ry = dy_obs - dy_rot;
+
+    /* deadband: ignore sub-pixel residual (sensor/flow noise) so a still head doesn't
+     * shimmer. Scales with the processing resolution. */
+    float dead = W.deadband * (scale_w / (float)DSW);
+    if (fabsf(rx) < dead) rx = 0.0f;
+    if (fabsf(ry) < dead) ry = 0.0f;
 
     float clampf = W.cfg.flow_clamp * (scale_w / DSW);   /* clamp scales with resolution */
     bool ok = fabsf(rx) < clampf && fabsf(ry) < clampf;
@@ -99,10 +114,17 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
         if (ok){
             float sx = W.cfg.invert_x ? -1.0f : 1.0f;
             float sy = W.cfg.invert_y ? -1.0f : 1.0f;
-            W.pos.x += sx * (-rx) * gain;
-            W.pos.y += sy * ( ry) * gain;
+            /* scale the contribution by confidence: low-confidence frames add little, and
+             * the constant leak then fades pos -> 0 (graceful fall back to the neck model). */
+            W.pos.x += sx * (-rx) * gain * conf;
+            W.pos.y += sy * ( ry) * gain * conf;
         }
         W.pos.x *= leak; W.pos.y *= leak; W.pos.z = 0.0f;
+        /* output low-pass: the render reads pos_smooth, so per-frame flow noise becomes a
+         * gentle settle instead of a shimmer. */
+        W.pos_smooth.x += W.out_alpha * (W.pos.x - W.pos_smooth.x);
+        W.pos_smooth.y += W.out_alpha * (W.pos.y - W.pos_smooth.y);
+        W.pos_smooth.z = 0.0f;
     }
     if (W.trace && mono() - W.trace_t > 0.2){ W.trace_t = mono();
         fprintf(stderr,"[worldvio/%s] obs(% 6.2f % 6.2f) rot(% 6.2f % 6.2f) res(% 6.2f % 6.2f)%s pos(% .3f % .3f) n%ld\n",
@@ -154,7 +176,8 @@ static void feed_proj(const uint8_t *rgb, int w, int h, quat head, double t, flo
         W.head_prev=head; W.t_prev=t; return; }
     float dx = corr_shift(W.col_prev, col, DSW);
     float dy = corr_shift(W.row_prev, row, DSH);
-    integrate(dx, dy, head, dt, (float)DSW, hfov, "proj");
+    W.conf = 1.0f;   /* projection has no inlier metric; trust it (it's the fallback backend) */
+    integrate(dx, dy, head, dt, (float)DSW, hfov, "proj", 1.0f);
     memcpy(W.col_prev,col,sizeof col); memcpy(W.row_prev,row,sizeof row);
     W.t_prev=t; W.n++;
 }
@@ -185,39 +208,72 @@ static void cv_worker(void){
         int pw = CV_PROC_W, ph = (int)((float)fh * CV_PROC_W / fw);
         cv::Mat g; cv::resize(gray, g, cv::Size(pw, ph));
 
-        if (!have || (int)prev_pts.size() < CV_MIN_PTS){
+        if (!have){
             cv::goodFeaturesToTrack(g, prev_pts, CV_MAX_PTS, 0.01, 8);
             g.copyTo(prev_gray); prev_t = ft; prev_head = fhead; have = true;
             W.head_prev = fhead;
-            if (W.trace) fprintf(stderr,"[worldvio/cv] (re)detect %zu pts, %.1fms\n",
-                                 prev_pts.size(), (mono()-t0)*1e3);
             continue;
         }
         std::vector<cv::Point2f> next_pts;
         std::vector<uchar> status; std::vector<float> err;
         cv::calcOpticalFlowPyrLK(prev_gray, g, prev_pts, next_pts, status, err,
                                  cv::Size(21,21), 3);
-        /* robust global flow = median of the well-tracked points' displacements */
-        std::vector<float> fxs, fys; std::vector<cv::Point2f> kept;
-        for (size_t i=0;i<status.size();i++) if (status[i]){
-            fxs.push_back(next_pts[i].x - prev_pts[i].x);
-            fys.push_back(next_pts[i].y - prev_pts[i].y);
-            kept.push_back(next_pts[i]);
+        /* matched pairs of well-tracked points (status ok + low LK error) */
+        std::vector<cv::Point2f> p0, p1;
+        for (size_t i=0;i<status.size();i++) if (status[i] && err[i] < CV_ERR_MAX){
+            p0.push_back(prev_pts[i]); p1.push_back(next_pts[i]);
         }
         double cvms = (mono()-t0)*1e3;
         double dt = ft - prev_t;
-        if (kept.size() >= 8 && dt > 0.004 && dt < 0.25){
-            std::nth_element(fxs.begin(), fxs.begin()+fxs.size()/2, fxs.end());
-            std::nth_element(fys.begin(), fys.begin()+fys.size()/2, fys.end());
-            float mdx = fxs[fxs.size()/2], mdy = fys[fys.size()/2];
+        std::vector<cv::Point2f> kept;
+        if (p0.size() >= 12 && dt > 0.004 && dt < 0.25){
+            float dx = 0, dy = 0; bool got = false;
+            if (W.method == 0){
+                /* RANSAC similarity (translation+rot+scale): fits ONE model to all points,
+                 * rejecting whole outlier regions (a moving hand, reflections), not just bad
+                 * individual vectors. Read the shift at the image CENTRE so head-roll (which
+                 * rotates the image about its centre) doesn't leak into translation. */
+                std::vector<uchar> inl;
+                cv::Mat M = cv::estimateAffinePartial2D(p0, p1, inl, cv::RANSAC, 3.0);
+                if (!M.empty()){
+                    float cx = pw*0.5f, cy = ph*0.5f;
+                    float nx = (float)(M.at<double>(0,0)*cx + M.at<double>(0,1)*cy + M.at<double>(0,2));
+                    float ny = (float)(M.at<double>(1,0)*cx + M.at<double>(1,1)*cy + M.at<double>(1,2));
+                    dx = nx - cx; dy = ny - cy; got = true;
+                    int ni = 0; for (size_t i=0;i<inl.size();i++) if (inl[i]){ kept.push_back(p1[i]); ni++; }
+                    /* confidence from the inlier count: <20 -> starving (blank wall/blur),
+                     * >70 -> rock solid. Smoothed so it fades, not flickers. */
+                    float craw = (ni - 20) / (70.0f - 20.0f); if (craw<0) craw=0; if (craw>1) craw=1;
+                    W.conf += 0.15f * (craw - W.conf);
+                } else {
+                    W.conf += 0.15f * (0.0f - W.conf);   /* RANSAC failed: scene too poor -> fade out */
+                }
+            }
+            if (!got){   /* median (MIRAGE_WORLDVIO_METHOD=median, or RANSAC failed) */
+                std::vector<float> fxs, fys;
+                for (size_t i=0;i<p0.size();i++){ fxs.push_back(p1[i].x-p0[i].x); fys.push_back(p1[i].y-p0[i].y); }
+                std::nth_element(fxs.begin(), fxs.begin()+fxs.size()/2, fxs.end());
+                std::nth_element(fys.begin(), fys.begin()+fys.size()/2, fys.end());
+                dx = fxs[fxs.size()/2]; dy = fys[fys.size()/2];
+            }
+            if (kept.empty()) kept = p1;
+            if (W.method == 1) W.conf = 1.0f;        /* median A/B has no inlier metric */
             W.head_prev = prev_head;                 /* integrate() reads head_prev */
-            integrate(mdx, mdy, fhead, dt, (float)pw, fhfov, "cv");
+            integrate(dx, dy, fhead, dt, (float)pw, fhfov, "cv", W.conf);
             W.n++;
+        } else {
+            kept = p1;
         }
-        if (W.trace && mono()-W.trace_t < 0.001)   /* piggyback timing onto the trace line */
-            fprintf(stderr,"        cv: %zu pts, %.1fms/frame\n", kept.size(), cvms);
 
         prev_pts = kept; g.copyTo(prev_gray); prev_t = ft; prev_head = fhead;
+        /* keep the tracked set dense so the median stays stable frame-to-frame (kills the
+         * churn shimmer). Re-detect a fresh full set for the NEXT frame only - this frame's
+         * median already used `kept`, so there's no discontinuity. */
+        if ((int)prev_pts.size() < CV_REFILL){
+            std::vector<cv::Point2f> fresh;
+            cv::goodFeaturesToTrack(g, fresh, CV_MAX_PTS, 0.01, 8);
+            if (fresh.size() > prev_pts.size()) prev_pts = fresh;
+        }
         /* periodic timing even without full trace */
         static double last_perf = 0;
         if (mono() - last_perf > 2.0){ last_perf = mono();
@@ -242,15 +298,21 @@ void worldvio_start(const worldvio_cfg *cfg){
     if (const char *e = getenv("MIRAGE_WORLDVIO_LEAK")) W.cfg.leak_tau_s = atof(e);
     if (const char *e = getenv("MIRAGE_WORLDVIO_INVX")) W.cfg.invert_x = atoi(e) != 0;
     if (const char *e = getenv("MIRAGE_WORLDVIO_INVY")) W.cfg.invert_y = atoi(e) != 0;
+    if (const char *e = getenv("MIRAGE_WORLDVIO_DEAD"))  W.deadband  = atof(e);  /* px (DSW) */
+    if (const char *e = getenv("MIRAGE_WORLDVIO_SMOOTH"))W.out_alpha = atof(e);  /* 0..1 EMA */
+    if (const char *e = getenv("MIRAGE_WORLDVIO_METHOD")) W.method = strcmp(e,"median")==0 ? 1 : 0;
     const char *bk = getenv("MIRAGE_WORLDVIO");
     W.backend = (bk && (!strcmp(bk,"cv")||!strcmp(bk,"opencv"))) ? BK_CV : BK_PROJ;
     W.trace = []{ const char *e = getenv("MIRAGE_WORLDVIO_TRACE"); return (e&&*e)?1:0; }();
-    W.have_prev = false; W.n = 0; W.pos = vec3{0,0,0}; W.head_prev = quat{1,0,0,0};
+    W.have_prev = false; W.n = 0; W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0};
+    W.head_prev = quat{1,0,0,0};
     W.on = true;
     if (W.backend == BK_CV){ W.worker_run = true; W.worker = std::thread(cv_worker); }
-    fprintf(stderr,"worldvio: backend=%s gain=%.4f leak=%.2fs invX=%d invY=%d trace=%d\n",
+    fprintf(stderr,"worldvio: backend=%s method=%s gain=%.4f leak=%.2fs smooth=%.2f dead=%.2f invX=%d invY=%d trace=%d\n",
             W.backend==BK_CV?"cv(OpenCV LK, worker thread)":"proj(integral projection)",
-            W.cfg.trans_gain, W.cfg.leak_tau_s, W.cfg.invert_x, W.cfg.invert_y, W.trace);
+            W.method==0?"ransac":"median",
+            W.cfg.trans_gain, W.cfg.leak_tau_s, W.out_alpha, W.deadband,
+            W.cfg.invert_x, W.cfg.invert_y, W.trace);
 }
 
 void worldvio_stop(void){
@@ -269,11 +331,12 @@ void worldvio_feed(const uint8_t *rgb, int w, int h, quat head, double t_sec, fl
 
 vec3 worldvio_eye_offset(void){
     std::lock_guard<std::mutex> lk(W.pos_mtx);
-    return W.on ? W.pos : vec3{0,0,0};
+    return W.on ? W.pos_smooth : vec3{0,0,0};
 }
 bool worldvio_active(void){ return W.on && W.n > 4; }
+float worldvio_confidence(void){ return W.on ? W.conf : 0.0f; }
 void worldvio_reset(void){
     std::lock_guard<std::mutex> lk(W.buf_mtx);
     W.have_prev = false; W.n = 0; W.want_reset = true;
-    std::lock_guard<std::mutex> lk2(W.pos_mtx); W.pos = vec3{0,0,0};
+    std::lock_guard<std::mutex> lk2(W.pos_mtx); W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0};
 }

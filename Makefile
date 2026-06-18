@@ -71,7 +71,7 @@ OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
 # mirage's worldvio (6DoF-lite) optional OpenCV LK backend: needs core/imgproc/video.
 # Headers go to every TU (just -I, harmless); only worldvio.o uses the symbols.
 CXXFLAGS    += $(OPENCV_CFLAGS)
-MIRAGE_LIBS += -lopencv_core -lopencv_imgproc -lopencv_video
+MIRAGE_LIBS += -lopencv_core -lopencv_imgproc -lopencv_video -lopencv_calib3d
 
 .PHONY: all posedump protocols bridge viture viture-vio facecam clean
 all: mirage mirage-posedump
