@@ -197,7 +197,7 @@ int main(void) {
     M.env_brightness = BRI_DEF;   /* HUD brightness slider starts centred (1.0 = as tuned) */
     M.screen_opacity = OPAC_DEF;  /* windows fully opaque until the transparency slider moves */
     M.bg_mode = BG_HDRI;          /* default background = the environment dome */
-    M.track_mode = TRACK_NECK;    /* default 3DoF+ (neck model) - grounds head turns */
+    M.track_mode = TRACK_CAMERA;  /* default 6DoF* (world-cam parallax); cycle down if wanted */
 
     /* device/tracking/optics calibration: overlay profile.toml on the defaults and
      * stash the result, so it can be re-stamped after every layout switch (layouts
