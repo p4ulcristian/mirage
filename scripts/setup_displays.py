@@ -31,6 +31,13 @@ import tomllib
 
 ORIGIN_X, ORIGIN_Y, REFRESH = 8000, 0, 60
 
+# Each VIRTn gets a dedicated, persistent workspace WS_BASE+n. A fresh headless
+# output otherwise grabs whatever low workspace Hyprland finds first (observed:
+# ws 1) - timing-dependent, and it collides with the user's Super+1..9 binds,
+# which left one screen unusable. Keep WS_BASE well above 9 (supports VIRT1..9).
+# sweep.py mirrors this constant; change both together.
+WS_BASE = 90
+
 
 def layouts_path():
     env = os.environ.get("MIRAGE_LAYOUTS")
@@ -65,7 +72,8 @@ def load_layout(name=None):
     for s in lay.get("screens", []):
         if not all(k in s for k in ("n", "w", "h", "x", "y")):
             continue   # column/yaw-placed screen without a cell: not ours to create
-        panels.append(dict(name=f"VIRT{int(s['n'])}", w=int(s["w"]), h=int(s["h"]),
+        panels.append(dict(n=int(s["n"]), name=f"VIRT{int(s['n'])}",
+                           w=int(s["w"]), h=int(s["h"]),
                            x=int(s["x"]), y=int(s["y"]), role=s.get("role", "")))
     if not panels:
         sys.exit(f"setup_displays: layout '{want}' has no cell-defined screens (w,h,x,y)")
@@ -84,6 +92,14 @@ def ev(lua):
 def create(panels):
     if not shutil.which("hyprctl"):
         sys.exit("setup_displays: hyprctl not found (need Hyprland)")
+    # Pin each VIRT's reserved workspace BEFORE the output is created, so a fresh
+    # headless monitor adopts WS_BASE+n on connect instead of stealing a low
+    # workspace. persistent=true keeps it alive even when empty (so the screen
+    # always accepts new windows); default=true sends new windows there.
+    for p in panels:
+        ev("hl.workspace_rule({ workspace='%d', monitor='%s', default=true, persistent=true })"
+           % (WS_BASE + p["n"], p["name"]))
+
     want = {p["name"] for p in panels}
     have = {m["name"] for m in hypr("monitors", "all") if m["name"].startswith("VIRT")}
     for name in sorted(have - want):                  # drop stale VIRT outputs
@@ -99,7 +115,13 @@ def create(panels):
         x, y = ORIGIN_X + p["x"], ORIGIN_Y + p["y"]
         ev("hl.monitor({ output='%s', mode='%dx%d@%d', position='%dx%d', scale=1 })"
            % (p["name"], p["w"], p["h"], REFRESH, x, y))
-        print("  %-6s %dx%d at %d,%d  (%s)" % (p["name"], p["w"], p["h"], x, y, p["role"]))
+        # Idempotent force-bind for the warm-restart case: if the output already
+        # existed it never adopted the rule on connect, so pull its reserved
+        # workspace onto it now. A no-op on a cold start (already adopted).
+        ev("hl.dispatch(hl.dsp.workspace.move({ workspace='%d', monitor='%s' }))"
+           % (WS_BASE + p["n"], p["name"]))
+        print("  %-6s %dx%d at %d,%d  ws%d  (%s)"
+              % (p["name"], p["w"], p["h"], x, y, WS_BASE + p["n"], p["role"]))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ LAYOUT = os.path.join(
 
 SETTLE = 0.12   # seconds to let Hyprland process a batch of moves
 RETRIES = 3     # extra verify+retry rounds after the first move
+WS_BASE = 90    # must match setup_displays.py: VIRTn -> reserved workspace WS_BASE+n
 
 
 def hypr(*args):
@@ -68,6 +69,13 @@ def virt_outputs():
     return [m for m in mons if m["name"].startswith("VIRT")]
 
 
+def virt_ws(m):
+    """Reserved workspace id for a VIRT monitor (VIRTn -> WS_BASE+n). We target
+    this fixed, monitor-bound workspace instead of the monitor's volatile
+    activeWorkspace, so a move always lands on the intended screen."""
+    return WS_BASE + int(m["name"][len("VIRT"):])
+
+
 def wkey(c):
     """Stable per-app key for layout memory. initialClass survives runtime
     class changes; class is the fallback."""
@@ -84,15 +92,17 @@ def apply_moves(targets):
         for addr, ws, _vid in pending:
             move_window(addr, ws)
         time.sleep(SETTLE * (attempt + 1))          # back off a little each round
-        # verify against ground truth with ONE client query, not one per window
-        virt_ids = {m["id"] for m in virt_outputs()}
+        # verify against ground truth with ONE client query, not one per window.
+        # A window counts as landed only if it's on ITS target monitor - not just
+        # "any VIRT" - so a botched mapping can't masquerade as success.
         cmap = {c["address"]: c for c in hypr("clients")}
         still = []
         for t in pending:
-            c = cmap.get(t[0])
+            addr, _ws, vid = t
+            c = cmap.get(addr)
             if c is None:
                 continue                            # window closed; nothing to do
-            (landed if c.get("monitor") in virt_ids else still).append(t)
+            (landed if c.get("monitor") == vid else still).append(t)
         pending = still
         if not pending:
             break
@@ -103,7 +113,7 @@ def do_sweep():
     virt = virt_outputs()
     if not virt:
         sys.exit("sweep: no VIRT outputs - run setup_displays.py first")
-    slots = [m["activeWorkspace"]["id"] for m in virt]   # slot i -> workspace id
+    slots = [virt_ws(m) for m in virt]                   # slot i -> reserved workspace id
     virt_ids = {m["id"] for m in virt}
     nslots = len(slots)
 
