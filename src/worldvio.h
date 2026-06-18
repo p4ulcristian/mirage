@@ -40,6 +40,13 @@ void worldvio_stop(void);
  * capture and a monotonic timestamp (s). hfov_deg = camera horizontal field of view. */
 void worldvio_feed(const uint8_t *rgb, int w, int h, quat head, double t_sec, float hfov_deg);
 
+/* Feed one IMU linear-acceleration sample (mirage world axes, m/s^2, gravity already
+ * removed) for the visual-inertial fusion: the accel gives high-rate position prediction
+ * BETWEEN camera frames (snappy, low-latency), the camera corrects its drift. dt = seconds
+ * since the previous accel sample. Call from the pose/IMU thread (~IMU rate). If no accel
+ * arrives, the eye offset transparently falls back to camera-only. */
+void worldvio_feed_accel(vec3 a_world, double dt);
+
 /* Latest camera-estimated eye translation (mirage world axes, metres): +x right, +y up,
  * -z toward the scene. Transient lean/sway parallax (leaked, so it decays to rest). */
 vec3 worldvio_eye_offset(void);

@@ -148,6 +148,15 @@ static long g_n = 0;
 static double g_last_log = 0;
 static double g_last_raw = 0;     /* monotonic time of the last raw IMU callback (stall watchdog) */
 
+/* rotate vector v by unit quaternion q (w,x,y,z): out = q * v * conj(q) */
+static void qrot(const double q[4], const double v[3], double out[3]){
+    double w=q[0],x=q[1],y=q[2],z=q[3];
+    double tx=2.0*(y*v[2]-z*v[1]), ty=2.0*(z*v[0]-x*v[2]), tz=2.0*(x*v[1]-y*v[0]);
+    out[0]=v[0]+w*tx+(y*tz-z*ty);
+    out[1]=v[1]+w*ty+(z*tx-x*tz);
+    out[2]=v[2]+w*tz+(x*ty-y*tx);
+}
+
 static void on_raw(float *d, uint64_t ts, uint64_t vsync){
     (void)ts; (void)vsync;
     /* fixed dt from the SDK's streaming rate - wall-clock dt in this callback
@@ -197,7 +206,26 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
     double out[4]; for (int k=0;k<4;k++) out[k]=g_qs[k]*src[g_qi[k]];
     double nm = sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]+out[3]*out[3]);
     if (nm>1e-9) for(int k=0;k<4;k++) out[k]/=nm;
-    sendto(g_sock,out,sizeof out,0,(struct sockaddr*)&g_dst,sizeof g_dst);
+
+    /* World-frame LINEAR acceleration (gravity removed) for mirage's VIO position fusion.
+     * Rotate the sensor accel (g -> m/s^2) by the OUTPUT quaternion (sensor -> mirage
+     * world, so it matches `head`), then high-pass out gravity: a slow LP tracks the
+     * constant world gravity vector, the residual is linear accel - frame-agnostic, no
+     * fixed up-axis needed. Packet grows to 7 doubles: quat[0..3] + lin-accel[4..6];
+     * mirage reads whichever size arrives (back-compatible). (Correct for an identity
+     * qmap, which is the Beast default; a non-identity qmap would need the matching
+     * vector relabel - noted, not needed here.) */
+    double pkt[7] = { out[0], out[1], out[2], out[3], 0, 0, 0 };
+    {
+        double a_s[3] = { s.accel[0]*9.80665, s.accel[1]*9.80665, s.accel[2]*9.80665 };
+        double a_w[3]; qrot(out, a_s, a_w);
+        static double grav[3] = {0,0,0}; static int gi = 0;
+        if (!gi){ grav[0]=a_w[0]; grav[1]=a_w[1]; grav[2]=a_w[2]; gi=1; }
+        double ga = (double)dt/0.5; if (ga>0.08) ga=0.08;   /* ~0.5s gravity tracker */
+        for (int k=0;k<3;k++) grav[k] += ga*(a_w[k]-grav[k]);
+        pkt[4]=a_w[0]-grav[0]; pkt[5]=a_w[1]-grav[1]; pkt[6]=a_w[2]-grav[2];
+    }
+    sendto(g_sock,pkt,sizeof pkt,0,(struct sockaddr*)&g_dst,sizeof g_dst);
     g_n++;
 
     /* track raw mag span (sensor frame) so we can see if the mag is real + get its range */

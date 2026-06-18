@@ -53,9 +53,22 @@ struct State {
     vec3         pos{0,0,0};        /* integrated eye translation (m), leaked */
     vec3         pos_smooth{0,0,0}; /* low-passed output (what render reads) - kills shimmer */
     float        conf = 0.0f;       /* 0..1 camera-estimate confidence (RANSAC inliers) */
+    /* visual-inertial fusion: IMU accel integrated to fpos/fvel (prediction), corrected
+     * toward the camera estimate (pos_smooth). Output = fpos when accel is flowing. */
+    vec3         fpos{0,0,0}, fvel{0,0,0};
+    bool         imu_on = true;
+    float        imu_weight = 1.0f;   /* accel scale (0 = camera-only); tune on hardware */
+    float        vel_tau = 0.3f;      /* velocity damping (s) - stops accel runaway */
+    float        corr_gain = 0.30f;   /* camera correction pulled into fpos per cam frame */
+    double       last_accel_t = 0;    /* for the "no accel -> camera-only" fallback */
     float        deadband = 0.4f;   /* ignore residual flow below this (DSW px) - still-jitter */
-    float        out_alpha = 0.25f; /* output EMA: lower = smoother/laggier */
     int          method = 0;        /* cv global-motion: 0 = RANSAC similarity, 1 = median */
+    /* One-Euro output filter state + params (replaces the fixed EMA) */
+    vec3         pos_prev{0,0,0};   /* previous raw pos (for the derivative) */
+    float        oe_dx = 0, oe_dy = 0;  /* low-passed derivative */
+    float        oe_mincut = 0.7f;  /* cutoff at rest (Hz): lower = steadier/laggier */
+    float        oe_beta = 14.0f;   /* speed coupling: higher = snappier on a real sway */
+    float        oe_dcut = 1.0f;    /* derivative low-pass cutoff (Hz) */
 
     /* proj backend (render thread) */
     bool   have_prev = false;
@@ -79,12 +92,20 @@ struct State {
 static State W;
 
 static const worldvio_cfg DEFAULTS = {
-    .trans_gain = 0.0025f, .leak_tau_s = 0.8f, .flow_clamp = 14.0f,
+    .trans_gain = 0.0025f, .leak_tau_s = 3.0f, .flow_clamp = 14.0f,  /* leak_tau = HOLD time at full confidence */
     .invert_x = false, .invert_y = false,
 };
 
 static double mono(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     return t.tv_sec + t.tv_nsec*1e-9; }
+
+/* One-Euro smoothing factor for a cutoff (Hz) and timestep (s). Higher cutoff -> follow;
+ * lower -> hold. The cutoff is raised with signal speed, so it's steady at rest yet snappy
+ * in motion - exactly the "solid when still, no lag when moving" we want. */
+static float oe_alpha(float cutoff, float dt){
+    float tau = 1.0f / (2.0f * (float)M_PI * cutoff);
+    return 1.0f / (1.0f + tau / dt);
+}
 
 /* Common: turn a measured image shift (dx,dy, in `scale` px = focal-px units of the
  * processing image) into an integrated eye offset, with rotation subtracted + leak. */
@@ -108,7 +129,12 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
     float clampf = W.cfg.flow_clamp * (scale_w / DSW);   /* clamp scales with resolution */
     bool ok = fabsf(rx) < clampf && fabsf(ry) < clampf;
     float gain = W.cfg.trans_gain * (DSW / scale_w);     /* gain comparable across backends */
-    float leak = expf(-(float)dt / W.cfg.leak_tau_s);
+    /* confidence-adaptive leak: when the camera tracks solidly, hold the lean (long tau);
+     * when it starves, decay fast back to the neck model. So a held lean now PERSISTS
+     * instead of bleeding off after ~1s. */
+    float tau_eff = 0.35f + (W.cfg.leak_tau_s - 0.35f) * conf;
+    if (tau_eff < 0.1f) tau_eff = 0.1f;
+    float leak = expf(-(float)dt / tau_eff);
     {
         std::lock_guard<std::mutex> lk(W.pos_mtx);
         if (ok){
@@ -120,11 +146,26 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
             W.pos.y += sy * ( ry) * gain * conf;
         }
         W.pos.x *= leak; W.pos.y *= leak; W.pos.z = 0.0f;
-        /* output low-pass: the render reads pos_smooth, so per-frame flow noise becomes a
-         * gentle settle instead of a shimmer. */
-        W.pos_smooth.x += W.out_alpha * (W.pos.x - W.pos_smooth.x);
-        W.pos_smooth.y += W.out_alpha * (W.pos.y - W.pos_smooth.y);
+        /* One-Euro output filter: smooths HARD when the head is still (kills residual
+         * shimmer to dead-solid) but raises its cutoff with motion speed, so a real sway
+         * stays snappy with no lag. The render reads pos_smooth. */
+        float dtf = (float)dt; if (dtf < 1e-3f) dtf = 1e-3f;
+        float rdx = (W.pos.x - W.pos_prev.x) / dtf;
+        float rdy = (W.pos.y - W.pos_prev.y) / dtf;
+        float ad = oe_alpha(W.oe_dcut, dtf);
+        W.oe_dx += ad * (rdx - W.oe_dx);
+        W.oe_dy += ad * (rdy - W.oe_dy);
+        float cutx = W.oe_mincut + W.oe_beta * fabsf(W.oe_dx);
+        float cuty = W.oe_mincut + W.oe_beta * fabsf(W.oe_dy);
+        W.pos_smooth.x += oe_alpha(cutx, dtf) * (W.pos.x - W.pos_smooth.x);
+        W.pos_smooth.y += oe_alpha(cuty, dtf) * (W.pos.y - W.pos_smooth.y);
         W.pos_smooth.z = 0.0f;
+        W.pos_prev = W.pos;
+        /* VI fusion: correct the IMU-integrated fpos toward this camera estimate (kills
+         * accel drift). Between camera frames, feed_accel keeps fpos moving at IMU rate. */
+        W.fpos.x += W.corr_gain * (W.pos_smooth.x - W.fpos.x);
+        W.fpos.y += W.corr_gain * (W.pos_smooth.y - W.fpos.y);
+        W.fpos.z = 0.0f;
     }
     if (W.trace && mono() - W.trace_t > 0.2){ W.trace_t = mono();
         fprintf(stderr,"[worldvio/%s] obs(% 6.2f % 6.2f) rot(% 6.2f % 6.2f) res(% 6.2f % 6.2f)%s pos(% .3f % .3f) n%ld\n",
@@ -299,19 +340,24 @@ void worldvio_start(const worldvio_cfg *cfg){
     if (const char *e = getenv("MIRAGE_WORLDVIO_INVX")) W.cfg.invert_x = atoi(e) != 0;
     if (const char *e = getenv("MIRAGE_WORLDVIO_INVY")) W.cfg.invert_y = atoi(e) != 0;
     if (const char *e = getenv("MIRAGE_WORLDVIO_DEAD"))  W.deadband  = atof(e);  /* px (DSW) */
-    if (const char *e = getenv("MIRAGE_WORLDVIO_SMOOTH"))W.out_alpha = atof(e);  /* 0..1 EMA */
+    if (const char *e = getenv("MIRAGE_WORLDVIO_OEMIN")) W.oe_mincut = atof(e);  /* rest cutoff Hz (lower=smoother) */
+    if (const char *e = getenv("MIRAGE_WORLDVIO_OEBETA"))W.oe_beta   = atof(e);  /* speed coupling (higher=snappier) */
     if (const char *e = getenv("MIRAGE_WORLDVIO_METHOD")) W.method = strcmp(e,"median")==0 ? 1 : 0;
+    if (const char *e = getenv("MIRAGE_WORLDVIO_IMU"))   W.imu_on = atoi(e) != 0;       /* 0 = camera-only */
+    if (const char *e = getenv("MIRAGE_WORLDVIO_IMUW"))  W.imu_weight = atof(e);        /* accel scale */
     const char *bk = getenv("MIRAGE_WORLDVIO");
     W.backend = (bk && (!strcmp(bk,"cv")||!strcmp(bk,"opencv"))) ? BK_CV : BK_PROJ;
     W.trace = []{ const char *e = getenv("MIRAGE_WORLDVIO_TRACE"); return (e&&*e)?1:0; }();
     W.have_prev = false; W.n = 0; W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0};
+    W.pos_prev = vec3{0,0,0}; W.oe_dx = W.oe_dy = 0.0f;
+    W.fpos = vec3{0,0,0}; W.fvel = vec3{0,0,0}; W.last_accel_t = 0;
     W.head_prev = quat{1,0,0,0};
     W.on = true;
     if (W.backend == BK_CV){ W.worker_run = true; W.worker = std::thread(cv_worker); }
-    fprintf(stderr,"worldvio: backend=%s method=%s gain=%.4f leak=%.2fs smooth=%.2f dead=%.2f invX=%d invY=%d trace=%d\n",
+    fprintf(stderr,"worldvio: backend=%s method=%s gain=%.4f leak=%.2fs oe(min=%.2f beta=%.1f) dead=%.2f invX=%d invY=%d trace=%d\n",
             W.backend==BK_CV?"cv(OpenCV LK, worker thread)":"proj(integral projection)",
             W.method==0?"ransac":"median",
-            W.cfg.trans_gain, W.cfg.leak_tau_s, W.out_alpha, W.deadband,
+            W.cfg.trans_gain, W.cfg.leak_tau_s, W.oe_mincut, W.oe_beta, W.deadband,
             W.cfg.invert_x, W.cfg.invert_y, W.trace);
 }
 
@@ -329,14 +375,35 @@ void worldvio_feed(const uint8_t *rgb, int w, int h, quat head, double t_sec, fl
     else                    feed_proj(rgb, w, h, head, t_sec, hfov_deg);
 }
 
+void worldvio_feed_accel(vec3 a, double dt){
+    if (!W.on || !W.imu_on || dt <= 0 || dt > 0.1) return;
+    std::lock_guard<std::mutex> lk(W.pos_mtx);
+    float dtf = (float)dt;
+    /* integrate accel -> velocity (x/y only; z has no camera correction so we don't trust
+     * it), damp the velocity so a bad/biased accel can't run away, integrate -> position. */
+    W.fvel.x += a.x * W.imu_weight * dtf;
+    W.fvel.y += a.y * W.imu_weight * dtf;
+    float vd = expf(-dtf / W.vel_tau);
+    W.fvel.x *= vd; W.fvel.y *= vd;
+    W.fpos.x += W.fvel.x * dtf;
+    W.fpos.y += W.fvel.y * dtf;
+    W.fpos.z = 0.0f; W.fvel.z = 0.0f;
+    W.last_accel_t = mono();
+}
+
 vec3 worldvio_eye_offset(void){
     std::lock_guard<std::mutex> lk(W.pos_mtx);
-    return W.on ? W.pos_smooth : vec3{0,0,0};
+    if (!W.on) return vec3{0,0,0};
+    /* fused output when accel is actually flowing; otherwise transparently fall back to the
+     * camera-only estimate (old 4-double bridge, or accel stalled). */
+    if (W.imu_on && (mono() - W.last_accel_t) < 0.1) return W.fpos;
+    return W.pos_smooth;
 }
 bool worldvio_active(void){ return W.on && W.n > 4; }
 float worldvio_confidence(void){ return W.on ? W.conf : 0.0f; }
 void worldvio_reset(void){
     std::lock_guard<std::mutex> lk(W.buf_mtx);
     W.have_prev = false; W.n = 0; W.want_reset = true;
-    std::lock_guard<std::mutex> lk2(W.pos_mtx); W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0};
+    std::lock_guard<std::mutex> lk2(W.pos_mtx);
+    W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0}; W.fpos = vec3{0,0,0}; W.fvel = vec3{0,0,0};
 }

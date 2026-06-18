@@ -1,5 +1,6 @@
 #include "pose.h"
 #include "diag.h"
+#include "worldvio.h"   /* feed the IMU accel into the world-cam VI fusion */
 
 #include <pthread.h>
 #include <stdio.h>
@@ -321,10 +322,23 @@ static void run_opentrack(void) {
          * the visual-inertial complementary filter. Remap earth->mirage world with the
          * SAME B as the orientation, then fuse. Old 4-double bridges just skip this and
          * mirage falls back to the camera-only position path. */
-        if (have >= 7 && P.cfg.facecam_enable && P.cfg.facecam_fusion) {
-            const quat B = {0.5f, -0.5f, -0.5f, -0.5f};
+        if (have >= 7) {
             vec3 a_earth = {(float)d[4], (float)d[5], (float)d[6]};
-            submit_accel(q_rotate(B, a_earth));
+            const quat B = {0.5f, -0.5f, -0.5f, -0.5f};   /* earth -> mirage world (== orientation remap) */
+            vec3 a_mir = q_rotate(B, a_earth);
+            if (P.cfg.facecam_enable && P.cfg.facecam_fusion) submit_accel(a_mir);
+            /* feed the world-cam VI fusion: IMU position prediction between camera frames */
+            static uint64_t pa = 0; uint64_t nu = now_us();
+            double adt = pa ? (double)(nu - pa) * 1e-6 : 0.0; pa = nu;
+            if (adt > 0) worldvio_feed_accel(a_mir, adt);
+            /* VALIDATION: the bridge's new world-frame linear-accel feed for the VIO fusion.
+             * Should be ~0 at rest and spike (a few m/s^2) on real head motion. Throttled;
+             * remove once verified. */
+            static double alt = 0; double tt = now_us() * 1e-6;
+            if (tt - alt > 0.3) { alt = tt;
+                std::print(stderr, "[accel] earth({:6.2f} {:6.2f} {:6.2f}) |a|={:.2f}\n",
+                           a_earth.x, a_earth.y, a_earth.z,
+                           sqrtf(a_earth.x*a_earth.x + a_earth.y*a_earth.y + a_earth.z*a_earth.z)); }
         }
     }
 }
