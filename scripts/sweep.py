@@ -47,7 +47,7 @@ LAYOUT = os.path.join(
 
 SETTLE = 0.12   # seconds to let Hyprland process a batch of moves
 RETRIES = 3     # extra verify+retry rounds after the first move
-WS_BASE = 90    # must match setup_displays.py: VIRTn -> reserved workspace WS_BASE+n
+WS_BASE = 0     # must match setup_displays.py: VIRTn -> reserved workspace WS_BASE+n (wall on ws 1..N)
 
 
 def hypr(*args):

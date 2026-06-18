@@ -535,13 +535,12 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
     case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
         if (calib_active(g->m)) break;
         struct libinput_event_gesture *gz = libinput_event_get_gesture_event(ev);
-        if (libinput_event_gesture_get_finger_count(gz) != 3) break;
-        /* 3-finger HORIZONTAL = spin the whole world about the eye (moved here off the old
-         * empty-space drag); 3-finger VERTICAL = telephoto zoom. Route each event to its
-         * DOMINANT axis so a sideways slide never leaks into zoom (and vice-versa). */
-        {
-            double gdx = libinput_event_gesture_get_dx(gz);
-            double gdy = libinput_event_gesture_get_dy(gz);
+        int nf = libinput_event_gesture_get_finger_count(gz);
+        double gdx = libinput_event_gesture_get_dx(gz);
+        double gdy = libinput_event_gesture_get_dy(gz);
+        if (nf == 3) {
+            /* 3-finger, routed by dominant axis: HORIZONTAL = spin the wall (yaw),
+             * VERTICAL = telephoto zoom. */
             if (fabs(gdx) > fabs(gdy)) {
                 g->m->world_yaw -= (float)(gdx * WORLD_SPIN_SCALE);
                 while (g->m->world_yaw >  (float)M_PI) g->m->world_yaw -= 2.0f*(float)M_PI;
@@ -549,6 +548,12 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             } else {
                 do_zoom(g, -gdy);
             }
+        } else if (nf == 4) {
+            /* 4-finger VERTICAL = swing the whole wall up/down about the eye (pitch). */
+            g->m->world_pitch -= (float)(gdy * WORLD_SPIN_SCALE);      /* swipe up -> swing up */
+            const float WP_LIM = 1.30f;                                /* ~75 deg clamp */
+            if (g->m->world_pitch >  WP_LIM) g->m->world_pitch =  WP_LIM;
+            if (g->m->world_pitch < -WP_LIM) g->m->world_pitch = -WP_LIM;
         }
         break;
     }

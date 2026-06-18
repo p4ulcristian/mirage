@@ -31,12 +31,14 @@ import tomllib
 
 ORIGIN_X, ORIGIN_Y, REFRESH = 8000, 0, 60
 
-# Each VIRTn gets a dedicated, persistent workspace WS_BASE+n. A fresh headless
-# output otherwise grabs whatever low workspace Hyprland finds first (observed:
-# ws 1) - timing-dependent, and it collides with the user's Super+1..9 binds,
-# which left one screen unusable. Keep WS_BASE well above 9 (supports VIRT1..9).
-# sweep.py mirrors this constant; change both together.
-WS_BASE = 90
+# Each VIRTn gets a dedicated, persistent workspace WS_BASE+n. We deliberately put
+# the wall on the LOW workspaces (WS_BASE=0 -> VIRT1..10 = ws 1..10) so Super+1..0
+# drive the mirage screens directly. The physical display(s) are parked on PHYS_WS_BASE
+# (90+) so they can't squat on ws 1 and collide with VIRT1. A fresh headless output
+# still adopts its reserved ws via the pin-before-create rule below, so it never steals
+# someone else's number. sweep.py mirrors WS_BASE; change both together.
+WS_BASE = 0
+PHYS_WS_BASE = 90       # physical monitors (DP-1, ...) get ws 90, 91, ... (off the wall's 1..10)
 
 
 def layouts_path():
@@ -92,6 +94,17 @@ def ev(lua):
 def create(panels):
     if not shutil.which("hyprctl"):
         sys.exit("setup_displays: hyprctl not found (need Hyprland)")
+    # Park the physical display(s) on PHYS_WS_BASE+ so the wall can own ws 1..N. Without
+    # this DP-1 sits on ws 1 and collides with VIRT1's reserved workspace.
+    phys = sorted(m["name"] for m in hypr("monitors", "all")
+                  if not m["name"].startswith("VIRT"))
+    for i, name in enumerate(phys):
+        ws = PHYS_WS_BASE + i
+        ev("hl.workspace_rule({ workspace='%d', monitor='%s', default=true, persistent=true })"
+           % (ws, name))
+        ev("hl.dispatch(hl.dsp.workspace.move({ workspace='%d', monitor='%s' }))"
+           % (ws, name))
+        print("  %-6s -> ws%d (physical)" % (name, ws))
     # Pin each VIRT's reserved workspace BEFORE the output is created, so a fresh
     # headless monitor adopts WS_BASE+n on connect instead of stealing a low
     # workspace. persistent=true keeps it alive even when empty (so the screen

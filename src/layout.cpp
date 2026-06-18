@@ -201,7 +201,13 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
     layout_place(m, i, &yaw, &lift, &arc);
     mat4 R = m4_from_quat(q_from_euler_ypr(yaw, 0, 0));
     mat4 T = m4_translate(v3(0.0f, lift, 0.0f));
-    return m4_mul(T, R);
+    mat4 model = m4_mul(T, R);
+    /* world_pitch swings the whole wall up/down about the eye (rotation about the eye's
+     * right axis, applied OUTSIDE the per-screen placement so every screen rotates as one).
+     * layout_pick mirrors it via the cursor pitch so clicks stay aligned. */
+    if (m->world_pitch != 0.0f)
+        model = m4_mul(m4_from_quat(q_from_euler_ypr(0.0f, m->world_pitch, 0.0f)), model);
+    return model;
 }
 
 /* The camera orientation that puts display `i` dead-centre: its column yaw, and a
@@ -235,7 +241,9 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
     if (inside_out) *inside_out = false;
     if (n <= 0) return -1;
     float d   = c->screen_distance_m;
-    float hgt = d * tanf(cpitch);
+    /* Subtract the wall's vertical swing so the cursor picks the screen that visually sits
+     * under it (exact at centre yaw; the small off-centre error is sub-screen at sane swings). */
+    float hgt = d * tanf(cpitch - m->world_pitch);
 
     /* 1) direct hit: deepest-inside screen wins (no first-index bias on overlaps). */
     int best = -1; float best_margin = -1e30f, bu = 0, bv = 0;

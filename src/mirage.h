@@ -26,7 +26,7 @@
 
 #include "math3d.h"
 
-#define MIRAGE_MAX_SCREENS 8
+#define MIRAGE_MAX_SCREENS 10
 
 /* screen surface: curved cylinder strips, or flat quads in the same column-yaw
  * / straight-up-row layout (no bend, but same orientation). */
@@ -269,9 +269,12 @@ struct mirage {
                             * cursor reaches the gaps); over a screen it stays hidden
                             * so it doesn't duplicate the painted desktop pointer. */
     float world_yaw;       /* horizontal rotation of the whole wall about the eye,
-                            * driven by drag-on-empty-space (grab.c). Added to every
+                            * driven by 3-finger horizontal swipe (grab.c). Added to every
                             * screen's placement, so render + cursor picking spin as
                             * one; the cursor's own direction stays in fixed space. */
+    float world_pitch;     /* vertical SWING of the whole wall about the eye (rotation about
+                            * the eye's right axis), driven by 3-finger vertical swipe. Applied
+                            * in layout_model_matrix (render) and layout_pick (cursor) together. */
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */
