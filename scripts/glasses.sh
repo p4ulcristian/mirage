@@ -90,5 +90,7 @@ echo "[glasses] sweeping your windows onto the virtual screens..."
 python3 "$HERE/scripts/sweep.py" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
 echo "[glasses] launching mirage fullscreen on $GLASSES (trackpad capture is always on; Super+Shift+Q quits)"
-./mirage >/tmp/mirage.log 2>&1
+# 6DoF-lite optical-flow backend: default to the OpenCV LK path (worker thread); override
+# by exporting MIRAGE_WORLDVIO=proj before launch. Only matters in the 6DoF* tracking tier.
+MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}" ./mirage >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
