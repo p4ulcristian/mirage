@@ -287,6 +287,11 @@ struct mirage {
     bool  env_dirty;
     float env_brightness;   /* HUD slider: multiplies the dome intensity (1.0 = as tuned) */
 
+    /* HUD idle auto-collapse: monotonic ms (matches grab.c now_ms) of the last touch/
+     * hover on the panel. After HUD_IDLE_MS with no interaction the panel collapses to
+     * just the FPS strip; hovering it wakes it. 0 = uninitialised (starts awake). */
+    uint32_t hud_active_ms;
+
     /* background mode (HUD cycle button): what sits behind the windows.
      *   BG_BLACK       - nothing (true black -> see-through on the additive optics)
      *   BG_HDRI        - the environment dome (default)
@@ -455,6 +460,10 @@ typedef struct {
     float tl_x0, tl_x1;                    /* button horizontal extent (m)        */
     float tl_y0, tl_y1;                    /* button vertical extent (m)          */
     int   tl_on;                           /* 1 = head roll tracked, 0 = horizon-locked */
+    /* idle auto-collapse: the whole laid-out panel's bounds (m) so grab can tell a
+     * hover/touch is on the HUD (wakes it); collapsed = only the FPS strip is shown. */
+    float panel_x0, panel_x1, panel_y0, panel_y1;
+    int   collapsed;                       /* 1 = idle-collapsed (FPS only, no widgets) */
 } sens_panel;
 
 #define BRI_MIN 0.20f

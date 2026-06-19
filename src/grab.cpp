@@ -354,6 +354,15 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             if (g->cpitch < -1.4) g->cpitch = -1.4;
         }
         push_cursor(g);
+        /* idle auto-collapse: a hover over the panel keeps it awake (and re-expands
+         * the collapsed FPS strip on the next frame). */
+        { sens_panel hp;
+          if (sens_panel_compute(g->m, &hp)) {
+              float hx, hy; sens_cursor_local(g, &hp, &hx, &hy);
+              if (hx >= hp.panel_x0 - 0.05f && hx <= hp.panel_x1 + 0.05f &&
+                  hy >= hp.panel_y0 - 0.05f && hy <= hp.panel_y1 + 0.05f)
+                  g->m->hud_active_ms = now_ms();
+          } }
         /* dragging the sensitivity handle: the cursor moved above, so slide the
          * gain to wherever it now sits along the track (handle follows the cursor). */
         if (g->sens_drag || g->bri_drag || g->tr_drag) {
@@ -384,6 +393,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             sens_panel sp;
             if (st && sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
+                /* idle auto-collapse: any touch on the panel wakes it. While collapsed
+                 * the strip shows only FPS, so swallow the press and skip the widgets. */
+                bool inpanel = (lx >= sp.panel_x0 - 0.05f && lx <= sp.panel_x1 + 0.05f &&
+                                ly >= sp.panel_y0 - 0.05f && ly <= sp.panel_y1 + 0.05f);
+                if (inpanel) g->m->hud_active_ms = now_ms();
+                if (sp.collapsed) {
+                    if (inpanel) { g->sens_click = true; break; }   /* wake, eat the click */
+                } else {
                 if (lx >= sp.def_x0 && lx <= sp.def_x1 && ly >= sp.def_y0 && ly <= sp.def_y1) {
                     g->m->cfg.yaw_gain = g->m->cfg.pitch_gain = SENS_GAIN_DEF;
                     sens_persist(g->m);
@@ -432,17 +449,6 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     g->sens_click = true;            /* swallow the matching release  */
                     break;
                 }
-                /* head-tilt toggle: flip horizon-lock <-> full head roll. roll_damp lives
-                 * in the main profile, so persist it the same way as the sens gains. */
-                if (lx >= sp.tl_x0 && lx <= sp.tl_x1 &&
-                    ly >= sp.tl_y0 && ly <= sp.tl_y1) {
-                    g->m->cfg.roll_damp = (g->m->cfg.roll_damp > 0.5f) ? 0.0f : 1.0f;
-                    sens_persist(g->m);              /* remember head-tilt across restarts */
-                    std::print(stderr, "grab: head tilt {}\n",
-                               g->m->cfg.roll_damp > 0.5f ? "on" : "off (horizon lock)");
-                    g->sens_click = true;            /* swallow the matching release  */
-                    break;
-                }
                 /* brightness slider: a press on its track/handle grabs it (MOTION drags). */
                 float bri_band = fmaxf(sp.bri_handle_h, sp.bri_track_h) * 0.5f + 0.03f;
                 if (lx >= sp.bri_x0 - 0.05f && lx <= sp.bri_x1 + 0.05f &&
@@ -466,6 +472,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                     sens_set_from_local(g->m, &sp, lx);   /* jump the handle to the click */
                     break;
                 }
+                }   /* end !collapsed widget hit-tests */
             }
             if (!st && g->sens_click) {
                 bool was_sens = g->sens_drag, was_bri = g->bri_drag, was_tr = g->tr_drag;

@@ -890,6 +890,14 @@ static mat4  g_hud_base, g_hud_vp;
 static float g_hud_d = 1.0f, g_hud_yTop = 0.0f;
 static const float g_hud_canvasW = 700.0f;   /* centring width (px); track is 460 */
 
+/* idle auto-collapse: after this long with no touch/hover the panel folds down to
+ * just the FPS strip (hovering it wakes it). Clock matches grab.c's now_ms. */
+static const uint32_t HUD_IDLE_MS = 6000;
+static uint32_t hud_now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
 /* the read-back snapshot grab.cpp hit-tests (filled after each layout pass) */
 static sens_panel g_hud;
 static bool       g_hud_valid = false;
@@ -1025,16 +1033,27 @@ static void hud_border(Clay_ElementDeclaration *d, Clay_Color c) {
     d->border.width.left = d->border.width.right = d->border.width.top = d->border.width.bottom = 2;
 }
 
+/* a centred vertical stack (fixed width, fits its content height) - used to bind the
+ * three sliders into one grouped block, and each caption tightly to its track. */
+static Clay_ElementDeclaration hud_col(float w, int gap) {
+    Clay_ElementDeclaration d{};
+    d.layout.sizing.width  = hud_fixed(w);
+    d.layout.sizing.height = hud_fit();
+    d.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    d.layout.childGap = (uint16_t)gap;
+    d.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    return d;
+}
+
 /* sizes (px == mm) */
 static const float TRACK_W = 460.0f, BTN_H = 56.0f, TILE_H = 64.0f;
 
 /* Declare the whole HUD tree. Static string buffers persist through the draw
  * loop (Clay's render commands hold pointers into them, consumed this frame). */
-static void hud_build_tree(struct mirage *m) {
+static void hud_build_tree(struct mirage *m, bool collapsed) {
     const Clay_Color cFps  { 158, 199, 242, 255 };
     const Clay_Color cHelp { 168, 184, 209, 255 };
     const Clay_Color cCap  { 168, 184, 209, 255 };
-    const Clay_Color cTile { 179, 209, 242, 255 };
 
     Clay_ElementDeclaration root{};
     root.layout.sizing.width  = hud_fixed(g_hud_canvasW);
@@ -1042,52 +1061,49 @@ static void hud_build_tree(struct mirage *m) {
     root.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
     root.layout.childGap = 20;
     root.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
-    HudEl _root(root);
+    HudEl _root(hud_eid("hud_root"), root);
 
-    /* FPS */
+    /* FPS - always shown; the sole element of the collapsed strip */
     static char fps[24];
     int fv = (int)(m->fps + 0.5f); if (fv < 0) fv = 0; if (fv > 999) fv = 999;
     snprintf(fps, sizeof fps, "FPS %d", fv);
     hud_text(fps, cFps, 60);
 
+    if (collapsed) return;     /* idle: just the FPS readout - hover the strip to expand */
+
     /* shortcut cheat-sheet (one multi-line plaque) */
     hud_text("2X CMD: RECENTER\nCMD+SCROLL: ZOOM\nSUPER+SHIFT+Q: QUIT", cHelp, 26, CLAY_TEXT_WRAP_NONE);
 
-    /* sensitivity: caption (with live value) + track rail; fill+handle drawn later */
+    /* sensitivity caption (live value); its track lives in the grouped block below */
     static char sens_cap[24];
     float gain = m->cfg.yaw_gain;
     if (gain < SENS_GAIN_MIN) gain = SENS_GAIN_MIN;
     if (gain > SENS_GAIN_MAX) gain = SENS_GAIN_MAX;
     snprintf(sens_cap, sizeof sens_cap, "LOOK  %.1fX", (double)gain);
-    hud_text(sens_cap, cCap, 28);
-    { Clay_ElementDeclaration d = hud_box(TRACK_W, 16.0f); d.backgroundColor = Clay_Color{ 56, 66, 87, 255 };
-      HudEl e(hud_eid("sens_track"), d); }
 
-    /* DEFAULT button */
+    /* --- the three sliders grouped together: LOOK / BRIGHT / TRANS. Each caption is
+     * bound tight to its track (inner gap 8); the group spaces the sliders (gap 18).
+     * fills+handles are drawn after layout (they track live values Clay can't know). */
+    {
+        HudEl _grp(hud_col(TRACK_W, 18));
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text(sens_cap, cCap, 28);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 16.0f); d.backgroundColor = Clay_Color{ 56, 66, 87, 255 };
+          HudEl e(hud_eid("sens_track"), d); }
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text("BRIGHT", Clay_Color{ 184, 224, 199, 255 }, 24);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 51, 77, 61, 255 };
+          HudEl e(hud_eid("bri_track"), d); }
+        { HudEl s(hud_col(TRACK_W, 8));
+          hud_text("TRANS", Clay_Color{ 184, 196, 224, 255 }, 24);
+          Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 66, 66, 82, 255 };
+          HudEl e(hud_eid("tr_track"), d); }
+    }
+
+    /* DEFAULT button (resets the LOOK gain) */
     { Clay_ElementDeclaration d = hud_box(200.0f, 52.0f); hud_border(&d, Clay_Color{ 87, 102, 138, 255 });
       HudEl e(hud_eid("sens_default"), d);
       hud_text("DEFAULT", Clay_Color{ 204, 219, 242, 255 }, 26); }
-
-    /* layout switcher: one tile per named layout */
-    if (m->layouts.n > 0) {
-        Clay_ElementDeclaration row{};
-        row.layout.sizing.width = hud_fixed(TRACK_W); row.layout.sizing.height = hud_fixed(TILE_H);
-        row.layout.layoutDirection = CLAY_LEFT_TO_RIGHT; row.layout.childGap = 14;
-        HudEl _row(row);
-        for (int k = 0; k < m->layouts.n && k < MIRAGE_MAX_LAYOUTS; k++) {
-            Clay_ElementDeclaration t{};
-            t.layout.sizing.width = hud_grow(); t.layout.sizing.height = hud_grow();
-            t.layout.childAlignment.x = CLAY_ALIGN_X_CENTER; t.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
-            if (k == m->layouts.active) {
-                t.backgroundColor = Clay_Color{ 41, 56, 87, 255 };
-                hud_border(&t, Clay_Color{ 128, 168, 242, 255 });
-            } else {
-                hud_border(&t, Clay_Color{ 77, 92, 122, 255 });
-            }
-            HudEl te(hud_eidi("lay_tile", (uint32_t)k), t);
-            hud_text(m->layouts.l[k].name, cTile, 24);
-        }
-    }
 
     /* environment switcher: one tile per MIRAGE_ENVS entry */
     {
@@ -1111,16 +1127,6 @@ static void hud_build_tree(struct mirage *m) {
         }
     }
 
-    /* brightness slider: caption + rail */
-    hud_text("BRIGHT", Clay_Color{ 184, 224, 199, 255 }, 24);
-    { Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 51, 77, 61, 255 };
-      HudEl e(hud_eid("bri_track"), d); }
-
-    /* transparency slider: caption + rail */
-    hud_text("TRANS", Clay_Color{ 184, 196, 224, 255 }, 24);
-    { Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 66, 66, 82, 255 };
-      HudEl e(hud_eid("tr_track"), d); }
-
     /* flat/curved geometry toggle */
     { Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
       d.backgroundColor = Clay_Color{ 77, 61, 31, 255 }; hud_border(&d, Clay_Color{ 230, 179, 102, 255 });
@@ -1135,14 +1141,6 @@ static void hud_build_tree(struct mirage *m) {
       else { d.backgroundColor = Clay_Color{ 26, 66, 71, 255 }; hud_border(&d, Clay_Color{ 102, 219, 230, 255 }); }
       HudEl e(hud_eid("bg_btn"), d);
       hud_text(bgn[mode], Clay_Color{ 200, 230, 235, 255 }, 24); }
-
-    /* head-tilt toggle */
-    { bool on = m->cfg.roll_damp > 0.5f;
-      Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
-      if (on) { d.backgroundColor = Clay_Color{ 31, 51, 82, 255 }; hud_border(&d, Clay_Color{ 115, 179, 242, 255 }); }
-      else    { hud_border(&d, Clay_Color{ 102, 107, 117, 255 }); }
-      HudEl e(hud_eid("tilt_btn"), d);
-      hud_text(on ? "TILT: ON" : "TILT: OFF", Clay_Color{ 190, 215, 245, 255 }, 24); }
 }
 
 /* read one laid-out element's box back into panel-local metre edges (y-up) */
@@ -1163,16 +1161,33 @@ static void hud_render(struct mirage *m, mat4 vp) {
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
     if (n <= 0) return;
 
-    /* centre-column, bottom screen: smallest |yaw|, then lowest lift (== render/grab) */
-    int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f, yaw_c = 0, lift_c = 0;
-    for (int k = 0; k < n; k++) {
-        float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
-        float ay = fabsf(yw);
-        if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
-            best_yaw = ay; best_lift = lf; ci = k; yaw_c = yw; lift_c = lf;
+    /* Anchor screen: centre column, bottom row. Pick it ONCE and re-pick only when the
+     * layout actually changes (screen count / active layout / geometry) - never per
+     * frame. Rank by BASE yaw (layout_place adds world_yaw), so panning the wall can't
+     * flip the |yaw| winner and teleport the panel out from under its screen. */
+    static int s_anchor = -1, s_key = -1;
+    int key = n | (m->layouts.active << 10) | ((int)m->cfg.geometry << 20);
+    if (s_anchor < 0 || s_anchor >= n || key != s_key) {
+        int ci0 = -1; float best_yaw = 1e30f, best_lift = 1e30f;
+        for (int k = 0; k < n; k++) {
+            float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
+            float ay = fabsf(yw - m->world_yaw);               /* pan-invariant base yaw */
+            if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
+                best_yaw = ay; best_lift = lf; ci0 = k;
+            }
         }
+        if (ci0 < 0) return;
+        s_anchor = ci0; s_key = key;
     }
-    if (ci < 0 || ci >= n) return;
+    int ci = s_anchor;
+    float yaw_c, lift_c, arc_c;
+    layout_place(m, ci, &yaw_c, &lift_c, &arc_c);   /* full placement for cursor mapping */
+    (void)arc_c;
+
+    /* idle auto-collapse: fold to the FPS strip after HUD_IDLE_MS untouched. */
+    uint32_t nowms = hud_now_ms();
+    if (m->hud_active_ms == 0) m->hud_active_ms = nowms;     /* first frame: start awake */
+    bool collapsed = (nowms - m->hud_active_ms) > HUD_IDLE_MS;
 
     screen_t *cs = &m->screen[ci];
     float d      = m->cfg.screen_distance_m;
@@ -1189,7 +1204,7 @@ static void hud_render(struct mirage *m, mat4 vp) {
     hud_clay_init();
     Clay_SetLayoutDimensions(Clay_Dimensions{ g_hud_canvasW, 2000.0f });
     Clay_BeginLayout();
-    hud_build_tree(m);
+    hud_build_tree(m, collapsed);
     Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
 
     /* ---- draw pass (additive, depth-off, like the cursor arrow) ---- */
@@ -1233,64 +1248,66 @@ static void hud_render(struct mirage *m, mat4 vp) {
     sens_panel &o = g_hud;
     memset(&o, 0, sizeof o);
     o.ci = ci; o.d = d; o.yaw_c = yaw_c; o.lift_c = lift_c;
-    o.gain = m->cfg.yaw_gain;
-    if (o.gain < SENS_GAIN_MIN) o.gain = SENS_GAIN_MIN;
-    if (o.gain > SENS_GAIN_MAX) o.gain = SENS_GAIN_MAX;
-    o.handle_w = 0.03f;  o.handle_h = 0.10f;  o.track_h = 0.016f;
-    o.bri_handle_w = 0.026f; o.bri_handle_h = 0.05f; o.bri_track_h = 0.012f;
-    o.tr_handle_w  = 0.026f; o.tr_handle_h  = 0.05f; o.tr_track_h  = 0.012f;
-    o.n_layout = m->layouts.n; o.active_layout = m->layouts.active;
-    o.n_env = MIRAGE_ENV_COUNT; if (o.n_env > MIRAGE_MAX_ENVS) o.n_env = MIRAGE_MAX_ENVS;
-    o.active_env = m->active_env;
-    o.geo_flat = (m->cfg.geometry == GEOM_FLAT);
-    o.pt_mode  = m->bg_mode;
-    o.tl_on    = (m->cfg.roll_damp > 0.5f) ? 1 : 0;
+    o.collapsed = collapsed ? 1 : 0;
 
     float x0, x1, y0, y1;
-    if (hud_box_m(hud_eid("sens_track"), &x0, &x1, &y0, &y1)) {
-        o.track_x0 = x0; o.track_x1 = x1; o.row_y = 0.5f*(y0+y1);
-        float frac = (o.gain - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
-        o.handle_x = o.track_x0 + frac * (o.track_x1 - o.track_x0);
+    /* whole-panel bounds: grab tests a hover/touch here to wake the collapsed strip */
+    if (hud_box_m(hud_eid("hud_root"), &x0, &x1, &y0, &y1)) {
+        o.panel_x0 = x0; o.panel_x1 = x1; o.panel_y0 = y0; o.panel_y1 = y1;
     }
-    if (hud_box_m(hud_eid("sens_default"), &x0, &x1, &y0, &y1)) {
-        o.def_x0 = x0; o.def_x1 = x1; o.def_y0 = y0; o.def_y1 = y1;
-    }
-    for (int k = 0; k < o.n_layout && k < MIRAGE_MAX_LAYOUTS; k++)
-        if (hud_box_m(hud_eidi("lay_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
-            o.lay_cx[k] = 0.5f*(x0+x1); o.lay_w = x1 - x0; o.lay_y0 = y0; o.lay_y1 = y1;
+
+    if (!collapsed) {           /* collapsed = FPS only: no widgets to map or overlay */
+        o.gain = m->cfg.yaw_gain;
+        if (o.gain < SENS_GAIN_MIN) o.gain = SENS_GAIN_MIN;
+        if (o.gain > SENS_GAIN_MAX) o.gain = SENS_GAIN_MAX;
+        o.handle_w = 0.03f;  o.handle_h = 0.10f;  o.track_h = 0.016f;
+        o.bri_handle_w = 0.026f; o.bri_handle_h = 0.05f; o.bri_track_h = 0.012f;
+        o.tr_handle_w  = 0.026f; o.tr_handle_h  = 0.05f; o.tr_track_h  = 0.012f;
+        o.n_env = MIRAGE_ENV_COUNT; if (o.n_env > MIRAGE_MAX_ENVS) o.n_env = MIRAGE_MAX_ENVS;
+        o.active_env = m->active_env;
+        o.geo_flat = (m->cfg.geometry == GEOM_FLAT);
+        o.pt_mode  = m->bg_mode;
+
+        if (hud_box_m(hud_eid("sens_track"), &x0, &x1, &y0, &y1)) {
+            o.track_x0 = x0; o.track_x1 = x1; o.row_y = 0.5f*(y0+y1);
+            float frac = (o.gain - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
+            o.handle_x = o.track_x0 + frac * (o.track_x1 - o.track_x0);
         }
-    for (int k = 0; k < o.n_env && k < MIRAGE_MAX_ENVS; k++)
-        if (hud_box_m(hud_eidi("env_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
-            o.env_cx[k] = 0.5f*(x0+x1); o.env_w = x1 - x0; o.env_y0 = y0; o.env_y1 = y1;
+        if (hud_box_m(hud_eid("sens_default"), &x0, &x1, &y0, &y1)) {
+            o.def_x0 = x0; o.def_x1 = x1; o.def_y0 = y0; o.def_y1 = y1;
         }
-    if (hud_box_m(hud_eid("bri_track"), &x0, &x1, &y0, &y1)) {
-        o.bri_x0 = x0; o.bri_x1 = x1; o.bri_row_y = 0.5f*(y0+y1);
-        float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
-        bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
-        o.bri_handle_x = o.bri_x0 + bf * (o.bri_x1 - o.bri_x0);
+        for (int k = 0; k < o.n_env && k < MIRAGE_MAX_ENVS; k++)
+            if (hud_box_m(hud_eidi("env_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
+                o.env_cx[k] = 0.5f*(x0+x1); o.env_w = x1 - x0; o.env_y0 = y0; o.env_y1 = y1;
+            }
+        if (hud_box_m(hud_eid("bri_track"), &x0, &x1, &y0, &y1)) {
+            o.bri_x0 = x0; o.bri_x1 = x1; o.bri_row_y = 0.5f*(y0+y1);
+            float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
+            bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
+            o.bri_handle_x = o.bri_x0 + bf * (o.bri_x1 - o.bri_x0);
+        }
+        if (hud_box_m(hud_eid("tr_track"), &x0, &x1, &y0, &y1)) {
+            o.tr_x0 = x0; o.tr_x1 = x1; o.tr_row_y = 0.5f*(y0+y1);
+            float tf = (m->screen_opacity - OPAC_MIN) / (OPAC_MAX - OPAC_MIN);
+            tf = tf < 0.0f ? 0.0f : (tf > 1.0f ? 1.0f : tf);
+            o.tr_handle_x = o.tr_x0 + tf * (o.tr_x1 - o.tr_x0);
+        }
+        if (hud_box_m(hud_eid("geo_btn"),  &x0, &x1, &y0, &y1)) { o.geo_x0 = x0; o.geo_x1 = x1; o.geo_y0 = y0; o.geo_y1 = y1; }
+        if (hud_box_m(hud_eid("bg_btn"),   &x0, &x1, &y0, &y1)) { o.pt_x0 = x0; o.pt_x1 = x1; o.pt_y0 = y0; o.pt_y1 = y1; }
+
+        /* ---- value-driven overlays Clay can't know: slider fills + handles ---- */
+        float fillW = o.handle_x - o.track_x0;
+        if (fillW > 1e-4f) hud_solid(o.track_x0 + fillW*0.5f, o.row_y, fillW, o.track_h, 0.30f, 0.42f, 0.65f);
+        hud_solid(o.handle_x, o.row_y, o.handle_w, o.handle_h, 0.60f, 0.76f, 1.00f);
+
+        float briFill = o.bri_handle_x - o.bri_x0;
+        if (briFill > 1e-4f) hud_solid(o.bri_x0 + briFill*0.5f, o.bri_row_y, briFill, o.bri_track_h, 0.26f, 0.46f, 0.34f);
+        hud_solid(o.bri_handle_x, o.bri_row_y, o.bri_handle_w, o.bri_handle_h, 0.52f, 0.86f, 0.64f);
+
+        float trFill = o.tr_handle_x - o.tr_x0;
+        if (trFill > 1e-4f) hud_solid(o.tr_x0 + trFill*0.5f, o.tr_row_y, trFill, o.tr_track_h, 0.40f, 0.44f, 0.60f);
+        hud_solid(o.tr_handle_x, o.tr_row_y, o.tr_handle_w, o.tr_handle_h, 0.66f, 0.72f, 0.92f);
     }
-    if (hud_box_m(hud_eid("tr_track"), &x0, &x1, &y0, &y1)) {
-        o.tr_x0 = x0; o.tr_x1 = x1; o.tr_row_y = 0.5f*(y0+y1);
-        float tf = (m->screen_opacity - OPAC_MIN) / (OPAC_MAX - OPAC_MIN);
-        tf = tf < 0.0f ? 0.0f : (tf > 1.0f ? 1.0f : tf);
-        o.tr_handle_x = o.tr_x0 + tf * (o.tr_x1 - o.tr_x0);
-    }
-    if (hud_box_m(hud_eid("geo_btn"),  &x0, &x1, &y0, &y1)) { o.geo_x0 = x0; o.geo_x1 = x1; o.geo_y0 = y0; o.geo_y1 = y1; }
-    if (hud_box_m(hud_eid("bg_btn"),   &x0, &x1, &y0, &y1)) { o.pt_x0 = x0; o.pt_x1 = x1; o.pt_y0 = y0; o.pt_y1 = y1; }
-    if (hud_box_m(hud_eid("tilt_btn"), &x0, &x1, &y0, &y1)) { o.tl_x0 = x0; o.tl_x1 = x1; o.tl_y0 = y0; o.tl_y1 = y1; }
-
-    /* ---- value-driven overlays Clay can't know: slider fills + handles ---- */
-    float fillW = o.handle_x - o.track_x0;
-    if (fillW > 1e-4f) hud_solid(o.track_x0 + fillW*0.5f, o.row_y, fillW, o.track_h, 0.30f, 0.42f, 0.65f);
-    hud_solid(o.handle_x, o.row_y, o.handle_w, o.handle_h, 0.60f, 0.76f, 1.00f);
-
-    float briFill = o.bri_handle_x - o.bri_x0;
-    if (briFill > 1e-4f) hud_solid(o.bri_x0 + briFill*0.5f, o.bri_row_y, briFill, o.bri_track_h, 0.26f, 0.46f, 0.34f);
-    hud_solid(o.bri_handle_x, o.bri_row_y, o.bri_handle_w, o.bri_handle_h, 0.52f, 0.86f, 0.64f);
-
-    float trFill = o.tr_handle_x - o.tr_x0;
-    if (trFill > 1e-4f) hud_solid(o.tr_x0 + trFill*0.5f, o.tr_row_y, trFill, o.tr_track_h, 0.40f, 0.44f, 0.60f);
-    hud_solid(o.tr_handle_x, o.tr_row_y, o.tr_handle_w, o.tr_handle_h, 0.66f, 0.72f, 0.92f);
 
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
