@@ -9,13 +9,12 @@ desktop tiling and the on-glasses wall derive from one set of numbers.
     setup_displays.py            create the active layout's displays
     setup_displays.py desk720    create a named layout's displays
 
-The 2D desktop for the default 'desk' layout (what governs window dragging):
+The 2D desktop for the default 'desk' layout (what governs window dragging) is one
+row: four 16:9 wings, a 21:9 ultrawide dead-ahead in the centre, four more wings:
 
-      +------+------------------------+------+
-      |      |   VIRT1  21:9          |      |   <- centred top, side gaps
-      +------+------------------------+------+
-      | VIRT2 16:9 | VIRT3 16:9 | VIRT4 16:9 |
-      +------------+------------+------------+
+  +-----+-----+-----+-----+-----------+-----+-----+-----+-----+
+  |VIRT1|VIRT2|VIRT3|VIRT4| VIRT5 21:9|VIRT6|VIRT7|VIRT8|VIRT9|
+  +-----+-----+-----+-----+-----------+-----+-----+-----+-----+
 
 Talks to Hyprland over `hyprctl`: outputs are created at runtime (they don't
 exist at config-load), so this is necessarily imperative. Layout path overridable
