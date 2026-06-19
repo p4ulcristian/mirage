@@ -91,7 +91,7 @@ void mirage_config_defaults(mirage_config *c) {
     c->mipmap            = true;   /* trilinear minification kills deep-minified sparkle the base level can't */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
-    strcpy(c->hdri_path, "hdri/starmap_2020_4k.hdr");  /* NASA Deep Star Maps 2020, 4K */
+    strcpy(c->hdri_path, "hdri/starmap_2020_8k.hdr");  /* NASA Deep Star Maps 2020, 8K */
     c->hdri_exposure     = 7.0f;   /* boost the stars hard so they pop after the black point */
     c->hdri_intensity    = 1.0f;   /* full strength: with blacks crushed, only stars add light */
     c->hdri_black        = 0.025f; /* kill the faint haze floor -> true black (transparent on optics) */
@@ -107,7 +107,7 @@ void mirage_config_defaults(mirage_config *c) {
  * numbers are starting points; tune on-glasses. Add a row by adding an entry (<= MAX). */
 const mirage_env MIRAGE_ENVS[] = {
     /* name        hdri_path (flat .hdr; fetch.sh)      exp    inten  black   sat   on   */
-    { "Space",    "hdri/starmap_2020_4k.hdr",           7.0f,  1.0f,  0.025f, 1.7f,  true  },
+    { "Space",    "hdri/starmap_2020_8k.hdr",           7.0f,  1.0f,  0.025f, 1.7f,  true  },
     /* Nature scenes measure far brighter than the starfield (mean luminance ~0.5-0.7
      * vs 0.016), so they lean DARK here - high black point crushes the midtones to
      * transparent, leaving only highlights (moon, sky band, water sheen) glowing, with
