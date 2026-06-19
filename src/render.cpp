@@ -11,8 +11,11 @@
 #include <ctype.h>
 #include <vector>
 #include <print>
+#include <string>
+#include <unordered_map>
 
 #include "stb_truetype.h"
+#include "clay.h"
 #include <wayland-egl.h>
 
 #ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
@@ -933,18 +936,336 @@ static const float PLACEHOLDER[][3] = {
     {0.10f, 0.18f, 0.30f}, {0.25f, 0.10f, 0.15f},
 };
 
-/* In-view sensitivity slider: a track + fill + draggable handle and a DEFAULT
- * button, hung under the centre screen with the FPS plaque. Geometry comes
- * from sens_panel_compute (the same numbers grab.c hit-tests), drawn in the centre
- * screen's local frame via layout_model_matrix. Additive + depth-off like the
- * cursor arrow, so it glows on the optics without punching a black hole. */
-static void draw_sens_panel(struct mirage *m, mat4 vp) {
-    if (calib_active(m)) return;            /* the wizard owns the view */
-    sens_panel sp;
-    if (!sens_panel_compute(m, &sp)) return;
+/* ============================================================================
+ * In-glasses control HUD - laid out by Clay (src/clay.h), drawn through the same
+ * additive quad/plaque path the rest of the HUD uses.
+ *
+ * Clay owns LAYOUT and TEXT: each frame we declare a flex column (FPS, the
+ * shortcut cheat-sheet, the sensitivity slider + DEFAULT, the layout and
+ * environment switchers, the brightness and transparency sliders, and the
+ * geometry/background/head-tilt toggles); Clay computes every box and we walk
+ * its render-command list - RECTANGLE -> additive fill, BORDER -> glow outline,
+ * TEXT -> baked TTF plaque. Value-driven bits Clay can't know (the slider fills
+ * and handles) are drawn afterwards from the read-back track boxes. Those boxes
+ * are snapshotted into a sens_panel (g_hud) so grab.cpp keeps hit-testing
+ * exactly as before: one layout, two consumers, zero duplicated coordinate math.
+ * Anchored under the centre screen at depth d in its layout_model_matrix frame,
+ * additive + depth-off like the cursor arrow, so it glows on the optics and pans
+ * with the wall.
+ * ========================================================================== */
 
-    mat4 base = layout_model_matrix(m, sp.ci);
+/* 1 Clay layout pixel == 1 mm in the panel plane: sizes below are the old metre
+ * figures x1000, so the panel keeps its familiar proportions. */
+static const float HUD_S = 0.001f;
 
+/* panel placement, refreshed per-frame before the layout pass */
+static mat4  g_hud_base, g_hud_vp;
+static float g_hud_d = 1.0f, g_hud_yTop = 0.0f;
+static const float g_hud_canvasW = 700.0f;   /* centring width (px); track is 460 */
+
+/* the read-back snapshot grab.cpp hit-tests (filled after each layout pass) */
+static sens_panel g_hud;
+static bool       g_hud_valid = false;
+
+/* Clay px (top-left origin, y-down) -> panel-local metres (centre origin, y-up).
+ * The canvas is centred on x=0 and hangs down from g_hud_yTop. */
+static void clay2panel(float x, float y, float w, float h,
+                       float *cx, float *cy, float *cw, float *ch) {
+    *cw = w * HUD_S;
+    *ch = h * HUD_S;
+    *cx = (x + w * 0.5f - g_hud_canvasW * 0.5f) * HUD_S;
+    *cy = g_hud_yTop - (y + h * 0.5f) * HUD_S;
+}
+
+/* ---- baked-plaque cache: bake_label keyed by colour+text, baked once -------- */
+struct HudPlaque { own::GlTexture tex; int tw = 0, th = 0; };
+static std::unordered_map<std::string, HudPlaque> g_hud_plaques;
+
+static GLuint plaque_for(const char *ptr, int len, const float fg[3],
+                         int *tw, int *th) {
+    if (len < 0) len = 0;
+    std::string key(7, '\0');
+    snprintf(key.data(), 8, "%02x%02x%02x", (int)(fg[0]*255), (int)(fg[1]*255), (int)(fg[2]*255));
+    key.resize(6);
+    key.append(ptr, (size_t)len);
+    auto it = g_hud_plaques.find(key);
+    if (it == g_hud_plaques.end()) {
+        std::string s(ptr, (size_t)len);
+        HudPlaque p;
+        p.tex = bake_label(s.c_str(), fg, &p.tw, &p.th);
+        it = g_hud_plaques.emplace(std::move(key), std::move(p)).first;
+    }
+    *tw = it->second.tw; *th = it->second.th;
+    return it->second.tex;
+}
+
+/* ---- additive draw helpers (mirror the old solid()/outline()/label()) ------- */
+static void hud_solid(float cx, float cy, float w, float h, float r, float g, float b) {
+    mat4 local = m4_mul(m4_translate(v3(cx, cy, -g_hud_d)), m4_scale(v3(w, h, 1.0f)));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(g_hud_vp, m4_mul(g_hud_base, local)).m);
+    glUniform1f(R.uHasTex, 0.0f);
+    glUniform3f(R.uColor, r, g, b);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+static void hud_outline(float cx, float cy, float w, float h, float t,
+                        float r, float g, float b) {
+    hud_solid(cx, cy + h*0.5f, w, t, r, g, b);
+    hud_solid(cx, cy - h*0.5f, w, t, r, g, b);
+    hud_solid(cx - w*0.5f, cy, t, h, r, g, b);
+    hud_solid(cx + w*0.5f, cy, t, h, r, g, b);
+}
+static void hud_plaque(GLuint tex, float cx, float cy, float w, float h) {
+    if (!tex) return;
+    mat4 local = m4_mul(m4_translate(v3(cx, cy, -g_hud_d)), m4_scale(v3(w, h, 1.0f)));
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(g_hud_vp, m4_mul(g_hud_base, local)).m);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(R.uTex, 0);
+    glUniform1f(R.uHasTex, 1.0f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/* ---- Clay text-measure callback: report the baked plaque's aspect, scaled so
+ * one text line is fontSize px tall, so the drawn plaque fills its box exactly. */
+static Clay_Dimensions hud_measure(Clay_StringSlice s, Clay_TextElementConfig *cfg, void *) {
+    float fg[3] = { cfg->textColor.r/255.0f, cfg->textColor.g/255.0f, cfg->textColor.b/255.0f };
+    int tw, th; (void)plaque_for(s.chars, s.length, fg, &tw, &th);
+    if (th <= 0) return Clay_Dimensions{ 0.0f, 0.0f };
+    int nlines = 1;
+    for (int i = 0; i < s.length; i++) if (s.chars[i] == '\n') ++nlines;
+    float scale = (float)cfg->fontSize * (float)nlines / (float)th;
+    return Clay_Dimensions{ (float)tw * scale, (float)th * scale };
+}
+
+/* ---- Clay lifecycle (arena + measure fn, once) ----------------------------- */
+static bool g_clay_ready = false;
+static void hud_clay_err(Clay_ErrorData e) {
+    std::print(stderr, "clay: {}\n", std::string(e.errorText.chars, (size_t)e.errorText.length));
+}
+static void hud_clay_init(void) {
+    if (g_clay_ready) return;
+    uint32_t sz = Clay_MinMemorySize();
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(sz, malloc(sz));
+    Clay_ErrorHandler eh{}; eh.errorHandlerFunction = hud_clay_err; eh.userData = nullptr;
+    Clay_Initialize(arena, Clay_Dimensions{ g_hud_canvasW, 2000.0f }, eh);
+    Clay_SetMeasureTextFunction(hud_measure, nullptr);
+    g_clay_ready = true;
+}
+
+/* ---- tiny imperative builders (avoid C++ designated-init ordering traps) ---- */
+static Clay_SizingAxis hud_fixed(float v) {
+    Clay_SizingAxis a{}; a.size.minMax.min = v; a.size.minMax.max = v; a.type = CLAY__SIZING_TYPE_FIXED; return a;
+}
+static Clay_SizingAxis hud_grow(void)  { Clay_SizingAxis a{}; a.type = CLAY__SIZING_TYPE_GROW; return a; }
+static Clay_SizingAxis hud_fit(void)   { Clay_SizingAxis a{}; a.type = CLAY__SIZING_TYPE_FIT;  return a; }
+
+static Clay_ElementId hud_eid(const char *s) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    return Clay_GetElementId(cs);
+}
+static Clay_ElementId hud_eidi(const char *s, uint32_t i) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    return Clay_GetElementIdWithIndex(cs, i);
+}
+
+namespace {
+struct HudEl {
+    HudEl(const Clay_ElementDeclaration &d) { Clay__OpenElement(); Clay__ConfigureOpenElement(d); }
+    HudEl(Clay_ElementId id, const Clay_ElementDeclaration &d) { Clay__OpenElementWithId(id); Clay__ConfigureOpenElement(d); }
+    ~HudEl() { Clay__CloseElement(); }
+};
+}
+
+static void hud_text(const char *s, Clay_Color col, int px,
+                     Clay_TextElementConfigWrapMode wrap = CLAY_TEXT_WRAP_NONE) {
+    Clay_String cs{}; cs.isStaticallyAllocated = false; cs.length = (int32_t)strlen(s); cs.chars = s;
+    Clay_TextElementConfig t{};
+    t.textColor = col; t.fontSize = (uint16_t)px; t.wrapMode = wrap; t.textAlignment = CLAY_TEXT_ALIGN_CENTER;
+    Clay__OpenTextElement(cs, t);
+}
+
+/* a centred fixed-size box, optionally filled / bordered; caller scopes it + adds a caption */
+static Clay_ElementDeclaration hud_box(float w, float h) {
+    Clay_ElementDeclaration d{};
+    d.layout.sizing.width  = hud_fixed(w);
+    d.layout.sizing.height = hud_fixed(h);
+    d.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    d.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+    return d;
+}
+static void hud_border(Clay_ElementDeclaration *d, Clay_Color c) {
+    d->border.color = c;
+    d->border.width.left = d->border.width.right = d->border.width.top = d->border.width.bottom = 2;
+}
+
+/* sizes (px == mm) */
+static const float TRACK_W = 460.0f, BTN_H = 56.0f, TILE_H = 64.0f;
+
+/* Declare the whole HUD tree. Static string buffers persist through the draw
+ * loop (Clay's render commands hold pointers into them, consumed this frame). */
+static void hud_build_tree(struct mirage *m) {
+    const Clay_Color cFps  { 158, 199, 242, 255 };
+    const Clay_Color cHelp { 168, 184, 209, 255 };
+    const Clay_Color cCap  { 168, 184, 209, 255 };
+    const Clay_Color cTile { 179, 209, 242, 255 };
+
+    Clay_ElementDeclaration root{};
+    root.layout.sizing.width  = hud_fixed(g_hud_canvasW);
+    root.layout.sizing.height = hud_fit();
+    root.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    root.layout.childGap = 20;
+    root.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+    HudEl _root(root);
+
+    /* FPS */
+    static char fps[24];
+    int fv = (int)(m->fps + 0.5f); if (fv < 0) fv = 0; if (fv > 999) fv = 999;
+    snprintf(fps, sizeof fps, "FPS %d", fv);
+    hud_text(fps, cFps, 60);
+
+    /* shortcut cheat-sheet (one multi-line plaque) */
+    hud_text("2X CMD: RECENTER\nCMD+SCROLL: ZOOM\nSUPER+SHIFT+Q: QUIT", cHelp, 26, CLAY_TEXT_WRAP_NONE);
+
+    /* sensitivity: caption (with live value) + track rail; fill+handle drawn later */
+    static char sens_cap[24];
+    float gain = m->cfg.yaw_gain;
+    if (gain < SENS_GAIN_MIN) gain = SENS_GAIN_MIN;
+    if (gain > SENS_GAIN_MAX) gain = SENS_GAIN_MAX;
+    snprintf(sens_cap, sizeof sens_cap, "LOOK  %.1fX", (double)gain);
+    hud_text(sens_cap, cCap, 28);
+    { Clay_ElementDeclaration d = hud_box(TRACK_W, 16.0f); d.backgroundColor = Clay_Color{ 56, 66, 87, 255 };
+      HudEl e(hud_eid("sens_track"), d); }
+
+    /* DEFAULT button */
+    { Clay_ElementDeclaration d = hud_box(200.0f, 52.0f); hud_border(&d, Clay_Color{ 87, 102, 138, 255 });
+      HudEl e(hud_eid("sens_default"), d);
+      hud_text("DEFAULT", Clay_Color{ 204, 219, 242, 255 }, 26); }
+
+    /* layout switcher: one tile per named layout */
+    if (m->layouts.n > 0) {
+        Clay_ElementDeclaration row{};
+        row.layout.sizing.width = hud_fixed(TRACK_W); row.layout.sizing.height = hud_fixed(TILE_H);
+        row.layout.layoutDirection = CLAY_LEFT_TO_RIGHT; row.layout.childGap = 14;
+        HudEl _row(row);
+        for (int k = 0; k < m->layouts.n && k < MIRAGE_MAX_LAYOUTS; k++) {
+            Clay_ElementDeclaration t{};
+            t.layout.sizing.width = hud_grow(); t.layout.sizing.height = hud_grow();
+            t.layout.childAlignment.x = CLAY_ALIGN_X_CENTER; t.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+            if (k == m->layouts.active) {
+                t.backgroundColor = Clay_Color{ 41, 56, 87, 255 };
+                hud_border(&t, Clay_Color{ 128, 168, 242, 255 });
+            } else {
+                hud_border(&t, Clay_Color{ 77, 92, 122, 255 });
+            }
+            HudEl te(hud_eidi("lay_tile", (uint32_t)k), t);
+            hud_text(m->layouts.l[k].name, cTile, 24);
+        }
+    }
+
+    /* environment switcher: one tile per MIRAGE_ENVS entry */
+    {
+        Clay_ElementDeclaration row{};
+        row.layout.sizing.width = hud_fixed(TRACK_W); row.layout.sizing.height = hud_fixed(TILE_H);
+        row.layout.layoutDirection = CLAY_LEFT_TO_RIGHT; row.layout.childGap = 14;
+        HudEl _row(row);
+        int ne = MIRAGE_ENV_COUNT; if (ne > MIRAGE_MAX_ENVS) ne = MIRAGE_MAX_ENVS;
+        for (int k = 0; k < ne; k++) {
+            Clay_ElementDeclaration t{};
+            t.layout.sizing.width = hud_grow(); t.layout.sizing.height = hud_grow();
+            t.layout.childAlignment.x = CLAY_ALIGN_X_CENTER; t.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+            if (k == m->active_env) {
+                t.backgroundColor = Clay_Color{ 41, 77, 56, 255 };
+                hud_border(&t, Clay_Color{ 117, 219, 153, 255 });
+            } else {
+                hud_border(&t, Clay_Color{ 77, 117, 92, 255 });
+            }
+            HudEl te(hud_eidi("env_tile", (uint32_t)k), t);
+            hud_text(MIRAGE_ENVS[k].name, Clay_Color{ 153, 230, 179, 255 }, 24);
+        }
+    }
+
+    /* brightness slider: caption + rail */
+    hud_text("BRIGHT", Clay_Color{ 184, 224, 199, 255 }, 24);
+    { Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 51, 77, 61, 255 };
+      HudEl e(hud_eid("bri_track"), d); }
+
+    /* transparency slider: caption + rail */
+    hud_text("TRANS", Clay_Color{ 184, 196, 224, 255 }, 24);
+    { Clay_ElementDeclaration d = hud_box(TRACK_W, 12.0f); d.backgroundColor = Clay_Color{ 66, 66, 82, 255 };
+      HudEl e(hud_eid("tr_track"), d); }
+
+    /* flat/curved geometry toggle */
+    { Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
+      d.backgroundColor = Clay_Color{ 77, 61, 31, 255 }; hud_border(&d, Clay_Color{ 230, 179, 102, 255 });
+      HudEl e(hud_eid("geo_btn"), d);
+      hud_text(m->cfg.geometry == GEOM_FLAT ? "FLAT" : "CURVED", Clay_Color{ 230, 210, 160, 255 }, 26); }
+
+    /* background-mode button */
+    { int mode = m->bg_mode; if (mode < 0 || mode >= BG_MODE_COUNT) mode = BG_HDRI;
+      static const char *bgn[BG_MODE_COUNT] = { "BG: BLACK", "BG: HDRI", "BG: PASSTHROUGH" };
+      Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
+      if (mode == BG_BLACK) { hud_border(&d, Clay_Color{ 102, 107, 117, 255 }); }
+      else { d.backgroundColor = Clay_Color{ 26, 66, 71, 255 }; hud_border(&d, Clay_Color{ 102, 219, 230, 255 }); }
+      HudEl e(hud_eid("bg_btn"), d);
+      hud_text(bgn[mode], Clay_Color{ 200, 230, 235, 255 }, 24); }
+
+    /* head-tilt toggle */
+    { bool on = m->cfg.roll_damp > 0.5f;
+      Clay_ElementDeclaration d = hud_box(TRACK_W, BTN_H);
+      if (on) { d.backgroundColor = Clay_Color{ 31, 51, 82, 255 }; hud_border(&d, Clay_Color{ 115, 179, 242, 255 }); }
+      else    { hud_border(&d, Clay_Color{ 102, 107, 117, 255 }); }
+      HudEl e(hud_eid("tilt_btn"), d);
+      hud_text(on ? "TILT: ON" : "TILT: OFF", Clay_Color{ 190, 215, 245, 255 }, 24); }
+}
+
+/* read one laid-out element's box back into panel-local metre edges (y-up) */
+static bool hud_box_m(Clay_ElementId id, float *x0, float *x1, float *y0, float *y1) {
+    Clay_ElementData ed = Clay_GetElementData(id);
+    if (!ed.found) return false;
+    float cx, cy, cw, ch;
+    clay2panel(ed.boundingBox.x, ed.boundingBox.y, ed.boundingBox.width, ed.boundingBox.height, &cx, &cy, &cw, &ch);
+    *x0 = cx - cw*0.5f; *x1 = cx + cw*0.5f; *y0 = cy - ch*0.5f; *y1 = cy + ch*0.5f;
+    return true;
+}
+
+/* Render the HUD and refresh the grab.cpp hit-test snapshot. Replaces the old
+ * inline FPS plaque + draw_sens_panel; called once per frame from render_frame. */
+static void hud_render(struct mirage *m, mat4 vp) {
+    if (calib_active(m)) return;             /* the wizard owns the view */
+    int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
+    if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
+    if (n <= 0) return;
+
+    /* centre-column, bottom screen: smallest |yaw|, then lowest lift (== render/grab) */
+    int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f, yaw_c = 0, lift_c = 0;
+    for (int k = 0; k < n; k++) {
+        float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
+        float ay = fabsf(yw);
+        if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
+            best_yaw = ay; best_lift = lf; ci = k; yaw_c = yw; lift_c = lf;
+        }
+    }
+    if (ci < 0 || ci >= n) return;
+
+    screen_t *cs = &m->screen[ci];
+    float d      = m->cfg.screen_distance_m;
+    float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
+    float aspect = (cs->width > 0 && cs->height > 0) ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
+    float hh     = d * tanf(ang_w * 0.5f) * aspect;     /* centre screen half-height */
+
+    g_hud_base = layout_model_matrix(m, ci);
+    g_hud_vp   = vp;
+    g_hud_d    = d;
+    g_hud_yTop = -hh - 0.05f;                /* canvas top, just below the screen edge */
+
+    /* ---- layout pass ---- */
+    hud_clay_init();
+    Clay_SetLayoutDimensions(Clay_Dimensions{ g_hud_canvasW, 2000.0f });
+    Clay_BeginLayout();
+    hud_build_tree(m);
+    Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+
+    /* ---- draw pass (additive, depth-off, like the cursor arrow) ---- */
     glUseProgram(R.prog);
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
     glEnableVertexAttribArray(R.aPos);
@@ -956,194 +1277,105 @@ static void draw_sens_panel(struct mirage *m, mat4 vp) {
     glBlendFunc(GL_ONE, GL_ONE);
     glUniform1f(R.uYFlip, 0.0f);
     glUniform1f(R.uSharpen, 0.0f);
+    glUniform1f(R.uOpacity, 1.0f);
 
-    auto solid = [&](float cx, float cy, float w, float h, float r, float g, float b) {
-        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
-        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
-        glUniform1f(R.uHasTex, 0.0f);
-        glUniform3f(R.uColor, r, g, b);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    };
-    /* a hollow rectangle from four thin bright bars - on additive optics an outline
-     * reads as an affordance where a dark fill would just be invisible. */
-    auto outline = [&](float cx, float cy, float w, float h, float t,
-                       float r, float g, float b) {
-        solid(cx, cy + h*0.5f, w, t, r, g, b);   /* top    */
-        solid(cx, cy - h*0.5f, w, t, r, g, b);   /* bottom */
-        solid(cx - w*0.5f, cy, t, h, r, g, b);   /* left   */
-        solid(cx + w*0.5f, cy, t, h, r, g, b);   /* right  */
-    };
-    auto label = [&](GLuint tex, float cx, float cy, float h, int tw, int th) {
-        if (!tex || th <= 0) return;
-        float w = h * ((float)tw / (float)th);
-        mat4 local = m4_mul(m4_translate(v3(cx, cy, -sp.d)), m4_scale(v3(w, h, 1.0f)));
-        glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, m4_mul(base, local)).m);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(R.uTex, 0);
-        glUniform1f(R.uHasTex, 1.0f);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    };
-
-    /* All colours are ADDED light (GL_ONE,GL_ONE): there is no "dark" on the optics,
-     * so the rail is a dim-but-present glow, the fill/handle are brighter, and the
-     * track extent is marked by bright end ticks rather than a dark box. */
-    float trackW = sp.track_x1 - sp.track_x0;
-    solid(0.0f, sp.row_y, trackW, sp.track_h, 0.22f, 0.26f, 0.34f);   /* visible rail */
-    float fillW = sp.handle_x - sp.track_x0;
-    if (fillW > 1e-4f)
-        solid(sp.track_x0 + fillW*0.5f, sp.row_y, fillW, sp.track_h, 0.30f, 0.42f, 0.65f);
-    /* bright end ticks so the min/max extent reads at a glance */
-    float tickH = sp.track_h * 3.0f, tickW = 0.008f;
-    solid(sp.track_x0, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
-    solid(sp.track_x1, sp.row_y, tickW, tickH, 0.40f, 0.48f, 0.62f);
-    /* handle */
-    solid(sp.handle_x, sp.row_y, sp.handle_w, sp.handle_h, 0.60f, 0.76f, 1.00f);
-    /* DEFAULT button: a bright outline (a dark fill would be invisible additively) */
-    float def_cx = 0.5f*(sp.def_x0 + sp.def_x1), def_cy = 0.5f*(sp.def_y0 + sp.def_y1);
-    float def_w  = sp.def_x1 - sp.def_x0,        def_h  = sp.def_y1 - sp.def_y0;
-    outline(def_cx, def_cy, def_w, def_h, 0.006f, 0.34f, 0.40f, 0.54f);
-
-    /* live value plaque ("3.0x"), re-baked only when the gain changes */
-    int sv = (int)(sp.gain * 10.0f + 0.5f);
-    if (sv != R.sens_val) {
-        char buf[16]; snprintf(buf, sizeof buf, "%.1fX", (double)sp.gain);
-        const float vc[3] = {0.62f, 0.78f, 0.95f};
-        R.label_sens = bake_label(buf, vc, &R.sens_w, &R.sens_h);
-        R.sens_val = sv;
-    }
-    label(R.label_sens_cap, sp.track_x0 - 0.13f, sp.row_y,       0.055f, R.senscap_w, R.senscap_h);
-    label(R.label_sens,     0.0f,                sp.row_y + 0.11f, 0.055f, R.sens_w,   R.sens_h);
-    label(R.label_default,  def_cx,              def_cy,         0.045f, R.default_w, R.default_h);
-
-    /* layout switcher: a clickable box per named layout, the active one filled and
-     * bright-bordered, the rest a dim idle outline. Each caption is scaled down to
-     * fit its box so long names ("THEATER") don't spill past the border. */
-    for (int k = 0; k < sp.n_layout; k++) {
-        float cx = sp.lay_cx[k];
-        float cy = 0.5f * (sp.lay_y0 + sp.lay_y1);
-        float w  = sp.lay_w, h = sp.lay_y1 - sp.lay_y0;
-        if (k == sp.active_layout) {
-            solid(cx, cy, w, h, 0.16f, 0.22f, 0.34f);            /* active: filled glow */
-            outline(cx, cy, w, h, 0.006f, 0.50f, 0.66f, 0.95f);  /* bright border       */
-        } else {
-            outline(cx, cy, w, h, 0.006f, 0.30f, 0.36f, 0.48f);  /* idle border         */
+    for (int i = 0; i < cmds.length; i++) {
+        Clay_RenderCommand *c = &cmds.internalArray[i];
+        Clay_BoundingBox b = c->boundingBox;
+        float cx, cy, cw, ch; clay2panel(b.x, b.y, b.width, b.height, &cx, &cy, &cw, &ch);
+        switch (c->commandType) {
+        case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
+            Clay_Color k = c->renderData.rectangle.backgroundColor;
+            if (k.a > 0.5f) hud_solid(cx, cy, cw, ch, k.r/255.0f, k.g/255.0f, k.b/255.0f);
+            break; }
+        case CLAY_RENDER_COMMAND_TYPE_BORDER: {
+            Clay_Color k = c->renderData.border.color;
+            hud_outline(cx, cy, cw, ch, 0.006f, k.r/255.0f, k.g/255.0f, k.b/255.0f);
+            break; }
+        case CLAY_RENDER_COMMAND_TYPE_TEXT: {
+            Clay_TextRenderData *t = &c->renderData.text;
+            float fg[3] = { t->textColor.r/255.0f, t->textColor.g/255.0f, t->textColor.b/255.0f };
+            int tw, th; GLuint tex = plaque_for(t->stringContents.chars, t->stringContents.length, fg, &tw, &th);
+            hud_plaque(tex, cx, cy, cw, ch);
+            break; }
+        default: break;
         }
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (R.layout_h[k] > 0) {
-            float natw = lh * (float)R.layout_w[k] / (float)R.layout_h[k];
-            if (natw > maxw) lh = maxw * (float)R.layout_h[k] / (float)R.layout_w[k];
-        }
-        label(R.label_layout[k], cx, cy, lh, R.layout_w[k], R.layout_h[k]);
     }
 
-    /* environment switcher: same box style as the layout row, one row below, in a
-     * green tint so the two rows read as distinct switchers. Active = filled+bright. */
-    for (int k = 0; k < sp.n_env; k++) {
-        float cx = sp.env_cx[k];
-        float cy = 0.5f * (sp.env_y0 + sp.env_y1);
-        float w  = sp.env_w, h = sp.env_y1 - sp.env_y0;
-        if (k == sp.active_env) {
-            solid(cx, cy, w, h, 0.16f, 0.30f, 0.22f);            /* active: filled glow */
-            outline(cx, cy, w, h, 0.006f, 0.46f, 0.86f, 0.60f);  /* bright green border */
-        } else {
-            outline(cx, cy, w, h, 0.006f, 0.30f, 0.46f, 0.36f);  /* idle border         */
-        }
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (R.env_h[k] > 0) {
-            float natw = lh * (float)R.env_w[k] / (float)R.env_h[k];
-            if (natw > maxw) lh = maxw * (float)R.env_h[k] / (float)R.env_w[k];
-        }
-        label(R.label_env[k], cx, cy, lh, R.env_w[k], R.env_h[k]);
+    /* ---- snapshot the boxes grab.cpp hit-tests ---- */
+    sens_panel &o = g_hud;
+    memset(&o, 0, sizeof o);
+    o.ci = ci; o.d = d; o.yaw_c = yaw_c; o.lift_c = lift_c;
+    o.gain = m->cfg.yaw_gain;
+    if (o.gain < SENS_GAIN_MIN) o.gain = SENS_GAIN_MIN;
+    if (o.gain > SENS_GAIN_MAX) o.gain = SENS_GAIN_MAX;
+    o.handle_w = 0.03f;  o.handle_h = 0.10f;  o.track_h = 0.016f;
+    o.bri_handle_w = 0.026f; o.bri_handle_h = 0.05f; o.bri_track_h = 0.012f;
+    o.tr_handle_w  = 0.026f; o.tr_handle_h  = 0.05f; o.tr_track_h  = 0.012f;
+    o.n_layout = m->layouts.n; o.active_layout = m->layouts.active;
+    o.n_env = MIRAGE_ENV_COUNT; if (o.n_env > MIRAGE_MAX_ENVS) o.n_env = MIRAGE_MAX_ENVS;
+    o.active_env = m->active_env;
+    o.geo_flat = (m->cfg.geometry == GEOM_FLAT);
+    o.pt_mode  = m->bg_mode;
+    o.tl_on    = (m->cfg.roll_damp > 0.5f) ? 1 : 0;
+
+    float x0, x1, y0, y1;
+    if (hud_box_m(hud_eid("sens_track"), &x0, &x1, &y0, &y1)) {
+        o.track_x0 = x0; o.track_x1 = x1; o.row_y = 0.5f*(y0+y1);
+        float frac = (o.gain - SENS_GAIN_MIN) / (SENS_GAIN_MAX - SENS_GAIN_MIN);
+        o.handle_x = o.track_x0 + frac * (o.track_x1 - o.track_x0);
     }
-
-    /* environment brightness slider: rail + fill + handle (green to match the env row),
-     * with a "BRIGHT" caption to its left. grab.cpp drives the handle. */
-    float briW = sp.bri_x1 - sp.bri_x0;
-    solid(0.0f, sp.bri_row_y, briW, sp.bri_track_h, 0.20f, 0.30f, 0.24f);   /* rail */
-    float briFill = sp.bri_handle_x - sp.bri_x0;
-    if (briFill > 1e-4f)
-        solid(sp.bri_x0 + briFill*0.5f, sp.bri_row_y, briFill, sp.bri_track_h, 0.26f, 0.46f, 0.34f);
-    solid(sp.bri_handle_x, sp.bri_row_y, sp.bri_handle_w, sp.bri_handle_h, 0.52f, 0.86f, 0.64f);
-    label(R.label_bright, sp.bri_x0 - 0.14f, sp.bri_row_y, 0.045f, R.bright_w, R.bright_h);
-
-    /* window transparency slider: same style, amber/blue tint, "TRANS" caption left. */
-    float trW = sp.tr_x1 - sp.tr_x0;
-    solid(0.0f, sp.tr_row_y, trW, sp.tr_track_h, 0.26f, 0.26f, 0.32f);        /* rail */
-    float trFill = sp.tr_handle_x - sp.tr_x0;
-    if (trFill > 1e-4f)
-        solid(sp.tr_x0 + trFill*0.5f, sp.tr_row_y, trFill, sp.tr_track_h, 0.40f, 0.44f, 0.60f);
-    solid(sp.tr_handle_x, sp.tr_row_y, sp.tr_handle_w, sp.tr_handle_h, 0.66f, 0.72f, 0.92f);
-    label(R.label_trans, sp.tr_x0 - 0.14f, sp.tr_row_y, 0.045f, R.trans_w, R.trans_h);
-
-    /* flat/curved toggle: one button spanning the track, filled + bright-bordered
-     * (it always reflects an active choice), captioned with the current geometry.
-     * Amber tint so it reads as distinct from the blue/green switcher rows above. */
-    {
-        float cx = 0.5f * (sp.geo_x0 + sp.geo_x1);
-        float cy = 0.5f * (sp.geo_y0 + sp.geo_y1);
-        float w  = sp.geo_x1 - sp.geo_x0, h = sp.geo_y1 - sp.geo_y0;
-        solid(cx, cy, w, h, 0.30f, 0.24f, 0.12f);            /* filled glow         */
-        outline(cx, cy, w, h, 0.006f, 0.90f, 0.70f, 0.40f);  /* bright amber border */
-        GLuint tex = sp.geo_flat ? R.label_flat : R.label_curved;
-        int tw = sp.geo_flat ? R.flat_w : R.curved_w;
-        int th = sp.geo_flat ? R.flat_h : R.curved_h;
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (th > 0) {
-            float natw = lh * (float)tw / (float)th;
-            if (natw > maxw) lh = maxw * (float)th / (float)tw;
-        }
-        label(tex, cx, cy, lh, tw, th);
+    if (hud_box_m(hud_eid("sens_default"), &x0, &x1, &y0, &y1)) {
+        o.def_x0 = x0; o.def_x1 = x1; o.def_y0 = y0; o.def_y1 = y1;
     }
-
-    /* background-mode button: cycles black / hdri / passthrough; teal when on a live
-     * background (hdri/passthrough), dim grey for black. Caption shows the mode. */
-    {
-        int mode = sp.pt_mode; if (mode < 0 || mode >= BG_MODE_COUNT) mode = BG_HDRI;
-        float cx = 0.5f * (sp.pt_x0 + sp.pt_x1);
-        float cy = 0.5f * (sp.pt_y0 + sp.pt_y1);
-        float w  = sp.pt_x1 - sp.pt_x0, h = sp.pt_y1 - sp.pt_y0;
-        if (mode == BG_BLACK) {
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border     */
-        } else {
-            solid(cx, cy, w, h, 0.10f, 0.26f, 0.28f);            /* lit teal fill       */
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.86f, 0.90f);  /* bright teal border  */
+    for (int k = 0; k < o.n_layout && k < MIRAGE_MAX_LAYOUTS; k++)
+        if (hud_box_m(hud_eidi("lay_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
+            o.lay_cx[k] = 0.5f*(x0+x1); o.lay_w = x1 - x0; o.lay_y0 = y0; o.lay_y1 = y1;
         }
-        GLuint tex = R.label_bg[mode];
-        int tw = R.bg_w[mode], th = R.bg_h[mode];
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (th > 0) {
-            float natw = lh * (float)tw / (float)th;
-            if (natw > maxw) lh = maxw * (float)th / (float)tw;
+    for (int k = 0; k < o.n_env && k < MIRAGE_MAX_ENVS; k++)
+        if (hud_box_m(hud_eidi("env_tile", (uint32_t)k), &x0, &x1, &y0, &y1)) {
+            o.env_cx[k] = 0.5f*(x0+x1); o.env_w = x1 - x0; o.env_y0 = y0; o.env_y1 = y1;
         }
-        label(tex, cx, cy, lh, tw, th);
+    if (hud_box_m(hud_eid("bri_track"), &x0, &x1, &y0, &y1)) {
+        o.bri_x0 = x0; o.bri_x1 = x1; o.bri_row_y = 0.5f*(y0+y1);
+        float bf = (m->env_brightness - BRI_MIN) / (BRI_MAX - BRI_MIN);
+        bf = bf < 0.0f ? 0.0f : (bf > 1.0f ? 1.0f : bf);
+        o.bri_handle_x = o.bri_x0 + bf * (o.bri_x1 - o.bri_x0);
     }
-
-    /* head-tilt (roll) toggle: lit blue when head roll is tracked (screens tilt with you),
-     * dim grey when horizon-locked. Click flips cfg.roll_damp 0<->1 (grab.cpp). */
-    {
-        float cx = 0.5f * (sp.tl_x0 + sp.tl_x1);
-        float cy = 0.5f * (sp.tl_y0 + sp.tl_y1);
-        float w  = sp.tl_x1 - sp.tl_x0, h = sp.tl_y1 - sp.tl_y0;
-        if (sp.tl_on) {
-            solid(cx, cy, w, h, 0.12f, 0.20f, 0.32f);            /* lit blue fill       */
-            outline(cx, cy, w, h, 0.006f, 0.45f, 0.70f, 0.95f);  /* bright blue border  */
-        } else {
-            outline(cx, cy, w, h, 0.006f, 0.40f, 0.42f, 0.46f);  /* dim grey border     */
-        }
-        GLuint tex = sp.tl_on ? R.label_tilt : R.label_level;
-        int tw = sp.tl_on ? R.tilt_w : R.level_w;
-        int th = sp.tl_on ? R.tilt_h : R.level_h;
-        float lh = 0.038f, maxw = w * 0.86f;
-        if (th > 0) {
-            float natw = lh * (float)tw / (float)th;
-            if (natw > maxw) lh = maxw * (float)th / (float)tw;
-        }
-        label(tex, cx, cy, lh, tw, th);
+    if (hud_box_m(hud_eid("tr_track"), &x0, &x1, &y0, &y1)) {
+        o.tr_x0 = x0; o.tr_x1 = x1; o.tr_row_y = 0.5f*(y0+y1);
+        float tf = (m->screen_opacity - OPAC_MIN) / (OPAC_MAX - OPAC_MIN);
+        tf = tf < 0.0f ? 0.0f : (tf > 1.0f ? 1.0f : tf);
+        o.tr_handle_x = o.tr_x0 + tf * (o.tr_x1 - o.tr_x0);
     }
+    if (hud_box_m(hud_eid("geo_btn"),  &x0, &x1, &y0, &y1)) { o.geo_x0 = x0; o.geo_x1 = x1; o.geo_y0 = y0; o.geo_y1 = y1; }
+    if (hud_box_m(hud_eid("bg_btn"),   &x0, &x1, &y0, &y1)) { o.pt_x0 = x0; o.pt_x1 = x1; o.pt_y0 = y0; o.pt_y1 = y1; }
+    if (hud_box_m(hud_eid("tilt_btn"), &x0, &x1, &y0, &y1)) { o.tl_x0 = x0; o.tl_x1 = x1; o.tl_y0 = y0; o.tl_y1 = y1; }
+
+    /* ---- value-driven overlays Clay can't know: slider fills + handles ---- */
+    float fillW = o.handle_x - o.track_x0;
+    if (fillW > 1e-4f) hud_solid(o.track_x0 + fillW*0.5f, o.row_y, fillW, o.track_h, 0.30f, 0.42f, 0.65f);
+    hud_solid(o.handle_x, o.row_y, o.handle_w, o.handle_h, 0.60f, 0.76f, 1.00f);
+
+    float briFill = o.bri_handle_x - o.bri_x0;
+    if (briFill > 1e-4f) hud_solid(o.bri_x0 + briFill*0.5f, o.bri_row_y, briFill, o.bri_track_h, 0.26f, 0.46f, 0.34f);
+    hud_solid(o.bri_handle_x, o.bri_row_y, o.bri_handle_w, o.bri_handle_h, 0.52f, 0.86f, 0.64f);
+
+    float trFill = o.tr_handle_x - o.tr_x0;
+    if (trFill > 1e-4f) hud_solid(o.tr_x0 + trFill*0.5f, o.tr_row_y, trFill, o.tr_track_h, 0.40f, 0.44f, 0.60f);
+    hud_solid(o.tr_handle_x, o.tr_row_y, o.tr_handle_w, o.tr_handle_h, 0.66f, 0.72f, 0.92f);
 
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
+    g_hud_valid = true;
+}
+
+/* grab.cpp's geometry source: now just the last layout pass's snapshot. */
+bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
+    (void)m;
+    if (!g_hud_valid) return false;
+    *out = g_hud;
+    return true;
 }
 
 /* Camera passthrough: start/stop the camera off m->passthrough, pull the newest
@@ -1473,83 +1705,6 @@ void render_frame(struct mirage *m, quat head) {
     if (fade) glDisable(GL_BLEND);
     glUniform1f(R.uOpacity, 1.0f);   /* restore: plaques/HUD/cursor stay opaque */
 
-    /* Status plaques under the centre-column screen, pinned to its frame so they
-     * track the wall as you pan: the FPS counter on top, the shortcut cheat-sheet
-     * below it. */
-    {
-        /* centre-column, bottom screen: smallest |yaw|, then lowest lift */
-        int ci = -1; float best_yaw = 1e30f, best_lift = 1e30f;
-        for (int k = 0; k < n; k++) {
-            float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
-            float ay = fabsf(yw);
-            if (ay < best_yaw - 1e-4f ||
-                (ay < best_yaw + 1e-4f && lf < best_lift)) {
-                best_yaw = ay; best_lift = lf; ci = k;
-            }
-        }
-        if (ci >= 0 && ci < n) {
-            screen_t *cs = &m->screen[ci];
-            float d      = m->cfg.screen_distance_m;
-            float ang_w  = cs->arc_deg * (float)M_PI/180.0f;
-            float aspect = (cs->width > 0 && cs->height > 0)
-                           ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
-            float hh     = d * tanf(ang_w * 0.5f) * aspect;   /* screen half-height */
-            float fullH  = 0.11f;
-            float yc     = -hh - 0.05f - fullH * 0.5f;        /* FPS row, just below edge */
-
-            glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
-            glEnableVertexAttribArray(R.aPos);
-            glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
-            glEnableVertexAttribArray(R.aUV);
-            glVertexAttribPointer(R.aUV, 2, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)(3*sizeof(GLfloat)));
-            glActiveTexture(GL_TEXTURE0);
-
-            /* FPS counter. Re-bake the digits only when the integer value changes
-             * (~once a second); otherwise just swap the texture and the MVP. */
-            int fv = (int)(m->fps + 0.5f);
-            if (fv < 0)   fv = 0;
-            if (fv > 999) fv = 999;
-            if (fv != R.fps_val) {
-                char buf[16]; snprintf(buf, sizeof buf, "FPS %d", fv);
-                const float fc[3] = {0.62f, 0.78f, 0.95f};   /* cool blue */
-                R.label_fps = bake_label(buf, fc, &R.fps_w, &R.fps_h);
-                R.fps_val = fv;
-            }
-            if (R.label_fps) {
-                float fpsW  = fullH * ((float)R.fps_w / (float)R.fps_h);
-                mat4 local  = m4_mul(m4_translate(v3(0.0f, yc, -d)),
-                                     m4_scale(v3(fpsW, fullH, 1.0f)));
-                mat4 model  = m4_mul(layout_model_matrix(m, ci), local);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model).m);
-                glBindTexture(GL_TEXTURE_2D, R.label_fps);
-                glUniform1i(R.uTex, 0);
-                glUniform1f(R.uHasTex, 1.0f);
-                glUniform1f(R.uYFlip, 0.0f);
-                glUniform1f(R.uSharpen, 0.0f);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            }
-
-            /* Shortcut cheat-sheet, stacked below the FPS row. Static texture,
-             * drawn at a smaller scale so the lines don't hang too far down. */
-            if (R.label_help) {
-                float blockH = 0.26f;                            /* whole block height */
-                float blockW = blockH * ((float)R.help_w / (float)R.help_h);
-                float fpsBot = yc - fullH * 0.5f;                /* FPS plaque bottom */
-                float yc2    = fpsBot - 0.03f - blockH * 0.5f;
-                mat4 local2  = m4_mul(m4_translate(v3(0.0f, yc2, -d)),
-                                      m4_scale(v3(blockW, blockH, 1.0f)));
-                mat4 model2  = m4_mul(layout_model_matrix(m, ci), local2);
-                glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, m4_mul(vp, model2).m);
-                glBindTexture(GL_TEXTURE_2D, R.label_help);
-                glUniform1i(R.uTex, 0);
-                glUniform1f(R.uHasTex, 1.0f);
-                glUniform1f(R.uYFlip, 0.0f);
-                glUniform1f(R.uSharpen, 0.0f);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            }
-        }
-    }
-
     /* Banner entities (clock, status lines, ...): refresh each (re-bakes only when
      * its key changes) and draw it at its place on the cylinder. World-fixed, so
      * they pan with the wall as you look around. */
@@ -1559,8 +1714,10 @@ void render_frame(struct mirage *m, quat head) {
         banner_draw(b, vp);
     }
 
-    /* in-view sensitivity slider, hung under the centre screen (grab.c drives it) */
-    draw_sens_panel(m, vp);
+    /* In-glasses control HUD (Clay): FPS + cheat-sheet + sensitivity/brightness/
+     * transparency sliders + layout/env switchers + geometry/bg/tilt toggles, hung
+     * under the centre screen. Lays out, draws, and refreshes the grab.c snapshot. */
+    hud_render(m, vp);
 
     /* 3D pointer: an arrow billboard at the cursor's wall direction (grab.c). It sits
      * on the same cylinder as the screens - position = yaw rotation of (0,0,-d) plus
