@@ -112,32 +112,9 @@ static struct {
     int    dome_verts;
     GLint  dMVP, dExposure, dIntensity, dBlack, dSat, dTex;
 
-    /* flat/curved toggle captions (one each, baked once at init; the live one is
-     * shown on the toggle button below the brightness slider). */
-    own::GlTexture label_flat, label_curved;
-    int    flat_w, flat_h, curved_w, curved_h;
-    own::GlTexture label_tilt, label_level;     /* head-tilt toggle captions */
-    int    tilt_w, tilt_h, level_w, level_h;
-    /* live FPS plaque: re-baked only when the integer value changes */
-    own::GlTexture label_fps;
-    int    fps_w, fps_h, fps_val;
-    /* static multi-line shortcut cheat-sheet, baked once at init */
-    own::GlTexture label_help;
-    int    help_w, help_h;
-    /* sensitivity slider: static "SENS"/"DEFAULT" captions baked once, plus a live
-     * value plaque ("3.0x") re-baked only when the gain changes (like the FPS one). */
-    own::GlTexture label_sens_cap, label_default, label_sens;
-    int    senscap_w, senscap_h, default_w, default_h, sens_w, sens_h, sens_val;
-    own::GlTexture label_bright;            /* "BRIGHT" caption for the env brightness slider */
-    int    bright_w, bright_h;
-    own::GlTexture label_trans;             /* "TRANS" caption for the transparency slider */
-    int    trans_w, trans_h;
-    /* layout-switcher button captions (one per named layout), baked once at init */
-    own::GlTexture label_layout[MIRAGE_MAX_LAYOUTS];
-    int    layout_w[MIRAGE_MAX_LAYOUTS], layout_h[MIRAGE_MAX_LAYOUTS];
-    /* environment-switcher button captions (one per MIRAGE_ENVS entry), baked once */
-    own::GlTexture label_env[MIRAGE_MAX_ENVS];
-    int    env_w[MIRAGE_MAX_ENVS], env_h[MIRAGE_MAX_ENVS];
+    /* The control HUD's captions/plaques (FPS, sliders, switchers, toggles) are
+     * laid out and baked on demand by the Clay path (hud_render -> plaque_for
+     * cache below), so no per-caption GlTexture state lives in R any more. */
     /* 3D pointer: a white arrow on black, drawn additively as a billboard at the
      * cursor's wall direction (m->cursor_yaw/pitch). Black adds nothing on the
      * additive optics, so only the arrow glows - over screens and in the gaps. */
@@ -149,9 +126,6 @@ static struct {
     own::GlTexture cam_tex;
     int      cam_alloc_w, cam_alloc_h;
     uint64_t cam_seq;
-    /* background-mode button captions, indexed by mirage_bg_mode */
-    own::GlTexture label_bg[BG_MODE_COUNT];
-    int    bg_w[BG_MODE_COUNT], bg_h[BG_MODE_COUNT];
 } R;
 
 /* Banner entities (the clock, status lines, ...): baked panels hung in the curved
@@ -865,58 +839,11 @@ mirage_status render_init(struct mirage *m) {
 
     render_rebuild_meshes(m);
 
-    /* flat/curved toggle captions (one shown at a time on the toggle button) */
-    { const float gc[3] = {0.66f, 0.72f, 0.82f};
-      R.label_curved = bake_label("CURVED", gc, &R.curved_w, &R.curved_h);
-      R.label_flat   = bake_label("FLAT",   gc, &R.flat_w,   &R.flat_h); }
-    /* head-tilt toggle captions (one shown at a time on the toggle button) */
-    { const float gc[3] = {0.70f, 0.80f, 0.92f};
-      R.label_tilt  = bake_label("TILT: ON",  gc, &R.tilt_w,  &R.tilt_h);
-      R.label_level = bake_label("TILT: OFF", gc, &R.level_w, &R.level_h); }
-    /* background-mode button captions (black / hdri / passthrough) */
-    { const float pc[3] = {0.82f, 0.74f, 0.66f};
-      R.label_bg[BG_BLACK]       = bake_label("BG: BLACK",    pc, &R.bg_w[BG_BLACK],       &R.bg_h[BG_BLACK]);
-      R.label_bg[BG_HDRI]        = bake_label("BG: HDRI",     pc, &R.bg_w[BG_HDRI],        &R.bg_h[BG_HDRI]);
-      R.label_bg[BG_PASSTHROUGH] = bake_label("BG: PASSTHRU", pc, &R.bg_w[BG_PASSTHROUGH], &R.bg_h[BG_PASSTHROUGH]); }
     worldvio_start(nullptr);   /* 6DoF-lite optical-flow estimator (fed by draw_passthrough) */
     R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0;
-    R.fps_val = -1;   /* force the FPS plaque to bake on the first frame */
     R.cursor_tex = gen_cursor_tex(&R.cursor_w, &R.cursor_h);   /* 3D pointer arrow */
-    /* static shortcut cheat-sheet, one multi-line plaque baked once */
-    { const float hc[3] = {0.66f, 0.72f, 0.82f};
-      R.label_help = bake_label(
-          "2X CMD: RECENTER\n"
-          "CMD+SCROLL: ZOOM\n"
-          "SUPER+SHIFT+Q: QUIT",
-          hc, &R.help_w, &R.help_h); }
-    /* sensitivity slider captions (static) + force a value bake on the first frame */
-    { const float cap[3] = {0.66f, 0.72f, 0.82f};
-      const float dft[3] = {0.80f, 0.86f, 0.95f};
-      R.label_sens_cap = bake_label("SENS", cap, &R.senscap_w, &R.senscap_h);
-      R.label_default  = bake_label("DEFAULT", dft, &R.default_w, &R.default_h);
-      const float bc[3] = {0.72f, 0.88f, 0.78f};   /* green, matches the env row */
-      R.label_bright   = bake_label("BRIGHT", bc, &R.bright_w, &R.bright_h);
-      const float tc[3] = {0.74f, 0.78f, 0.92f};   /* blue, matches the transparency rail */
-      R.label_trans    = bake_label("TRANS", tc, &R.trans_w, &R.trans_h); }
-    R.sens_val = -1;
-    /* layout-switcher button captions: one per loaded named layout, upper-cased to
-     * match the rest of the HUD. Layouts are parsed before render init, so the set
-     * is fixed here. */
-    { const float lc[3] = {0.72f, 0.80f, 0.92f};
-      for (int k = 0; k < m->layouts.n; k++) {
-          char nm[32];
-          snprintf(nm, sizeof nm, "%s", m->layouts.l[k].name);
-          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
-          R.label_layout[k] = bake_label(nm, lc, &R.layout_w[k], &R.layout_h[k]);
-      } }
-    /* environment-switcher captions: one per MIRAGE_ENVS entry (Space/Forest/...) */
-    { const float ec[3] = {0.72f, 0.88f, 0.78f};   /* faint green tint vs the layout row */
-      for (int k = 0; k < MIRAGE_ENV_COUNT; k++) {
-          char nm[16];
-          snprintf(nm, sizeof nm, "%s", MIRAGE_ENVS[k].name);
-          for (char *p = nm; *p; ++p) *p = (char)toupper((unsigned char)*p);
-          R.label_env[k] = bake_label(nm, ec, &R.env_w[k], &R.env_h[k]);
-      } }
+    /* The control HUD's captions/plaques are baked on demand by the Clay path
+     * (hud_render -> plaque_for cache), so there's nothing to pre-bake here. */
     /* banner entities: register them here; the frame loop (banner_refresh) bakes
      * and builds each lazily and re-bakes when its key() changes. The clock is the
      * first; push more ent::Banner for status lines etc. */
@@ -1785,11 +1712,8 @@ void render_finish(struct mirage *m) {
      * (built here, not by capture). */
     R.prog.reset();   R.vbo.reset();
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
-    R.label_flat.reset(); R.label_curved.reset(); R.label_fps.reset();
-    R.label_tilt.reset(); R.label_level.reset();
-    R.label_help.reset();
-    for (int i = 0; i < BG_MODE_COUNT; i++) R.label_bg[i].reset();
-    R.label_trans.reset(); R.cam_tex.reset();
+    R.cam_tex.reset();
+    g_hud_plaques.clear();   /* free the Clay HUD's baked plaques while the GL context is live */
     worldvio_stop();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
