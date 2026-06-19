@@ -40,6 +40,8 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -117,6 +119,7 @@ static void on_carina_pose(float *pose, double ts){
 
 static volatile sig_atomic_t g_run = 1;
 static int g_stall = 0;           /* set when the watchdog trips -> re-exec to recover */
+static int g_cold  = 0;           /* set when we NEVER streamed -> USB-reset before re-exec */
 static char **g_argv = NULL;      /* saved for self-re-exec on stall */
 static void on_sigint(int s){ (void)s; g_run = 0; }
 static volatile sig_atomic_t g_reload = 0;
@@ -328,6 +331,64 @@ static void detach_cdc_acm(void){
     closedir(d);
 }
 
+/* USB-level reset of the Beast (USBDEVFS_RESET) - the software equivalent of a
+ * physical replug. Clears the cold "Failed to send USB command -1" wedge where
+ * cdc_acm/libusb left the control pipe stuck and open_imu() can't get through.
+ * Finds the 35ca:1201 bus/dev via sysfs and ioctls its /dev/bus/usb node. DP
+ * video rides a separate USB-C alt-mode lane (not this USB data device), so the
+ * display stays up across the reset. Needs root; harmless no-op if not found. */
+static void usb_reset_beast(void){
+    DIR *d = opendir("/sys/bus/usb/devices"); if(!d) return;
+    struct dirent *e; char p[512]; int done=0;
+    while(!done && (e=readdir(d))){
+        if(strchr(e->d_name,':')) continue;               /* devices, not interfaces */
+        snprintf(p,sizeof p,"/sys/bus/usb/devices/%s/idProduct",e->d_name);
+        FILE *f=fopen(p,"r"); if(!f) continue;
+        int pid=0; if(fscanf(f,"%x",&pid)!=1) pid=0; fclose(f);
+        snprintf(p,sizeof p,"/sys/bus/usb/devices/%s/idVendor",e->d_name);
+        f=fopen(p,"r"); int vid=0; if(f){ if(fscanf(f,"%x",&vid)!=1) vid=0; fclose(f);}
+        if(vid!=VITURE_VID || pid!=BEAST_PID) continue;
+        int bus=0,dev=0;
+        snprintf(p,sizeof p,"/sys/bus/usb/devices/%s/busnum",e->d_name);
+        f=fopen(p,"r"); if(f){ if(fscanf(f,"%d",&bus)!=1) bus=0; fclose(f);}
+        snprintf(p,sizeof p,"/sys/bus/usb/devices/%s/devnum",e->d_name);
+        f=fopen(p,"r"); if(f){ if(fscanf(f,"%d",&dev)!=1) dev=0; fclose(f);}
+        if(bus>0 && dev>0){
+            char node[64]; snprintf(node,sizeof node,"/dev/bus/usb/%03d/%03d",bus,dev);
+            int fd=open(node,O_WRONLY);
+            if(fd>=0){ int r=ioctl(fd,USBDEVFS_RESET,0);
+                fprintf(stderr,"viture-bridge: USBDEVFS_RESET %s -> %d\n",node,r);
+                close(fd); done=1; }
+            else fprintf(stderr,"viture-bridge: open %s failed (need root for USB reset)\n",node);
+        }
+    }
+    closedir(d);
+}
+
+/* Bounded self-recovery: optionally USB-reset the Beast, back off, then re-exec
+ * ourselves to retry the whole bring-up from scratch (same PID + name, so the
+ * pgrep/pkill -x the launcher relies on still work). Used for BOTH the cold
+ * open_imu wedge and a failed create() (USB not enumerated yet right after boot).
+ * The attempt count rides across re-execs in $VB_TRY and is cleared once samples
+ * flow; capped so a genuinely unplugged Beast eventually gives up instead of
+ * spinning forever. Only returns if execv fails or the cap is hit. */
+static int recover_reexec(int usb_reset){
+    const char *te=getenv("VB_TRY"); int try=(te?atoi(te):0)+1;
+    if(try>10){ fprintf(stderr,"viture-bridge: giving up after %d recovery attempts - replug the Beast\n",try-1);
+        return 0; }
+    char tb[16]; snprintf(tb,sizeof tb,"%d",try); setenv("VB_TRY",tb,1);
+    if(usb_reset){
+        fprintf(stderr,"viture-bridge: USB-resetting the Beast (recovery attempt %d)...\n",try);
+        usb_reset_beast();
+    }
+    int nap = 3 + (try<7?try:7);              /* 4..10s backoff: re-claiming too soon re-wedges */
+    fprintf(stderr,"viture-bridge: settling %ds, then re-exec to recover...\n",nap);
+    sleep(nap);
+    execv("/proc/self/exe", g_argv);
+    perror("viture-bridge: execv");           /* only reached if re-exec fails */
+    return -1;
+}
+
 static int parse_qmap(const char*s,int idx[4],double sgn[4]){
     for(int i=0;i<4;i++){ while(*s==' '||*s==',')s++; double g=1;
         if(*s=='-'){g=-1;s++;} else if(*s=='+')s++;
@@ -447,7 +508,9 @@ int main(int argc,char**argv){
         fprintf(stderr,"viture-bridge: WARNING SDK reports 0x%04x invalid\n",BEAST_PID);
     XRH p=xr_create(BEAST_PID);
     if(!p){ fprintf(stderr,"viture-bridge: create() failed - glasses not found / USB busy. "
-            "Run with sudo (libusb needs /dev/bus/usb) and ensure cdc_acm is unbound.\n"); return 1; }
+            "Run with sudo (libusb needs /dev/bus/usb) and ensure cdc_acm is unbound.\n");
+            recover_reexec(1);   /* cold boot: USB may not be enumerated yet - reset + retry */
+            return 1; }          /* only here if execv failed or the retry cap was hit */
     xr_reg_raw(p,on_raw);
     if(xr_reg_pose){ xr_reg_pose(on_pose); fprintf(stderr,"viture-bridge: pose callback registered (probe)\n"); }
     else fprintf(stderr,"viture-bridge: no register_pose_callback in SDK\n");
@@ -570,9 +633,14 @@ int main(int argc,char**argv){
         dm=dispmode;
     }
     xr_set_dof(p,dm,NATIVE_DOF_OFF);                 /* disable on-glasses 3DOF */
-    if(xr_open_imu(p,IMU_MODE_RAW,(uint8_t)freq)!=0)
-        fprintf(stderr,"viture-bridge: open_imu(RAW) failed\n");
+    int imu_rc = xr_open_imu(p,IMU_MODE_RAW,(uint8_t)freq);
+    if(imu_rc!=0)
+        fprintf(stderr,"viture-bridge: open_imu(RAW) failed (rc=%d)\n",imu_rc);
     xr_start(p);
+    double t_start = now_sec();                       /* cold-start watchdog baseline */
+    /* If open_imu already errored the control pipe is wedged - recover fast (2s)
+     * instead of waiting out the full cold timeout. */
+    double cold_to = (imu_rc!=0) ? 2.0 : 5.0;
     fprintf(stderr,"viture-bridge: Beast streaming -> %s:%d (qmap=%s, %s)\n",
             host,port,qmap,g_use_mag?"9-axis":"6-axis");
 
@@ -589,6 +657,19 @@ int main(int argc,char**argv){
         if(g_reload){ g_reload=0; load_tuning();
         }
         if(g_verbose && g_n==0){ static int w=0; if(++w%5==0) fprintf(stderr,"viture-bridge: no IMU yet...\n"); }
+
+        /* Once samples flow, clear the cross-re-exec attempt counter so a later
+         * (warm) stall recovery starts its backoff from scratch. */
+        if(g_n>0 && getenv("VB_TRY")) unsetenv("VB_TRY");
+
+        /* Cold-start watchdog: open_imu can fail on a fresh boot ("Failed to send
+         * USB command -1"), so NO sample ever arrives and the stall watchdog below
+         * (which needs g_n>0) can never fire. Catch the never-streamed case and
+         * recover via a USB reset + re-exec - no physical replug needed. */
+        if(g_n==0 && now_sec()-t_start > cold_to){
+            fprintf(stderr,"viture-bridge: no IMU %.0fs after cold start - USB wedged, recovering\n",cold_to);
+            g_cold=1; g_stall=1; break;
+        }
 
         /* VIO probe: poll the carina GL pose. If it returns 0 with a 6DoF transform
          * (translation in [4..6] that tracks as you lean), the SDK is doing VIO; if
@@ -641,12 +722,12 @@ int main(int argc,char**argv){
      * A genuine SIGINT/SIGTERM clears g_run via the handler but NOT g_stall, so we
      * only loop back on a watchdog trip. */
     if (g_stall && g_run){
-        fprintf(stderr,"viture-bridge: re-exec to recover the IMU stream...\n");
-        sleep(4);                                 /* settle: re-claiming the IMU too soon
-                                                     after release wedges the Beast's
-                                                     firmware (then only a replug helps) */
-        execv("/proc/self/exe", g_argv);
-        perror("viture-bridge: execv");           /* only reached if re-exec fails */
+        /* g_cold (never streamed) means the USB control pipe is wedged, not just a
+         * mid-stream DP blip - escalate to a USB-level reset (replug-equivalent).
+         * A warm stall released its claim cleanly in the shutdown above, so it only
+         * needs the settle + re-exec. recover_reexec backs off, bumps the attempt
+         * counter and re-execs; it only returns if execv fails or the cap is hit. */
+        recover_reexec(g_cold);
         return 3;
     }
     return 0;

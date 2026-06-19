@@ -32,15 +32,19 @@ LOG=/tmp/viture-bridge.log
 # Detect streaming by the sample counter ("... n NNNN") advancing over ~1s.
 # (exact-match the binary name; pgrep -f would also match this script + the greps)
 if pgrep -x viture-bridge >/dev/null 2>&1; then
-    n1=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1)
+    # NB: grep exits 1 when the log has no "n NNNN" sample line - i.e. exactly when
+    # the bridge is WEDGED. Under `set -o pipefail` that 1 propagates and `set -e`
+    # would abort the script HERE, before we ever restart the dead bridge (the cold
+    # -boot failure mode). The `|| true` keeps us going so the wedged path runs.
+    n1=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1 || true)
     sleep 1
-    n2=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1)
+    n2=$(tail -2 "$LOG" 2>/dev/null | grep -a -o 'n [0-9]*' | tail -1 || true)
     # Don't keep a stale binary: if viture-bridge was rebuilt AFTER the running one
     # started, the healthy-bridge keep below would silently run the OLD code (so a
     # fresh build's changes never take effect). Force a restart when $BIN is newer.
     rpid=$(pgrep -x viture-bridge | head -1)
     binm=$(stat -c %Y "$BIN" 2>/dev/null || echo 0)
-    et=$(ps -o etimes= -p "$rpid" 2>/dev/null | tr -d ' '); et=${et:-0}
+    et=$(ps -o etimes= -p "$rpid" 2>/dev/null | tr -d ' ' || true); et=${et:-0}
     started=$(( $(date +%s) - et ))
     if [ -n "$n1" ] && [ "$n1" != "$n2" ] && [ "$binm" -le "$started" ]; then
         echo "viture-bridge already streaming ($n2) - keeping it"
