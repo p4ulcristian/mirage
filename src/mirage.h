@@ -106,19 +106,9 @@ typedef struct {
     float pitch_gain;           /* head-pitch amplification (1 = 1:1)    */
     float roll_damp;            /* keep this fraction of head roll (0=horizon lock) */
     float read_deadband_deg;    /* freeze camera tremor below this angle (0 = off) */
-    float neck_fwd_m;           /* FALLBACK parallax when facecam is off/silent: eye distance
-                                 * ahead of the neck pivot (synthesised from rotation; 0 = off) */
-    float neck_up_m;            /* fallback parallax: eye height above the neck pivot */
-
-    /* facecam 6DoF: webcam-measured head POSITION on top of the 3DoF IMU rotation
-     * (see src/facecam_bridge.cpp). The bridge sends position to the pose layer;
-     * these gains map measured head movement to eye translation in the render. */
-    bool  facecam_enable;       /* listen for webcam head position (lean/slide parallax) */
-    float facecam_lateral_gain; /* eye shift per metre of measured x/y head move; <0 flips axis */
-    float facecam_depth_gain;   /* same for lean in/out (z); depth is noisier, keep modest */
-    float facecam_smooth;       /* One-Euro rest cutoff (Hz) in the pose thread; lower = steadier */
-    bool  facecam_fusion;       /* fuse IMU linear-accel for low-latency position (VOR-style);
-                                 * needs the rayneo bridge to emit accel. Off = camera-only */
+    float neck_fwd_m;           /* parallax: eye distance ahead of the neck pivot (synthesised
+                                 * from rotation; the near windows shift against the far dome; 0 = off) */
+    float neck_up_m;            /* parallax: eye height above the neck pivot */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
     int   msaa_samples;         /* MSAA sample count for the window surface (0/1 = off); init-time only */
     bool  mipmap;               /* trilinear minification: mirror each screen into a mipmapped texture */

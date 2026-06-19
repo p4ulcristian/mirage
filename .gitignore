@@ -6,7 +6,6 @@ mirage
 mirage-posedump
 rayneo-bridge
 viture-bridge
-facecam-bridge
 # logs / runtime
 *.log
 *.pid

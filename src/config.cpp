@@ -73,19 +73,6 @@ void mirage_config_defaults(mirage_config *c) {
     c->read_deadband_deg = 1.1f;   /* freeze <1.1deg tremor so held text stays still */
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
-    c->facecam_enable        = true;  /* ON for desk use: lateral lean parallax from the webcam. Needs a
-                                       * STABLE, world-fixed camera (a moving laptop -> jumps). Fusion stays
-                                       * off (below) and depth off, so it's the clean camera-only position. */
-    c->facecam_lateral_gain  = 1.0f;  /* 1:1 lean/slide -> eye shift; flip sign if left/right is inverted */
-    c->facecam_depth_gain    = 0.0f;  /* lean in/out (depth) OFF: barely used at a desk and the
-                                       * noisiest single-camera axis. Lateral (x) + vertical (y)
-                                       * parallax stay on. Set >0 (e.g. 0.5) to re-enable lean-in. */
-    c->facecam_smooth        = 0.8f;  /* One-Euro rest cutoff (Hz); LOWER = steadier/laggier. Lowered
-                                       * from 1.2 to damp residual camera misdetections at rest. */
-    c->facecam_fusion        = false; /* OFF: the accel fusion's z (distance vs world-coord) never
-                                       * settles and yanks lateral position during corrections -
-                                       * the diag log showed it causing the still-jumps. Depth is
-                                       * disabled and lean is slow, so camera-only position is better. */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
     c->msaa_samples      = 4;      /* 4x MSAA on the screen-edge geometry (0 = off); cheap on the tiled GPU */
     c->mipmap            = true;   /* trilinear minification kills deep-minified sparkle the base level can't */

@@ -310,11 +310,7 @@ int main(void) {
                        .use_oneeuro = M.cfg.pose_oneeuro,
                        .oe_mincutoff = M.cfg.pose_mincutoff,
                        .oe_beta = M.cfg.pose_beta, .oe_dcutoff = 1.0f,
-                       .drift_comp_tau = M.cfg.pose_drift_tau,
-                       .facecam_enable = M.cfg.facecam_enable,
-                       .facecam_socket = "/tmp/mirage-facecam.sock",
-                       .facecam_smooth = M.cfg.facecam_smooth,
-                       .facecam_fusion = M.cfg.facecam_fusion };
+                       .drift_comp_tau = M.cfg.pose_drift_tau };
     if (pose_start(&pc) != 0)
         std::print(stderr, "mirage: pose backend failed to start (rendering without tracking)\n");
 

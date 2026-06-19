@@ -60,26 +60,19 @@ MIRAGE_LIBS := -lturbojpeg
 # ---- pose test tool (no wayland/GL) ----
 POSEDUMP_OBJ := build/obj/tool_posedump.o build/obj/pose.o build/obj/diag.o
 
-# facecam 6DoF bridge (webcam head-position tracker) - separate target so OpenCV is
-# only required when you actually build it, like the rayneo bridge.
 OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
-# Link only the modules we use - pkg-config --libs opencv4 pulls in viz/hdf (VTK,
-# HDF5) which over-link and fail. FaceDetectorYN lives in objdetect over dnn.
-OPENCV_LIBS   := -lopencv_core -lopencv_imgproc -lopencv_videoio \
-                 -lopencv_objdetect -lopencv_dnn
 
 # mirage's worldvio (6DoF-lite) optional OpenCV LK backend: needs core/imgproc/video.
 # Headers go to every TU (just -I, harmless); only worldvio.o uses the symbols.
 CXXFLAGS    += $(OPENCV_CFLAGS)
 MIRAGE_LIBS += -lopencv_core -lopencv_imgproc -lopencv_video -lopencv_calib3d
 
-.PHONY: all posedump protocols bridge viture viture-vio facecam clean
+.PHONY: all posedump protocols bridge viture viture-vio clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
 viture: viture-bridge
 viture-vio: viture-vio-bin
-facecam: facecam-bridge
 protocols: $(PROTO_HDR) $(PROTO_SRC)
 
 # VITURE Carina VIO (OpenVINS) bring-up harness. Links libcarina_vio.so directly
@@ -119,10 +112,6 @@ build/obj/vb_vqf_shim.o: src/vqf_shim.cpp src/vqf_shim.h src/vqf/vqf.hpp | build
 viture-bridge: $(VB_C_OBJ) $(VB_CPP_OBJ)
 	$(CXX) -O2 -g -o $@ $^ -ldl -lm
 
-facecam-bridge: src/facecam_bridge.cpp
-	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra $(OPENCV_CFLAGS) \
-	    -o $@ $< $(OPENCV_LIBS)
-
 mirage: $(MIRAGE_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS) $(MIRAGE_LIBS)
 
@@ -150,4 +139,4 @@ build/proto build/obj:
 	mkdir -p $@
 
 clean:
-	rm -rf build mirage mirage-posedump rayneo-bridge viture-bridge facecam-bridge
+	rm -rf build mirage mirage-posedump rayneo-bridge viture-bridge

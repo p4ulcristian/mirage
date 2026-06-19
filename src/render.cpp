@@ -1526,17 +1526,11 @@ void render_frame(struct mirage *m, quat head) {
     calib_update(m, head);
 
     /* Eye translation for motion parallax (near windows shift against far ones and the
-     * fixed star dome). Two sources, picked by whether the webcam is live:
+     * fixed star dome), synthesised from rotation: the eye sits ahead/above a neck pivot,
+     * so a head turn sweeps it through an arc - the translational depth cue the 3DoF
+     * stream gives on its own.
      *
-     *  - REAL position (facecam): the measured head offset already INCLUDES the neck-arc
-     *    translation a head turn produces, so it fully replaces the neck model below -
-     *    running both would double-count that arc. Forward-predicted (pose_predict_ms) to
-     *    offset the camera's latency. Lateral (x/y) and depth (z) keep separate gains, as
-     *    depth is the noisier axis.
-     *  - NECK MODEL (fallback): with no webcam signal, synthesise the arc from rotation -
-     *    the eye sits ahead/above a neck pivot, so a turn sweeps it through an arc. This is
-     *    the only translational depth cue available from the 3DoF stream alone. */
-    /* ONE fused tracking mode: IMU orientation (the view rotation, via `head`) + neck-model
+     * ONE fused tracking mode: IMU orientation (the view rotation, via `head`) + neck-model
      * rotation arc + confidence-gated world-cam optical-flow parallax. worldvio already
      * scales its offset by camera confidence and leaks to rest, so when the camera sees
      * well you get real lean/sway 6DoF, and when it can't (blank wall, dark, blur) it fades

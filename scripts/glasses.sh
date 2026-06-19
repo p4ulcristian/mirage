@@ -35,7 +35,6 @@ WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
 
 restore() {
     echo "[glasses] restoring desktop..."
-    pkill -f facecam-bridge >/dev/null 2>&1 || true   # stop the webcam tracker
     python3 "$HERE/scripts/sweep.py" restore >/dev/null 2>&1 || true
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
     bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
@@ -73,10 +72,6 @@ hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
 echo "[glasses] virtual screens + head tracking..."
 python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
 bash "$HERE/scripts/viture-bridge.sh" >/dev/null 2>&1 || true
-# webcam head-position bridge for lateral lean parallax (facecam_enable=true). Needs a
-# STABLE desk camera; for lap/3DoF use set facecam_enable=false and comment this out.
-# Log: /tmp/facecam.log
-bash "$HERE/scripts/facecam.sh" >/dev/null 2>&1 || true
 
 # Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
 # captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
