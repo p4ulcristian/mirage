@@ -14,20 +14,17 @@ PIDFILE=/tmp/mirage.pid
 LOCK=/tmp/mirage-cleanup.lock
 
 stop_mirage() {  # harmless if mirage already exited
-    local pid=""
-    [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE" 2>/dev/null)"
-    # Release input grab first so the cursor is free before the process exits
-    pkill -USR2 -x mirage 2>/dev/null || true
-    sleep 0.05
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill -INT "$pid" 2>/dev/null
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.1
-        done
-        kill -KILL "$pid" 2>/dev/null || true
+    # Ask nicely, then ALWAYS escalate to SIGKILL by name. mirage writes no pidfile, and a
+    # wedged render loop (e.g. eglSwapBuffers into an unpresented surface) ignores SIGINT -
+    # the old code only force-killed via a pidfile that never existed, so a hung mirage kept
+    # the trackpad EVIOCGRAB'd and the only way out was a hard reboot. SIGKILL is the one
+    # thing that always frees the mouse: the kernel drops the grab when the process dies.
+    pkill -INT -x mirage 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8; do pgrep -x mirage >/dev/null || break; sleep 0.1; done
+    if pgrep -x mirage >/dev/null; then
+        pkill -KILL -x mirage 2>/dev/null || true   # force-kill a hung mirage -> grab released
+        for _ in 1 2 3 4 5; do pgrep -x mirage >/dev/null || break; sleep 0.1; done
     fi
-    pkill -INT -x mirage 2>/dev/null || true   # catch any stray instance
     rm -f "$PIDFILE"
     # stop the RayNeo bridge too (runs under sudo until a udev replug)
     sudo pkill -INT -f rayneo-bridge 2>/dev/null || pkill -INT -f rayneo-bridge 2>/dev/null || true
