@@ -38,6 +38,15 @@ echo "[glasses] mode: $([ "$HAS_GLASSES" = 1 ] && echo "glasses ($GLASSES)" || e
 # physical ws 90 that setup_displays uses) so the VIRT 'default' workspaces can't steal it.
 MIRAGE_WS=80
 
+# Boot ownership handshake. On a relaunch the OLD instance tears down its VIRT outputs
+# when it exits, which races the NEW instance creating them -> mirage boots with 0
+# screens and dies ("booting up often doesn't work"). Fix: serialise create-vs-teardown
+# on one lock and stamp ownership - a launch claims the displays, and only the current
+# owner tears them down, so a newer launch supersedes the old one's teardown.
+DISP_LOCK=/tmp/mirage-displays.lock
+DISP_OWNER=/tmp/mirage-displays.owner
+MY_SESS=$$
+
 # Kill any mirage still running so the shortcut always launches THIS build (an
 # old instance left up would otherwise keep rendering with stale behaviour, and
 # its trackpad grab + scanout would fight this one). Wait for it to actually exit.
@@ -58,11 +67,22 @@ WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
 
 restore() {
     echo "[glasses] restoring desktop..."
-    python3 "$HERE/scripts/sweep.py" restore >/dev/null 2>&1 || true
-    hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
-    # Drop mirage's dedicated windowed-mode workspace so it doesn't linger empty+persistent.
-    hyprctl eval "hl.workspace_rule({ workspace='${MIRAGE_WS:-80}', monitor='${LAPTOP:-eDP-1}', default=false, persistent=false })" >/dev/null 2>&1 || true
-    bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
+    # Take the displays lock and only tear down if we're STILL the owner: if a newer
+    # launch has superseded us it owns the VIRT outputs now, and ripping them out would
+    # kill its boot (the flaky-relaunch bug). Serialised against setup so they can't interleave.
+    (
+        flock 9
+        if [ "$(cat "$DISP_OWNER" 2>/dev/null)" != "$MY_SESS" ]; then
+            echo "[glasses] superseded by a newer launch - leaving its displays up"
+            exit 0
+        fi
+        python3 "$HERE/scripts/sweep.py" restore >/dev/null 2>&1 || true
+        hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
+        # Drop mirage's dedicated windowed-mode workspace so it doesn't linger empty+persistent.
+        hyprctl eval "hl.workspace_rule({ workspace='${MIRAGE_WS:-80}', monitor='${LAPTOP:-eDP-1}', default=false, persistent=false })" >/dev/null 2>&1 || true
+        bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
+        rm -f "$DISP_OWNER"
+    ) 9>"$DISP_LOCK"
     if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
         # waybar is a systemd user service (Restart=always); restart it through
         # systemd so we don't fight its supervisor or spawn a second instance.
@@ -108,7 +128,19 @@ hl.window_rule({ match = { class = 'mirage' }, rounding = 0 })
 " >/dev/null
 
 echo "[glasses] virtual screens$([ "$HAS_GLASSES" = 1 ] && echo ' + head tracking')..."
-python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
+# Claim the displays and create the VIRTs under the lock so a dying instance's teardown
+# can't race us to zero. setup_displays self-retries flaky `hyprctl output create` and
+# exits non-zero if any VIRT is still missing; retry the whole call before launching.
+(
+    flock 9
+    echo "$MY_SESS" > "$DISP_OWNER"          # we own the displays now (supersede older instances)
+    for attempt in 1 2 3 4; do
+        python3 "$HERE/scripts/setup_displays.py" 2>&1 | sed 's/^/  [displays] /'
+        [ "${PIPESTATUS[0]}" = 0 ] && break
+        echo "[glasses] virtual screens incomplete (attempt $attempt) - retrying..."
+        sleep 0.4
+    done
+) 9>"$DISP_LOCK"
 # Head-tracking bridge only makes sense with glasses on; windowed mode looks around
 # with 3/4-finger trackpad swipes (mirage falls back to identity pose without it).
 [ "$HAS_GLASSES" = 1 ] && bash "$HERE/scripts/viture-bridge.sh" >/dev/null 2>&1 || true

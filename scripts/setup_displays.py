@@ -117,12 +117,20 @@ def create(panels):
     for name in sorted(have - want):                  # drop stale VIRT outputs
         print("removing", name)
         subprocess.run(["hyprctl", "output", "remove", name], stdout=subprocess.DEVNULL)
-    for p in panels:
-        if p["name"] not in have:
-            print("creating", p["name"])
-            subprocess.run(["hyprctl", "output", "create", "headless", p["name"]],
+    # `hyprctl output create` is historically flaky and can silently no-op, which used to
+    # boot mirage with missing/zero screens. Create what's absent, then re-query and retry
+    # the stragglers a few times before giving up - the caller treats a False return as
+    # "retry the whole thing".
+    for attempt in range(4):
+        have = {m["name"] for m in hypr("monitors", "all") if m["name"].startswith("VIRT")}
+        missing = [p["name"] for p in panels if p["name"] not in have]
+        if not missing:
+            break
+        for name in missing:
+            print(f"creating {name}" + (f" (retry {attempt})" if attempt else ""))
+            subprocess.run(["hyprctl", "output", "create", "headless", name],
                            stdout=subprocess.DEVNULL)
-    time.sleep(0.3)
+        time.sleep(0.3)
     for p in panels:                                  # position + mode via Lua (0.55 IPC)
         x, y = ORIGIN_X + p["x"], ORIGIN_Y + p["y"]
         ev("hl.monitor({ output='%s', mode='%dx%d@%d', position='%dx%d', scale=1 })"
@@ -135,9 +143,16 @@ def create(panels):
         print("  %-6s %dx%d at %d,%d  ws%d  (%s)"
               % (p["name"], p["w"], p["h"], x, y, WS_BASE + p["n"], p["role"]))
 
+    # Final verification: report whether every wanted VIRT actually exists now.
+    have = {m["name"] for m in hypr("monitors", "all") if m["name"].startswith("VIRT")}
+    missing = sorted(p["name"] for p in panels if p["name"] not in have)
+    if missing:
+        print("setup_displays: MISSING after retries:", " ".join(missing))
+    return not missing
+
 
 if __name__ == "__main__":
     arg = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
     name, panels = load_layout(arg)
     print(f"setup_displays: layout '{name}' ({len(panels)} screens)")
-    create(panels)
+    sys.exit(0 if create(panels) else 1)
