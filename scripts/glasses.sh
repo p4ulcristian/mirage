@@ -108,16 +108,14 @@ else
     # composite as a normal fullscreen window on the laptop. Don't re-mode anything.
     echo "[glasses] windowed mode on $LAPTOP — no scanout, no re-mode"
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null
-    # Pin mirage to its OWN workspace (80) bound to the laptop. Why a workspace rule and not
-    # a monitor rule: mirage is a CLIENT-fullscreen window - once mapped it cannot be moved by
-    # hyprctl (movewindow/movetoworkspace are refused; its workspace is rule-pinned so even
-    # moveworkspacetomonitor is refused), so placement must be right AT MAP TIME. A `workspace`
-    # window-rule places it at map time regardless of which output has focus - which matters
-    # because your cursor sitting over the terminal (dragged onto a headless VIRT by
-    # setup_displays) otherwise pulls focus there via follow_mouse, and mirage maps on that
-    # invisible VIRT ("dropped to an empty workspace"). ws80 is off the wall's 1..9.
-    hyprctl eval "hl.workspace_rule({ workspace='80', monitor='$LAPTOP', default=true, persistent=true })" >/dev/null
-    PLACE="workspace = '80'"
+    # Pin mirage to ws90 - the workspace setup_displays parks the laptop on and SHOWS. A
+    # `workspace` window-rule places mirage there AT MAP TIME regardless of focus (mirage is a
+    # client-fullscreen window: once mapped it can't be moved by any hyprctl dispatch, so
+    # placement has to be right at map time). Earlier I pinned a SEPARATE ws80 - mirage landed
+    # there correctly but the laptop kept showing ws90 and nothing could switch the view across
+    # (see /tmp/mirage-placement.log), so it stayed invisible one workspace away. Putting mirage
+    # on the already-shown ws90 removes the view-switch problem entirely.
+    PLACE="workspace = '90'"
 fi
 # fullscreen is requested by mirage itself; these rules keep the surface opaque/sharp and
 # place it where it's visible ($PLACE) so it never lands on a headless VIRT.
@@ -175,7 +173,7 @@ if [ "$HAS_GLASSES" != 1 ]; then
     FOLLOW_MOUSE_ORIG="$(hyprctl getoption input:follow_mouse -j 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("int",1))' 2>/dev/null || echo 1)"
     hyprctl eval "hl.config({ input = { follow_mouse = 0 } })" >/dev/null 2>&1 || true
     hyprctl dispatch focusmonitor "$LAPTOP" >/dev/null 2>&1 || true
-    hyprctl dispatch workspace 80 >/dev/null 2>&1 || true
+    hyprctl dispatch workspace 90 >/dev/null 2>&1 || true
     ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) &
 fi
 ./mirage >/tmp/mirage.log 2>&1
