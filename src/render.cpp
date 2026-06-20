@@ -1695,7 +1695,10 @@ void render_frame(struct mirage *m, quat head) {
      * The quad is shifted so the arrow's TIP lands exactly on the cursor point. */
     if (m->cursor_have && m->cursor_in_gap && R.cursor_tex && !calib_active(m)) {
         float d   = m->cfg.screen_distance_m;
-        float hgt = d * tanf(m->cursor_pitch);
+        /* Match layout_pick(): the cursor point sits at world height
+         * world_lift + d*tan(pitch). Omitting world_lift drifts the arrow
+         * vertically from the real 2D cursor after a 4-finger dolly. */
+        float hgt = m->world_lift + d * tanf(m->cursor_pitch);
         float sz  = 0.055f;                       /* arrow size on the wall (m) */
         mat4 place = m4_mul(m4_translate(v3(0.0f, hgt, 0.0f)),
                             m4_from_quat(q_from_euler_ypr(m->cursor_yaw, 0, 0)));
