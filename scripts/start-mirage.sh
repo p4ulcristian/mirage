@@ -20,16 +20,16 @@ echo "=== launch $(cat /proc/uptime | cut -d' ' -f1)s uptime ==="
 
 notify() { command -v notify-send >/dev/null && notify-send "3D Workspaces" "$1" || true; }
 
-# Glasses are OPTIONAL. If a DP output matching the RayNeo ("SmartGlasses") or the
-# VITURE Beast ("VITURE") is present, glasses.sh takes the direct-scanout + head-
-# tracking path. If not, it runs the SAME scene windowed on the laptop, driven by
-# trackpad swipes instead of the IMU. Either way we continue — one launcher, both
-# modes (put the glasses on / take them off; relaunch picks the right path).
+# Glasses are OPTIONAL and HOT-PLUGGABLE. glasses.sh is now a supervisor: with the
+# VITURE Beast / RayNeo plugged it runs the direct-scanout + head-tracking path; without
+# it the SAME scene runs windowed on the laptop (trackpad swipes to look) - and it flips
+# between the two LIVE as you unplug/replug mid-session. So this is just an opening status
+# line; the real decision (and every later one) happens inside glasses.sh.
 if hyprctl monitors all -j | grep -qE 'SmartGlasses|VITURE'; then
-    echo "glasses detected — direct-scanout path"
+    echo "glasses detected — starting in the direct-scanout path (hot-plug aware)"
 else
-    echo "no glasses — windowed desktop mode on the laptop"
-    notify "No glasses — running Mirage windowed on the laptop (trackpad swipes to look)."
+    echo "no glasses — starting windowed on the laptop (plug the glasses in any time)"
+    notify "Mirage windowed on the laptop — plug the glasses in any time to switch to head tracking."
 fi
 
 # Clean start: if a previous session is still up, stop it and wait for the VIRT

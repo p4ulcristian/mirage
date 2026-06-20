@@ -13,6 +13,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIDFILE=/tmp/mirage.pid
 LOCK=/tmp/mirage-cleanup.lock
 
+# Tell the glasses.sh supervisor this is a USER quit, BEFORE we kill mirage. The
+# supervisor relaunches mirage whenever it dies (crash recovery + hot-plug mode
+# switches), so without this sentinel it would just bring mirage straight back and
+# fight the quit key. It clears the sentinel on its next start.
+touch /tmp/mirage-quit 2>/dev/null || true
+
 stop_mirage() {  # harmless if mirage already exited
     # Ask nicely, then ALWAYS escalate to SIGKILL by name. mirage writes no pidfile, and a
     # wedged render loop (e.g. eglSwapBuffers into an unpresented surface) ignores SIGINT -
