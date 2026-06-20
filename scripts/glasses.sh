@@ -64,6 +64,8 @@ WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
 
 restore() {
     echo "[glasses] restoring desktop..."
+    # Restore focus-follows-mouse to whatever it was before launch (windowed mode froze it).
+    [ -n "${FOLLOW_MOUSE_ORIG:-}" ] && hyprctl eval "hl.config({ input = { follow_mouse = ${FOLLOW_MOUSE_ORIG} } })" >/dev/null 2>&1 || true
     # Take the displays lock and only tear down if we're STILL the owner: if a newer
     # launch has superseded us it owns the VIRT outputs now, and ripping them out would
     # kill its boot (the flaky-relaunch bug). Serialised against setup so they can't interleave.
@@ -106,10 +108,16 @@ else
     # composite as a normal fullscreen window on the laptop. Don't re-mode anything.
     echo "[glasses] windowed mode on $LAPTOP — no scanout, no re-mode"
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null
-    # mirage itself set_fullscreens on $LAPTOP's wl_output (classify_outputs picks the real
-    # non-VIRT panel in windowed mode), which is the deterministic placement. This rule just
-    # reinforces it - no workspace juggling, no post-launch dispatch racing the first map.
-    PLACE="monitor = '$LAPTOP'"
+    # Pin mirage to its OWN workspace (80) bound to the laptop. Why a workspace rule and not
+    # a monitor rule: mirage is a CLIENT-fullscreen window - once mapped it cannot be moved by
+    # hyprctl (movewindow/movetoworkspace are refused; its workspace is rule-pinned so even
+    # moveworkspacetomonitor is refused), so placement must be right AT MAP TIME. A `workspace`
+    # window-rule places it at map time regardless of which output has focus - which matters
+    # because your cursor sitting over the terminal (dragged onto a headless VIRT by
+    # setup_displays) otherwise pulls focus there via follow_mouse, and mirage maps on that
+    # invisible VIRT ("dropped to an empty workspace"). ws80 is off the wall's 1..9.
+    hyprctl eval "hl.workspace_rule({ workspace='80', monitor='$LAPTOP', default=true, persistent=true })" >/dev/null
+    PLACE="workspace = '80'"
 fi
 # fullscreen is requested by mirage itself; these rules keep the surface opaque/sharp and
 # place it where it's visible ($PLACE) so it never lands on a headless VIRT.
@@ -160,11 +168,14 @@ export MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}"
 [ -n "$WORLDVIO_GAIN" ] && export MIRAGE_WORLDVIO_GAIN="$WORLDVIO_GAIN"
 # DIAG (off): export MIRAGE_VIEW_TRACE=1 -> per-frame view trace to /tmp/mirage-view-trace.log
 if [ "$HAS_GLASSES" != 1 ]; then
-    # You may be focused on a low workspace (e.g. ws1) that a VIRT just claimed, which
-    # drags focus onto that headless VIRT - mirage then maps THERE, not the laptop, and
-    # you get "dropped to an empty workspace, can't see mirage". Force focus to the laptop
-    # right before launch so mirage maps on it. ensure_visible.py is the backup + the log.
+    # Freeze focus-follows-mouse for the launch: your cursor sitting over the terminal (which
+    # setup_displays just dragged onto a headless VIRT) would otherwise pull focus there and
+    # mirage would map on the invisible VIRT. The workspace=80 rule hard-pins mirage anyway;
+    # this is belt-and-suspenders. Restored in restore(). Then show ws80 on the laptop.
+    FOLLOW_MOUSE_ORIG="$(hyprctl getoption input:follow_mouse -j 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("int",1))' 2>/dev/null || echo 1)"
+    hyprctl eval "hl.config({ input = { follow_mouse = 0 } })" >/dev/null 2>&1 || true
     hyprctl dispatch focusmonitor "$LAPTOP" >/dev/null 2>&1 || true
+    hyprctl dispatch workspace 80 >/dev/null 2>&1 || true
     ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) &
 fi
 ./mirage >/tmp/mirage.log 2>&1

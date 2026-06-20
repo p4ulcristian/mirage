@@ -78,17 +78,13 @@ def main():
             log("  mirage visible on the laptop - OK")
             return
 
-        # Not visible: move mirage onto whatever workspace the laptop is currently showing.
-        # Move BY ADDRESS (works on fullscreen windows where `movewindow mon:` did not), and
-        # drop fullscreen first if it's blocking the move, then restore it.
-        log(f"  relocating mirage ({addr}) -> {LAPTOP} ws{target_ws}")
-        dispatch("focuswindow", f"address:{addr}")
-        dispatch("setfloating", f"address:{addr}", "0")
-        dispatch("movetoworkspacesilent", f"{target_ws},address:{addr}")
+        # mirage is a client-fullscreen window: it CANNOT be moved by hyprctl (proven - every
+        # move dispatch is refused). What DOES work is switching the laptop's VIEW to whatever
+        # workspace mirage is on. mirage should be on ws80 (workspace rule); show it.
+        log(f"  {LAPTOP} not showing mirage's ws{ws} -> switching the laptop view to it")
         dispatch("focusmonitor", LAPTOP)
-        dispatch("workspace", str(target_ws))
-        dispatch("fullscreen", "0")                  # ensure it's fullscreen on the laptop
-        time.sleep(0.4)
+        dispatch("workspace", str(ws))
+        time.sleep(0.3)
     log("--- ensure_visible end: gave up (mirage never confirmed visible) ---")
 
 
