@@ -13,7 +13,27 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
-GLASSES=DP-1
+
+# Detect the glasses output (RayNeo "SmartGlasses" / "VITURE" Beast) by description,
+# and the laptop's own physical output (first non-VIRT). HAS_GLASSES picks the path:
+#   1 -> direct-scanout + head tracking onto the glasses (GLASSES output)
+#   0 -> same scene windowed on the laptop (LAPTOP output), trackpad swipes to look
+# This is the ONE difference between "glasses on" and "glasses off"; everything below
+# (VIRT displays, sweep, mirage, teardown) is identical for both.
+mon_json() { hyprctl monitors all -j; }
+pick_mon() { python3 -c 'import sys,json
+ms=json.load(sys.stdin)
+import os
+mode=os.environ["PICK"]
+def desc(m): return (m.get("description") or "")+" "+m.get("name","")
+if mode=="glasses":
+    print(next((m["name"] for m in ms if any(k in desc(m) for k in ("SmartGlasses","VITURE","RayNeo"))),""))
+else:
+    print(next((m["name"] for m in ms if not m["name"].startswith("VIRT")),""))'; }
+GLASSES="$(mon_json | PICK=glasses pick_mon 2>/dev/null)"
+LAPTOP="$(mon_json | PICK=laptop  pick_mon 2>/dev/null)"
+if [ -n "$GLASSES" ]; then HAS_GLASSES=1; TARGET="$GLASSES"; else HAS_GLASSES=0; TARGET="$LAPTOP"; fi
+echo "[glasses] mode: $([ "$HAS_GLASSES" = 1 ] && echo "glasses ($GLASSES)" || echo "windowed ($LAPTOP)")"
 
 # Kill any mirage still running so the shortcut always launches THIS build (an
 # old instance left up would otherwise keep rendering with stale behaviour, and
@@ -48,30 +68,39 @@ trap restore EXIT INT TERM
 
 # Hyprland 0.55 uses the Lua (non-legacy) config parser - `hyprctl keyword ...` is
 # rejected there, so every setting goes through the Lua API via `hyprctl eval`.
-echo "[glasses] enabling direct scanout + fullscreen/opaque rule for mirage..."
-hyprctl eval "hl.config({ render = { direct_scanout = 1 } })" >/dev/null
-# Run the glasses at their native 120Hz. On Hyprland 0.55 (aquamarine 0.12) present
-# pacing is rock-solid - measured 120.0fps, 0.00 hitches/sec, worst-frame ~11ms - so
-# the old ~95Hz present wall is gone and GPU draw is <1ms.
-echo "[glasses] locking $GLASSES to 120Hz for a stable vsync..."
-# The Beast only exposes 1920x1080@60 over DP on Asahi (its 120Hz mode FREEZES the
-# apple-drm/DCP driver - never set it). Keep DP-1 at the safe 60Hz mode.
-hyprctl eval "hl.monitor({ output='$GLASSES', mode='1920x1080@60', position='auto', scale=1 })" >/dev/null || true
+if [ "$HAS_GLASSES" = 1 ]; then
+    echo "[glasses] enabling direct scanout + fullscreen/opaque rule for mirage..."
+    hyprctl eval "hl.config({ render = { direct_scanout = 1 } })" >/dev/null
+    # Run the glasses at their native 120Hz. On Hyprland 0.55 (aquamarine 0.12) present
+    # pacing is rock-solid - measured 120.0fps, 0.00 hitches/sec, worst-frame ~11ms - so
+    # the old ~95Hz present wall is gone and GPU draw is <1ms.
+    echo "[glasses] locking $GLASSES to 120Hz for a stable vsync..."
+    # The Beast only exposes 1920x1080@60 over DP on Asahi (its 120Hz mode FREEZES the
+    # apple-drm/DCP driver - never set it). Keep DP-1 at the safe 60Hz mode.
+    hyprctl eval "hl.monitor({ output='$GLASSES', mode='1920x1080@60', position='auto', scale=1 })" >/dev/null || true
+    echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
+    hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
+else
+    # No glasses: direct-scanout needs a dedicated panel, so leave it OFF and let mirage
+    # composite as a normal fullscreen window on the laptop. Don't re-mode anything.
+    echo "[glasses] windowed mode on $LAPTOP — no scanout, no re-mode"
+    hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null
+fi
 # fullscreen is requested by mirage itself; these rules just keep the surface
-# scanout-eligible (opaque, no blur/rounding) and pin it to $GLASSES.
+# opaque/sharp and pin it to the right output ($TARGET = glasses, else laptop) so it
+# never opens on a headless VIRT.
 hyprctl eval "
-hl.window_rule({ match = { class = 'mirage' }, monitor = '$GLASSES' })
+hl.window_rule({ match = { class = 'mirage' }, monitor = '$TARGET' })
 hl.window_rule({ match = { class = 'mirage' }, opacity = '1.0' })
 hl.window_rule({ match = { class = 'mirage' }, no_blur = true })
 hl.window_rule({ match = { class = 'mirage' }, rounding = 0 })
 " >/dev/null
 
-echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
-hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
-
-echo "[glasses] virtual screens + head tracking..."
+echo "[glasses] virtual screens$([ "$HAS_GLASSES" = 1 ] && echo ' + head tracking')..."
 python3 "$HERE/scripts/setup_displays.py" >/dev/null 2>&1 || true
-bash "$HERE/scripts/viture-bridge.sh" >/dev/null 2>&1 || true
+# Head-tracking bridge only makes sense with glasses on; windowed mode looks around
+# with 3/4-finger trackpad swipes (mirage falls back to identity pose without it).
+[ "$HAS_GLASSES" = 1 ] && bash "$HERE/scripts/viture-bridge.sh" >/dev/null 2>&1 || true
 
 # Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
 # captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
@@ -84,7 +113,7 @@ fi
 echo "[glasses] sweeping your windows onto the virtual screens..."
 python3 "$HERE/scripts/sweep.py" sweep 2>&1 | sed 's/^/  [sweep] /' || true
 
-echo "[glasses] launching mirage fullscreen on $GLASSES (trackpad capture is always on; Super+Shift+Q quits)"
+echo "[glasses] launching mirage fullscreen on $TARGET (trackpad capture is always on; Super+Shift+Q quits)"
 # Optional test knobs (empty = built-in defaults). Set MIRAGE_PREDICT_MS=0 to disable
 # forward-prediction, or MIRAGE_WORLDVIO_GAIN=0 to disable world-cam parallax, when isolating.
 PREDICT_MS="${MIRAGE_PREDICT_MS:-}"

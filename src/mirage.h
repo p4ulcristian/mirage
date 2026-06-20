@@ -179,6 +179,7 @@ typedef struct {
     bool   wizard;     /* true = full first-run wizard; false = quick centre only */
     float  still_t;    /* seconds the head has held still (CENTER step)           */
     float  done_t;     /* DONE-flash countdown (s)                               */
+    float  wait_t;     /* seconds spent waiting for a pose signal (CENTER step)  */
     quat   prev;       /* previous head sample, for the stillness speed          */
     bool   have_prev;
 } calib_state;

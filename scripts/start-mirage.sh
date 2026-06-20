@@ -10,8 +10,8 @@
 # which point its trap restores the desktop.
 #
 # Safe to launch from a .desktop file: it inherits the Hyprland session env, so
-# hyprctl works; it logs to /tmp and notifies on the obvious failure (glasses
-# unplugged) rather than dying silently.
+# hyprctl works; it logs to /tmp. Glasses are optional — with them you get the
+# direct-scanout/head-tracking path, without them the same scene runs windowed.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG=/tmp/mirage-launch.log
@@ -20,15 +20,16 @@ echo "=== launch $(cat /proc/uptime | cut -d' ' -f1)s uptime ==="
 
 notify() { command -v notify-send >/dev/null && notify-send "3D Workspaces" "$1" || true; }
 
-# Glasses must be present as a DP output, extended (not mirrored). Match either the
-# RayNeo (description contains "SmartGlasses") or the VITURE Beast (description
-# contains "VITURE"). (The non-desktop quirk is reverted, so they come up as a
-# normal desktop output and direct-scanout drives them - no leasing, no per-session
-# DCP reboot.) If only eDP-1 is advertised, there's nothing to render onto.
-if ! hyprctl monitors all -j | grep -qE 'SmartGlasses|VITURE'; then
-    echo "glasses (DP SmartGlasses / VITURE) not found"
-    notify "Glasses not detected — plug in the RayNeo or VITURE Beast and make sure they're extended, not mirrored."
-    exit 1
+# Glasses are OPTIONAL. If a DP output matching the RayNeo ("SmartGlasses") or the
+# VITURE Beast ("VITURE") is present, glasses.sh takes the direct-scanout + head-
+# tracking path. If not, it runs the SAME scene windowed on the laptop, driven by
+# trackpad swipes instead of the IMU. Either way we continue — one launcher, both
+# modes (put the glasses on / take them off; relaunch picks the right path).
+if hyprctl monitors all -j | grep -qE 'SmartGlasses|VITURE'; then
+    echo "glasses detected — direct-scanout path"
+else
+    echo "no glasses — windowed desktop mode on the laptop"
+    notify "No glasses — running Mirage windowed on the laptop (trackpad swipes to look)."
 fi
 
 # Clean start: if a previous session is still up, stop it and wait for the VIRT
