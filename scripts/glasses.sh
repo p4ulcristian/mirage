@@ -34,6 +34,9 @@ GLASSES="$(mon_json | PICK=glasses pick_mon 2>/dev/null)"
 LAPTOP="$(mon_json | PICK=laptop  pick_mon 2>/dev/null)"
 if [ -n "$GLASSES" ]; then HAS_GLASSES=1; TARGET="$GLASSES"; else HAS_GLASSES=0; TARGET="$LAPTOP"; fi
 echo "[glasses] mode: $([ "$HAS_GLASSES" = 1 ] && echo "glasses ($GLASSES)" || echo "windowed ($LAPTOP)")"
+# Windowed mode parks mirage on its own laptop workspace (off the wall's ws 1..9 and the
+# physical ws 90 that setup_displays uses) so the VIRT 'default' workspaces can't steal it.
+MIRAGE_WS=80
 
 # Kill any mirage still running so the shortcut always launches THIS build (an
 # old instance left up would otherwise keep rendering with stale behaviour, and
@@ -57,6 +60,8 @@ restore() {
     echo "[glasses] restoring desktop..."
     python3 "$HERE/scripts/sweep.py" restore >/dev/null 2>&1 || true
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null 2>&1 || true
+    # Drop mirage's dedicated windowed-mode workspace so it doesn't linger empty+persistent.
+    hyprctl eval "hl.workspace_rule({ workspace='${MIRAGE_WS:-80}', monitor='${LAPTOP:-eDP-1}', default=false, persistent=false })" >/dev/null 2>&1 || true
     bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
     if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
         # waybar is a systemd user service (Restart=always); restart it through
@@ -80,17 +85,23 @@ if [ "$HAS_GLASSES" = 1 ]; then
     hyprctl eval "hl.monitor({ output='$GLASSES', mode='1920x1080@60', position='auto', scale=1 })" >/dev/null || true
     echo "[glasses] parking cursor on the laptop (Asahi has no HW cursor plane)..."
     hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x=300, y=300 }))" >/dev/null
+    PLACE="monitor = '$GLASSES'"            # the glasses output is visible; pin mirage there
 else
     # No glasses: direct-scanout needs a dedicated panel, so leave it OFF and let mirage
     # composite as a normal fullscreen window on the laptop. Don't re-mode anything.
     echo "[glasses] windowed mode on $LAPTOP — no scanout, no re-mode"
     hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null
+    # Bind mirage's dedicated workspace to the laptop. A monitor pin alone loses a race
+    # against the VIRT outputs (default=true on ws 1..9), landing mirage's fullscreen on a
+    # headless VIRT - invisible, while it grabs the trackpad -> "wrong workspace, no mouse".
+    # A workspace pin places deterministically; we switch the laptop to it just before launch.
+    hyprctl eval "hl.workspace_rule({ workspace='$MIRAGE_WS', monitor='$LAPTOP', default=true, persistent=true })" >/dev/null
+    PLACE="workspace = '$MIRAGE_WS'"        # pin mirage to its laptop workspace
 fi
-# fullscreen is requested by mirage itself; these rules just keep the surface
-# opaque/sharp and pin it to the right output ($TARGET = glasses, else laptop) so it
-# never opens on a headless VIRT.
+# fullscreen is requested by mirage itself; these rules keep the surface opaque/sharp and
+# place it where it's visible ($PLACE) so it never lands on a headless VIRT.
 hyprctl eval "
-hl.window_rule({ match = { class = 'mirage' }, monitor = '$TARGET' })
+hl.window_rule({ match = { class = 'mirage' }, $PLACE })
 hl.window_rule({ match = { class = 'mirage' }, opacity = '1.0' })
 hl.window_rule({ match = { class = 'mirage' }, no_blur = true })
 hl.window_rule({ match = { class = 'mirage' }, rounding = 0 })
@@ -123,5 +134,21 @@ export MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}"
 [ -n "$PREDICT_MS" ]    && export MIRAGE_PREDICT_MS="$PREDICT_MS"
 [ -n "$WORLDVIO_GAIN" ] && export MIRAGE_WORLDVIO_GAIN="$WORLDVIO_GAIN"
 # DIAG (off): export MIRAGE_VIEW_TRACE=1 -> per-frame view trace to /tmp/mirage-view-trace.log
+if [ "$HAS_GLASSES" != 1 ]; then
+    # Show mirage's workspace on the laptop NOW, then keep nudging the window onto it for a
+    # few seconds: mirage grabs the trackpad the instant it maps, so if it momentarily lands
+    # on a headless VIRT the pointer is stranded. ./mirage blocks below, so the re-assert
+    # runs in the background and exits as soon as it has placed + focused the window.
+    hyprctl dispatch focusmonitor "$LAPTOP" >/dev/null 2>&1 || true
+    hyprctl dispatch workspace "$MIRAGE_WS" >/dev/null 2>&1 || true
+    ( for _ in $(seq 1 20); do
+        if hyprctl clients -j | grep -q '"class": *"mirage"'; then
+            hyprctl dispatch focuswindow class:mirage >/dev/null 2>&1
+            hyprctl dispatch movetoworkspace "$MIRAGE_WS" >/dev/null 2>&1
+            break
+        fi
+        sleep 0.2
+      done ) &
+fi
 ./mirage >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
