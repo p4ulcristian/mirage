@@ -1559,6 +1559,9 @@ void render_frame(struct mirage *m, quat head) {
      * smoothly back to the rock-solid neck model. No mode switch - it always does its best. */
     vec3 eye_world = q_rotate(head, v3(0.0f, m->cfg.neck_up_m, -m->cfg.neck_fwd_m));
     eye_world = v3_add(eye_world, worldvio_eye_offset());
+    /* 4-finger vertical swipe dollies the eye straight up/down the cylinder axis (the
+     * wall is fixed): a world-space vertical translation, not rotated by the head. */
+    eye_world.y += m->world_lift;
     mat4 view = m4_mul(m4_from_quat(q_conj(head)),     /* world -> head rotation */
                        m4_translate(v3_scale(eye_world, -1.0f)));  /* then -eye  */
     mat4 vp   = m4_mul(proj, view);

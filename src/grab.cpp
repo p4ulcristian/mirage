@@ -556,11 +556,14 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
                 do_zoom(g, -gdy);
             }
         } else if (nf == 4) {
-            /* 4-finger VERTICAL = swing the whole wall up/down about the eye (pitch). */
-            g->m->world_pitch -= (float)(gdy * WORLD_SPIN_SCALE);      /* swipe up -> swing up */
-            const float WP_LIM = 1.30f;                                /* ~75 deg clamp */
-            if (g->m->world_pitch >  WP_LIM) g->m->world_pitch =  WP_LIM;
-            if (g->m->world_pitch < -WP_LIM) g->m->world_pitch = -WP_LIM;
+            /* 4-finger VERTICAL = dolly the eye up/down the cylinder axis (we're inside a
+             * cylinder, so this beats swinging the wall). swipe up -> rise. Scale tracks the
+             * wall radius so the on-screen travel matches the old swing's feel at the wall. */
+            float lscale = g->m->cfg.screen_distance_m * WORLD_SPIN_SCALE;
+            g->m->world_lift += (float)(gdy * lscale);                  /* swipe up -> eye down */
+            const float WL_LIM = 1.50f;                                 /* +/-1.5 m of travel */
+            if (g->m->world_lift >  WL_LIM) g->m->world_lift =  WL_LIM;
+            if (g->m->world_lift < -WL_LIM) g->m->world_lift = -WL_LIM;
         }
         break;
     }

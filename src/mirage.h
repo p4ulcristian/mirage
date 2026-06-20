@@ -263,9 +263,11 @@ struct mirage {
                             * driven by 3-finger horizontal swipe (grab.c). Added to every
                             * screen's placement, so render + cursor picking spin as
                             * one; the cursor's own direction stays in fixed space. */
-    float world_pitch;     /* vertical SWING of the whole wall about the eye (rotation about
-                            * the eye's right axis), driven by 3-finger vertical swipe. Applied
-                            * in layout_model_matrix (render) and layout_pick (cursor) together. */
+    float world_lift;      /* vertical TRANSLATION of the eye along the cylinder axis (metres,
+                            * +up), driven by 4-finger vertical swipe. We're inside a cylinder, so
+                            * dollying the eye up/down feels right where swinging the wall did not.
+                            * Added to eye_world.y in render; layout_pick offsets the cursor height
+                            * by it so clicks stay aligned. */
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */

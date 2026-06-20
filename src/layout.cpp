@@ -201,13 +201,10 @@ mat4 layout_model_matrix(const struct mirage *m, int i) {
     layout_place(m, i, &yaw, &lift, &arc);
     mat4 R = m4_from_quat(q_from_euler_ypr(yaw, 0, 0));
     mat4 T = m4_translate(v3(0.0f, lift, 0.0f));
-    mat4 model = m4_mul(T, R);
-    /* world_pitch swings the whole wall up/down about the eye (rotation about the eye's
-     * right axis, applied OUTSIDE the per-screen placement so every screen rotates as one).
-     * layout_pick mirrors it via the cursor pitch so clicks stay aligned. */
-    if (m->world_pitch != 0.0f)
-        model = m4_mul(m4_from_quat(q_from_euler_ypr(0.0f, m->world_pitch, 0.0f)), model);
-    return model;
+    /* The wall is fixed; vertical look-around is a dolly of the EYE along the cylinder
+     * axis (m->world_lift), applied to eye_world in render.cpp - so nothing happens to
+     * the per-screen placement here. layout_pick mirrors it via the cursor height. */
+    return m4_mul(T, R);
 }
 
 /* The camera orientation that puts display `i` dead-centre: its column yaw, and a
@@ -216,7 +213,9 @@ void layout_focus_angles(const struct mirage *m, int i, float *yaw, float *pitch
     float y, lift, arc;
     layout_place(m, i, &y, &lift, &arc);
     *yaw   = y;
-    *pitch = atan2f(lift, m->cfg.screen_distance_m);
+    /* eye sits world_lift above the axis, so the pitch to a screen at height `lift` is
+     * measured from the lifted eye - keeps shake-to-gaze centred after a vertical dolly. */
+    *pitch = atan2f(lift - m->world_lift, m->cfg.screen_distance_m);
 }
 
 /* Pointer pick - the input twin of layout_model_matrix. Screens sit on one cylinder
@@ -241,9 +240,10 @@ int layout_pick(const struct mirage *m, float cyaw, float cpitch,
     if (inside_out) *inside_out = false;
     if (n <= 0) return -1;
     float d   = c->screen_distance_m;
-    /* Subtract the wall's vertical swing so the cursor picks the screen that visually sits
-     * under it (exact at centre yaw; the small off-centre error is sub-screen at sane swings). */
-    float hgt = d * tanf(cpitch - m->world_pitch);
+    /* A look ray from the (vertically dollied) eye at pitch cpitch hits the cylinder of
+     * radius d at world height world_lift + d*tan(cpitch); screens are placed at world
+     * height `lift`, so add the eye lift here to keep clicks under the cursor. */
+    float hgt = m->world_lift + d * tanf(cpitch);
 
     /* 1) direct hit: deepest-inside screen wins (no first-index bias on overlaps). */
     int best = -1; float best_margin = -1e30f, bu = 0, bv = 0;
