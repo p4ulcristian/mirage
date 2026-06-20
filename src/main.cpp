@@ -162,8 +162,28 @@ static int classify_outputs(void) {
         M.glasses_w = M.pending[glasses].w;
         M.glasses_h = M.pending[glasses].h;
     } else {
-        M.glasses_name = "windowed";
-        M.glasses_w = WIN_W; M.glasses_h = WIN_H;
+        /* Windowed (no glasses): target the laptop's OWN output explicitly. Passing NULL to
+         * set_fullscreen below lets the compositor choose, and with the headless VIRT outputs
+         * present it picks one of those about half the time - mirage then maps invisibly on a
+         * VIRT while it grabs the trackpad ("every second start I don't see mirage, mouse
+         * stuck"). Pin fullscreen to the real (non-VIRT) output - prefer the built-in panel -
+         * so it lands on a monitor that's actually being shown. Same deterministic path the
+         * glasses branch uses; no post-launch workspace juggling needed. */
+        int lap = -1;
+        for (int i = 0; i < M.n_pending; i++) {
+            if (M.pending[i].name.rfind("VIRT", 0) == 0) continue;   /* skip virtual screens */
+            if (lap < 0) lap = i;                                    /* first real output     */
+            if (M.pending[i].name.rfind("eDP", 0) == 0) { lap = i; break; }  /* prefer laptop panel */
+        }
+        if (lap >= 0) {
+            M.glasses_out  = M.pending[lap].wl;
+            M.glasses_name = M.pending[lap].name;     /* e.g. eDP-1 */
+            M.glasses_w    = M.pending[lap].w;
+            M.glasses_h    = M.pending[lap].h;
+        } else {
+            M.glasses_name = "windowed";
+            M.glasses_w = WIN_W; M.glasses_h = WIN_H;
+        }
     }
 
     /* virtual screens: outputs named VIRT*, in name order */
