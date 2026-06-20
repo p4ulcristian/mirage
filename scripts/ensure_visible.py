@@ -51,6 +51,7 @@ def main():
     while time.monotonic() < deadline:
         try:
             c = mirage_client()
+            mons_l = hctl("monitors")
         except Exception as e:                       # hyprctl hiccup; keep trying
             log(f"hyprctl error: {e}")
             time.sleep(0.3)
@@ -59,28 +60,35 @@ def main():
             time.sleep(0.2)
             continue
 
-        mons = {m["id"]: m for m in hctl("monitors")}
-        mon = mons.get(c["monitor"])
-        monname = mon["name"] if mon else "?"
-        ws = c["workspace"]["id"]
-        shown = mon["activeWorkspace"]["id"] if mon else None
-        log(f"mirage on monitor={monname} ws={ws}; {monname} shows ws={shown}")
-
-        if monname.startswith("VIRT"):
-            log(f"  mirage stranded on a headless VIRT -> pulling to {LAPTOP}")
-            dispatch("focuswindow", "class:mirage")
-            dispatch("movewindow", f"mon:{LAPTOP}")
-            time.sleep(0.4)
-            continue
-        if shown != ws:
-            log(f"  {LAPTOP} not showing mirage's workspace -> switching view to ws{ws}")
-            dispatch("focusmonitor", LAPTOP)
-            dispatch("workspace", str(ws))
+        by_id = {m["id"]: m for m in mons_l}
+        by_name = {m["name"]: m for m in mons_l}
+        lap = by_name.get(LAPTOP)
+        if not lap:
+            log(f"  laptop output {LAPTOP} not present?! monitors={list(by_name)}")
             time.sleep(0.3)
             continue
+        target_ws = lap["activeWorkspace"]["id"]     # the workspace the laptop is showing
+        mon = by_id.get(c["monitor"])
+        monname = mon["name"] if mon else "?"
+        ws = c["workspace"]["id"]
+        addr = c.get("address", "")
+        log(f"mirage on monitor={monname} ws={ws}; {LAPTOP} shows ws={target_ws}")
 
-        log("  mirage visible on the laptop - OK")
-        return
+        if monname == LAPTOP and ws == target_ws:
+            log("  mirage visible on the laptop - OK")
+            return
+
+        # Not visible: move mirage onto whatever workspace the laptop is currently showing.
+        # Move BY ADDRESS (works on fullscreen windows where `movewindow mon:` did not), and
+        # drop fullscreen first if it's blocking the move, then restore it.
+        log(f"  relocating mirage ({addr}) -> {LAPTOP} ws{target_ws}")
+        dispatch("focuswindow", f"address:{addr}")
+        dispatch("setfloating", f"address:{addr}", "0")
+        dispatch("movetoworkspacesilent", f"{target_ws},address:{addr}")
+        dispatch("focusmonitor", LAPTOP)
+        dispatch("workspace", str(target_ws))
+        dispatch("fullscreen", "0")                  # ensure it's fullscreen on the laptop
+        time.sleep(0.4)
     log("--- ensure_visible end: gave up (mirage never confirmed visible) ---")
 
 

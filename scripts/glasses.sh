@@ -159,9 +159,13 @@ export MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}"
 [ -n "$PREDICT_MS" ]    && export MIRAGE_PREDICT_MS="$PREDICT_MS"
 [ -n "$WORLDVIO_GAIN" ] && export MIRAGE_WORLDVIO_GAIN="$WORLDVIO_GAIN"
 # DIAG (off): export MIRAGE_VIEW_TRACE=1 -> per-frame view trace to /tmp/mirage-view-trace.log
-# Windowed safety net: mirage targets the laptop output itself, but if it ever comes up
-# on the wrong/hidden workspace, force the laptop to show it and log what happened to
-# /tmp/mirage-placement.log. Background, since ./mirage blocks. No-op when already visible.
-[ "$HAS_GLASSES" != 1 ] && ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) &
+if [ "$HAS_GLASSES" != 1 ]; then
+    # You may be focused on a low workspace (e.g. ws1) that a VIRT just claimed, which
+    # drags focus onto that headless VIRT - mirage then maps THERE, not the laptop, and
+    # you get "dropped to an empty workspace, can't see mirage". Force focus to the laptop
+    # right before launch so mirage maps on it. ensure_visible.py is the backup + the log.
+    hyprctl dispatch focusmonitor "$LAPTOP" >/dev/null 2>&1 || true
+    ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) &
+fi
 ./mirage >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
