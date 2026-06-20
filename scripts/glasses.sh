@@ -159,5 +159,9 @@ export MIRAGE_WORLDVIO="${MIRAGE_WORLDVIO:-cv}"
 [ -n "$PREDICT_MS" ]    && export MIRAGE_PREDICT_MS="$PREDICT_MS"
 [ -n "$WORLDVIO_GAIN" ] && export MIRAGE_WORLDVIO_GAIN="$WORLDVIO_GAIN"
 # DIAG (off): export MIRAGE_VIEW_TRACE=1 -> per-frame view trace to /tmp/mirage-view-trace.log
+# Windowed safety net: mirage targets the laptop output itself, but if it ever comes up
+# on the wrong/hidden workspace, force the laptop to show it and log what happened to
+# /tmp/mirage-placement.log. Background, since ./mirage blocks. No-op when already visible.
+[ "$HAS_GLASSES" != 1 ] && ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) &
 ./mirage >/tmp/mirage.log 2>&1
 # mirage exited -> trap restore runs
