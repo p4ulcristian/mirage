@@ -1,5 +1,6 @@
 #include "mirage.h"
 #include "pose.h"
+#include "pet.h"
 #include "handle.hpp"
 #include "entity.hpp"
 #include "camera.h"
@@ -851,6 +852,7 @@ mirage_status render_init(struct mirage *m) {
     g_banners.push_back(make_clock_banner());
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
+    pet_init(m);    /* mischievous reactive pet (self-contained; pet.cpp) */
 
     std::print(stderr, "render: EGL {}.{}, GL_RENDERER={}\n", major, minor,
             (const char*)glGetString(GL_RENDERER));
@@ -1328,33 +1330,53 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out) {
  * first, depth-test off, so the windows/wall composite on top. Returns true if a
  * passthrough background was drawn (so the caller can skip the env dome). */
 static bool draw_passthrough(struct mirage *m, quat head) {
-    const char *dev = getenv("MIRAGE_CAM_DEV");
-    if (!dev) dev = "/dev/video1";                 /* Beast world-cam (laptop = video0) */
-
     /* The world cam is wanted for passthrough display AND for 6DoF-lite optical flow,
      * so keep it open if either needs it (one owner, no double-open). */
     bool pass = (m->bg_mode == BG_PASSTHROUGH);
     bool vio  = true;            /* single fused mode: the optical-flow estimator always runs */
     bool want = pass || vio;
-    if (want && !m->cam) {
-        m->cam = cam_start(dev, 1280, 720);
-        if (!m->cam) { if (pass) m->bg_mode = BG_HDRI; std::print(stderr, "world cam unavailable\n"); }
-        else worldvio_reset();
-    } else if (!want && m->cam) {
-        cam_stop(m->cam); m->cam = nullptr; R.cam_alloc_w = R.cam_alloc_h = 0;
+
+    struct timespec ct; clock_gettime(CLOCK_MONOTONIC, &ct);
+    double t = ct.tv_sec + ct.tv_nsec * 1e-9;
+    static double cam_next_try   = 0.0;   /* throttle (re)open attempts to ~1/s   */
+    static double cam_last_fresh = 0.0;   /* stall->reopen watchdog (0 = no cam)  */
+
+    /* Drop the camera when nobody wants it, when its capture thread died on a device
+     * error (the Beast USB-reset / renumbered out from under the fd), or when it's
+     * gone silent (USB wedged with no poll error - no frame for >1.5s). The old code
+     * opened a hard-coded /dev/video1 once and never re-checked, so any of these left
+     * the passthrough frozen on its last frame forever. Now: stop here, reopen below. */
+    bool dead = m->cam && cam_failed(m->cam);
+    bool stalled = m->cam && cam_last_fresh > 0 && (t - cam_last_fresh > 1.5);
+    if (m->cam && (!want || dead || stalled)) {
+        if (want) std::print(stderr, "camera: lost ({}) - reopening\n",
+                             dead ? "device error" : "no frames >1.5s");
+        cam_stop(m->cam); m->cam = nullptr;
+        R.cam_alloc_w = R.cam_alloc_h = 0; R.cam_seq = 0; cam_last_fresh = 0;
+    }
+
+    /* (Re)discover + open. cam_find scans for the current MJPEG world-cam node every
+     * attempt, so a renumbered Beast cam is picked up automatically; the ~1/s throttle
+     * keeps a genuinely-absent cam from reopen-spamming every frame. */
+    if (want && !m->cam && t >= cam_next_try) {
+        cam_next_try = t + 1.0;
+        char dev[32];
+        if (cam_find(dev, sizeof dev)) {
+            m->cam = cam_start(dev, 1280, 720);
+            if (m->cam) { worldvio_reset(); cam_last_fresh = t; }
+        }
+        if (!m->cam && pass) m->bg_mode = BG_HDRI;   /* no cam: show the dome, not black */
     }
     if (!m->cam) return false;
 
     const uint8_t *rgb = nullptr; int cw = 0, ch = 0;
     bool fresh = cam_acquire(m->cam, &rgb, &cw, &ch, &R.cam_seq);
+    if (fresh) cam_last_fresh = t;
 
     /* 6DoF-lite: feed each fresh frame to the optical-flow estimator (with the head
      * orientation, so it can subtract rotation and keep the translation parallax). */
-    if (vio && fresh && rgb) {
-        struct timespec ct; clock_gettime(CLOCK_MONOTONIC, &ct);
-        double t = ct.tv_sec + ct.tv_nsec * 1e-9;
+    if (vio && fresh && rgb)
         worldvio_feed(rgb, cw, ch, head, t, 70.0f /* Beast world-cam HFOV est; tune */);
-    }
 
     if (!pass) return false;   /* 6DoF-only: camera ran for tracking, no passthrough draw */
 
@@ -1643,6 +1665,11 @@ void render_frame(struct mirage *m, quat head) {
     if (fade) glDisable(GL_BLEND);
     glUniform1f(R.uOpacity, 1.0f);   /* restore: plaques/HUD/cursor stay opaque */
 
+    /* The mischievous pet: a world-space critter drawn among the screens (depth-
+     * tested, so it occludes / is occluded correctly). Fully self-contained in
+     * pet.cpp; reacts to whether `head` is pointed at it. */
+    pet_draw(m, vp, eye_world, head);
+
     /* Banner entities (clock, status lines, ...): refresh each (re-bakes only when
      * its key changes) and draw it at its place on the cylinder. World-fixed, so
      * they pan with the wall as you look around. */
@@ -1724,6 +1751,7 @@ void render_finish(struct mirage *m) {
     R.prog.reset();   R.vbo.reset();
     R.dome_prog.reset(); R.dome_vbo.reset(); R.hdri_tex.reset();
     R.cam_tex.reset();
+    pet_finish();            /* free the pet's GL program/buffer while the context is live */
     g_hud_plaques.clear();   /* free the Clay HUD's baked plaques while the GL context is live */
     worldvio_stop();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */

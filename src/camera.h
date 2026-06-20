@@ -15,6 +15,16 @@ struct cam;                                  /* opaque */
 /* Start streaming dev at WxH (MJPEG). Returns nullptr on any failure (logs why). */
 cam *cam_start(const char *dev, int w, int h);
 
+/* Find the world-facing camera node into dev_out (size >= 32). The Beast's UVC cam
+ * renumbers across USB resets, so this scans for an MJPEG capture node (skipping the
+ * laptop ISP cam and UVC metadata nodes) rather than trusting a fixed /dev/videoN.
+ * $MIRAGE_CAM_DEV overrides the scan. Returns false if none found. */
+bool cam_find(char *dev_out, int dev_out_sz);
+
+/* True once the capture thread has exited on a device error (the Beast vanished/
+ * renumbered) - the render side polls this to know it must stop + reopen. */
+bool cam_failed(cam *c);
+
 /* Stop the thread and release the device. */
 void cam_stop(cam *c);
 

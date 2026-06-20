@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <cerrno>
 
 #include <fcntl.h>
@@ -31,6 +32,7 @@ struct cam {
 
     std::thread       th;
     std::atomic<bool> run{false};
+    std::atomic<bool> failed{false};   /* capture thread exited on a device error */
 
     std::mutex            mtx;          /* guards the triple-buffer indices + seq */
     std::vector<uint8_t>  rgb[3];
@@ -48,7 +50,15 @@ static void capture_loop(cam *c) {
     while (c->run.load(std::memory_order_relaxed)) {
         struct pollfd pfd{ c->fd, POLLIN, 0 };
         int pr = poll(&pfd, 1, 200);                 /* 200ms so stop() is responsive */
-        if (pr <= 0) continue;                       /* timeout or signal: re-check run */
+        if (pr < 0) { if (errno == EINTR) continue; c->failed.store(true); break; }
+        if (pr == 0) continue;                       /* timeout: re-check run */
+        /* poll() always reports POLLERR/POLLHUP/POLLNVAL regardless of .events. When
+         * the device errors out (e.g. the Beast USB-resets/renumbers and this fd's
+         * camera vanishes) poll returns immediately with one of these set but no
+         * POLLIN - the old `!(revents & POLLIN) continue` then busy-spun a whole core,
+         * starving the render thread and dragging mirage from 120 to ~60fps. Flag the
+         * device as dead (so the render side reopens it) and exit cleanly. */
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) { c->failed.store(true); break; }
         if (!(pfd.revents & POLLIN)) continue;
 
         v4l2_buffer b{};
@@ -56,7 +66,7 @@ static void capture_loop(cam *c) {
         b.memory = V4L2_MEMORY_MMAP;
         if (xioctl(c->fd, VIDIOC_DQBUF, &b) < 0) {
             if (errno == EAGAIN) continue;
-            break;                                   /* device went away */
+            c->failed.store(true); break;            /* device went away */
         }
 
         uint8_t *dst = c->rgb[c->idx_write].data();
@@ -156,4 +166,54 @@ bool cam_acquire(cam *c, const uint8_t **rgb, int *w, int *h, uint64_t *seq) {
     *rgb = c->rgb[c->idx_disp].data();
     *w = c->w; *h = c->h; *seq = c->seq;
     return true;
+}
+
+bool cam_failed(cam *c) { return c && c->failed.load(std::memory_order_relaxed); }
+
+/* Locate the world-facing camera node. The Beast cam is a UVC device whose /dev/videoN
+ * number is NOT stable - a Beast USB reset/replug (or just boot order) renumbers it
+ * (we've seen it move video1 -> video2), and UVC also exposes a second metadata-only
+ * node next to the real one. So never hard-code a number: scan for a VIDEO_CAPTURE node
+ * that actually streams MJPEG and isn't the laptop's built-in ISP/FaceTime camera.
+ * $MIRAGE_CAM_DEV overrides the scan (set it to force a specific node). */
+bool cam_find(char *dev_out, int dev_out_sz) {
+    if (const char *e = getenv("MIRAGE_CAM_DEV"); e && *e) {
+        std::snprintf(dev_out, (size_t)dev_out_sz, "%s", e);
+        return true;
+    }
+    for (int i = 0; i < 64; i++) {
+        char path[32];
+        std::snprintf(path, sizeof path, "/dev/video%d", i);
+        int fd = open(path, O_RDWR | O_NONBLOCK, 0);
+        if (fd < 0) continue;
+
+        v4l2_capability capb{};
+        bool ok = false;
+        /* device_caps is per-node (distinguishes the real capture node from the UVC
+         * metadata node); fall back to the device-wide capabilities if a driver leaves
+         * it 0. The MJPEG check below is the real discriminator either way. */
+        uint32_t caps = 0;
+        if (xioctl(fd, VIDIOC_QUERYCAP, &capb) == 0)
+            caps = capb.device_caps ? capb.device_caps : capb.capabilities;
+        if ((caps & V4L2_CAP_VIDEO_CAPTURE) &&
+            std::strstr((const char *)capb.driver, "apple-isp") == nullptr) {
+            /* require MJPEG - the real capture node enumerates it; the UVC metadata
+             * node (and the laptop ISP) won't, so they fall through. */
+            for (int fi = 0; ; fi++) {
+                v4l2_fmtdesc fmt{};
+                fmt.index = (unsigned)fi;
+                fmt.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                if (xioctl(fd, VIDIOC_ENUM_FMT, &fmt) < 0) break;
+                if (fmt.pixelformat == V4L2_PIX_FMT_MJPEG) { ok = true; break; }
+            }
+        }
+        close(fd);
+        if (ok) {
+            std::snprintf(dev_out, (size_t)dev_out_sz, "%s", path);
+            std::fprintf(stderr, "camera: found world cam at %s\n", path);
+            return true;
+        }
+    }
+    std::fprintf(stderr, "camera: no MJPEG world cam found (scanned /dev/video0..63)\n");
+    return false;
 }
