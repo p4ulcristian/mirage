@@ -133,6 +133,11 @@ static struct {
  * space alongside the displays. First slice of the scene; Model/Webapp join later. */
 static std::vector<ent::Banner> g_banners;
 
+/* Per-screen "#N" labels: one Banner centred above each screen. Rebuilt when the
+ * screen count changes (layout switch); repositioned live every frame so they spin
+ * with the wall and hold their place above the screen on a dolly. */
+static std::vector<ent::Banner> g_screen_labels;
+
 /* unit quad in XY plane: pos.xyz, uv.xy (interleaved), triangle strip */
 static const GLfloat QUAD[] = {
     /*  x      y     z     u    v  */
@@ -412,17 +417,25 @@ static int hud_plaque_h(int lines) {
 
 /* Rasterise `str` (may contain '\n') into a fresh RGBA texture: fg glyphs over a
  * dark plaque. Monospace, so stacked lines column-align. Stores dims in *ow,*oh. */
-static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, int *oh) {
+static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, int *oh, float ss = 1.0f) {
     const HudFont &f = hud_font();
+    /* ss>1 supersamples the bake: glyphs rasterise at ss*HUD_PX so a banner hung
+     * large on the wall stays crisp instead of magnifying a 44px cell ~3x. Every
+     * metric scales linearly with pixel height, so ss=1 is byte-identical to before. */
+    int   pad    = (int)(HUD_PAD    * ss + 0.5f);
+    int   lgap   = (int)(HUD_LGAP   * ss + 0.5f);
+    int   adv    = f.ok ? (int)(f.advance_px * ss + 0.5f) : 1;
+    int   line_h = (int)(f.line_h    * ss + 0.5f);
+    int   ascent = (int)(f.ascent_px * ss + 0.5f);
+    float gscale = f.scale * ss;
     int lines = 1, cur = 0, maxlen = 0;
     for (const char *p = str; *p; p++) {
         if (*p == '\n') { if (cur > maxlen) maxlen = cur; cur = 0; lines++; }
         else cur++;
     }
     if (cur > maxlen) maxlen = cur;
-    int adv = f.ok ? f.advance_px : 1;
-    int tw = HUD_PAD*2 + maxlen*adv;
-    int th = hud_plaque_h(lines);
+    int tw = pad*2 + maxlen*adv;
+    int th = pad*2 + lines*line_h + (lines > 1 ? lines-1 : 0)*lgap;
     if (tw < 1) tw = 1;
     if (th < 1) th = 1;
     std::vector<unsigned char> px((size_t)tw*th*4);
@@ -436,10 +449,10 @@ static own::GlTexture bake_label(const char *str, const float fg[3], int *ow, in
         int line = 0, col = 0;
         for (const char *p = str; *p; p++) {
             if (*p == '\n') { line++; col = 0; continue; }
-            int baseline = HUD_PAD + line*(f.line_h + HUD_LGAP) + f.ascent_px;
-            int penx     = HUD_PAD + col*adv;
+            int baseline = pad + line*(line_h + lgap) + ascent;
+            int penx     = pad + col*adv;
             int gw, gh, gx, gy;
-            unsigned char *bmp = stbtt_GetCodepointBitmap(&f.info, f.scale, f.scale,
+            unsigned char *bmp = stbtt_GetCodepointBitmap(&f.info, gscale, gscale,
                                      (unsigned char)*p, &gw, &gh, &gx, &gy);
             if (bmp) {
                 for (int yy = 0; yy < gh; yy++)
@@ -478,7 +491,7 @@ static void banner_refresh(ent::Banner &b, float d) {
     int k = b.key ? b.key() : 0;
     if (k == b.last_key && b.verts > 0) return;          /* content unchanged */
     b.last_key = k;
-    b.tex = bake_label(b.text ? b.text().c_str() : "", b.color, &b.tw, &b.th);
+    b.tex = bake_label(b.text ? b.text().c_str() : "", b.color, &b.tw, &b.th, 4.0f);
 
     float ang = b.arc * (float)M_PI/180.0f;
     float w   = d * ang;                                 /* on-wall width (arc len) */
@@ -524,6 +537,17 @@ static void banner_draw(const ent::Banner &b, const mat4 &vp) {
 /* The clock: the first Banner entity. Two lines (HH:MM:SS over an upper-cased
  * date), centred, warm amber, hung above the wall. Add more banners by pushing
  * more ent::Banner with their own text()/key()/placement. */
+/* A "#N" label for screen i: a narrow Banner, calm cyan to set it apart from the
+ * amber clock. Constant text -> baked once; placement is set live each frame. */
+static ent::Banner make_screen_label(int i) {
+    ent::Banner b;
+    b.arc = 6.0f;
+    b.color[0] = 0.55f; b.color[1] = 0.78f; b.color[2] = 0.90f;
+    std::string s = "#" + std::to_string(i + 1);
+    b.text = [s] { return s; };
+    return b;
+}
+
 static ent::Banner make_clock_banner(void) {
     ent::Banner b;
     b.yaw = 0.0f; b.lift = 2.8f; b.arc = 30.0f;
@@ -1682,6 +1706,34 @@ void render_frame(struct mirage *m, quat head) {
         banner_draw(b, vp);
     }
 
+    /* Per-screen "#N" labels, centred above each screen. (Re)build one per screen
+     * when the count changes, then position each from its screen's LIVE placement -
+     * yaw carries world_yaw (spins with the wall), lift is the screen's own height
+     * (so the label holds above the top edge through a 4-finger dolly). */
+    if ((int)g_screen_labels.size() != n) {
+        g_screen_labels.clear();
+        for (int i = 0; i < n; i++) g_screen_labels.push_back(make_screen_label(i));
+    }
+    for (int i = 0; i < n && i < (int)g_screen_labels.size(); i++) {
+        ent::Banner &b = g_screen_labels[i];
+        const float d = m->cfg.screen_distance_m;
+        float yaw, lift, arc; layout_place(m, i, &yaw, &lift, &arc);
+        float ang    = arc * (float)M_PI/180.0f;
+        screen_t *s  = &m->screen[i];
+        float aspect = (s->width > 0 && s->height > 0) ? (float)s->height / (float)s->width : 9.0f/16.0f;
+        /* screen half-height, matching the mesh: flat = d*tan(arc/2)*aspect,
+         * curved strip = d*arc*aspect/2 (the formulas build_flat/curved_mesh use). */
+        float hh = (m->cfg.geometry == GEOM_FLAT)
+                 ? d * tanf(ang * 0.5f) * aspect
+                 : d * ang * aspect * 0.5f;
+        banner_refresh(b, d);   /* bake first so b.tw/b.th give the label's own height */
+        float lang = b.arc * (float)M_PI/180.0f;
+        float lh   = (b.tw > 0) ? d * lang * (float)b.th / (float)b.tw : 0.0f;  /* label height (m) */
+        b.yaw  = yaw;
+        b.lift = lift + hh + lh * 0.5f;   /* label's BOTTOM edge sits exactly on the screen's top edge (glued, no gap) */
+        banner_draw(b, vp);
+    }
+
     /* In-glasses control HUD (Clay): FPS + cheat-sheet + sensitivity/brightness/
      * transparency sliders + layout/env switchers + geometry/bg/tilt toggles, hung
      * under the centre screen. Lays out, draws, and refreshes the grab.c snapshot. */
@@ -1762,6 +1814,7 @@ void render_finish(struct mirage *m) {
     worldvio_stop();
     if (m->cam) { cam_stop(m->cam); m->cam = nullptr; }   /* stop the capture thread */
     g_banners.clear();   /* frees each banner's vbo/tex while the context is live */
+    g_screen_labels.clear();
     for (int i = 0; i < m->n_screen; i++) {
         if (m->screen[i].mesh_vbo) { glDeleteBuffers(1, &m->screen[i].mesh_vbo); m->screen[i].mesh_vbo = 0; }
     }
