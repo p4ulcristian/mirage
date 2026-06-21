@@ -298,6 +298,9 @@ struct mirage {
      * passthrough) through it. 1.0 = fully opaque (as before). */
     float       screen_opacity;
     bool running;
+    /* idle throttle: capture_poll sets this when a fresh frame binds (real desktop
+     * damage), so the main loop knows the picture changed and stays at full rate. */
+    bool content_changed;
 };
 
 #define MIRAGE_ZOOM_MIN 0.5f
@@ -480,6 +483,7 @@ bool sens_panel_compute(const struct mirage *m, sens_panel *out);
 bool grab_init(struct mirage *m);
 void grab_toggle(struct mirage *m);   /* enter/leave capture mode (Super+G)    */
 void grab_pump(struct mirage *m);     /* drain trackpad events (every frame)   */
+int  grab_fd(struct mirage *m);       /* libinput fd (poll it to wake on input), -1 if inactive */
 bool grab_active(struct mirage *m);
 int  grab_cursor_screen(struct mirage *m);  /* focused screen idx, -1 if none   */
 void grab_destroy(struct mirage *m);

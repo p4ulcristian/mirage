@@ -211,13 +211,23 @@ apply_mode() {  # $1 = glasses|windowed ; uses $GLASSES / $LAPTOP set by the loo
         hyprctl eval "hl.config({ render = { direct_scanout = 0 } })" >/dev/null
         stop_bridge                   # no IMU to read; mirage falls back to trackpad/identity
         move_ws90 "$LAPTOP"           # mirage (pinned to ws90) lands on the laptop
-        # Freeze focus-follows-mouse: your cursor sitting over a terminal that the sweep
-        # dragged onto a headless VIRT would otherwise pull focus there and mirage would map
-        # on the invisible VIRT. The ws90 pin places mirage anyway; this is belt-and-braces.
+        # Freeze focus-follows-mouse FOR THE MAP ONLY: while mirage is mapping, your cursor
+        # sitting over a terminal the sweep dragged onto a headless VIRT would otherwise pull
+        # focus there and mirage (client-fullscreen) would map on the invisible VIRT. The ws90
+        # pin already places it; this is belt-and-braces for the brief map window. We restore
+        # follow_mouse the instant ensure_visible confirms mirage is up (below) - leaving it at
+        # 0 for the whole session would break the 3D pointer: the injected wall cursor moves but
+        # keyboard focus never follows it, so typing lands on the wrong window.
         hyprctl eval "hl.config({ input = { follow_mouse = 0 } })" >/dev/null 2>&1 || true
         hyprctl dispatch focusmonitor "$LAPTOP" >/dev/null 2>&1 || true
         hyprctl dispatch workspace 90 >/dev/null 2>&1 || true   # show ws90 on the laptop
-        ( python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP" ) >/dev/null 2>&1 &
+        (
+            python3 "$HERE/scripts/ensure_visible.py" "$LAPTOP"
+            # mirage is now mapped & visible on the laptop - the map-time focus-drag risk is
+            # over. Unfreeze focus-follows-mouse so the injected 3D-pointer cursor carries
+            # keyboard focus, exactly as it does in glasses mode. Consistent across both modes.
+            hyprctl eval "hl.config({ input = { follow_mouse = ${FOLLOW_MOUSE_ORIG} } })" >/dev/null 2>&1 || true
+        ) >/dev/null 2>&1 &
     fi
 }
 

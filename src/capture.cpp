@@ -385,6 +385,7 @@ bool capture_poll(struct mirage *m) {
             if (ready) {
                 s->have_tex = true;
                 s->tex_dirty = true;   /* render rebuilds the mip chain from the new frame */
+                m->content_changed = true;   /* real desktop damage — keep the idle throttle awake */
                 if (s->image != EGL_NO_IMAGE_KHR) {
                     glBindTexture(GL_TEXTURE_2D, s->tex);
                     p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, s->image);
