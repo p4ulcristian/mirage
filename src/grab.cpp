@@ -199,7 +199,12 @@ static void push_cursor(grab_state *g) {
  * places the panel, so a click lands where the picture shows it. */
 static void sens_cursor_local(grab_state *g, const sens_panel *sp, float *lx, float *ly) {
     *lx = sp->d * tanf(sp->yaw_c - (float)g->cyaw);
-    *ly = sp->d * tanf((float)g->cpitch) - sp->lift_c;
+    /* The cursor's world height is world_lift + d*tan(pitch) - the same height
+     * layout_pick() and the 3D arrow use. The panel sits at lift_c with NO
+     * world_lift baked in (layout_place), so the dolly offset must be added here
+     * too, or every HUD click drifts vertically by world_lift after a 4-finger
+     * dolly (the exact bug 3a6d733 fixed for the arrow, missed here). */
+    *ly = (float)g->m->world_lift + sp->d * tanf((float)g->cpitch) - sp->lift_c;
 }
 
 /* Persist the linked yaw/pitch gain into profile.toml, same path calib.cpp uses, so
