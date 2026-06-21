@@ -541,7 +541,11 @@ void pet_draw(struct mirage *m, mat4 vp, vec3 eye_world, quat head){
         screen_t *s=&m->screen[g_screen];
         float arc = s->arc_deg * (float)M_PI/180.0f;
         float aspect = (s->width>0 && s->height>0) ? (float)s->height/(float)s->width : 9.0f/16.0f;
-        float hw = d*tanf(arc*0.5f), hh = hw*aspect;
+        float hw = d*tanf(arc*0.5f);
+        /* top-edge height, matching the mesh: flat = d*tan(arc/2)*aspect, curved
+         * strip = d*arc*aspect/2 - so he glues to the real edge, not a flat-chord
+         * estimate that floats him off a curved screen (same fix as the #N labels). */
+        float hh = (m->cfg.geometry==GEOM_FLAT) ? hw*aspect : d*arc*aspect*0.5f;
         mat4 M = layout_model_matrix(m, g_screen);
         vec3 TL = xform(M, v3(-hw, hh, -d));
         vec3 TR = xform(M, v3( hw, hh, -d));
