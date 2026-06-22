@@ -11,7 +11,7 @@
 # Quit mirage (Super+Shift+Q, or `pkill -x mirage`) and cursor/scanout come back.
 #
 # ROBUST HOTPLUG: glasses are no longer a launch-time, one-shot decision. This script
-# does the shared setup ONCE (VIRT displays + window sweep + waybar), then runs a
+# does the shared setup ONCE (VIRT displays + window sweep), then runs a
 # supervisor loop that:
 #   - watches whether the glasses output is present (~1Hz, debounced),
 #   - GLASSES PLUGGED  -> direct-scanout + head-tracking bridge on the glasses,
@@ -68,11 +68,6 @@ fi
 # in grab.c) - including preferring the keyd virtual keyboard - so there's nothing
 # to pass in here.
 
-# Creating/removing the VIRT output and re-moding DP-1 orphans waybar's surface
-# (the process survives but stops drawing). Note whether it was up so we can give
-# it a clean restart once the desktop layout is back.
-WAYBAR_UP=0; pgrep -x waybar >/dev/null && WAYBAR_UP=1
-
 # Capture focus-follows-mouse ONCE, before we ever freeze it (windowed mode freezes it
 # so the cursor over a terminal on a headless VIRT can't steal focus and pull mirage
 # onto the wrong screen). Restored when we enter glasses mode and on final restore().
@@ -108,16 +103,11 @@ restore() {
         bash "$HERE/scripts/teardown-displays.sh" >/dev/null 2>&1 || true
         rm -f "$DISP_OWNER"
     ) 9>"$DISP_LOCK"
-    if [ "$WAYBAR_UP" = 1 ]; then           # re-attach waybar to the restored layout
-        # waybar is a systemd user service (Restart=always); restart it through
-        # systemd so we don't fight its supervisor or spawn a second instance.
-        systemctl --user restart waybar.service 2>/dev/null || true
-    fi
 }
 trap restore EXIT INT TERM
 
 # ---------------------------------------------------------------------------
-# ONE-TIME setup: the VIRT displays, the window sweep, waybar and the mirage
+# ONE-TIME setup: the VIRT displays, the window sweep and the mirage
 # window rules are IDENTICAL in both modes, so do them once up front and keep
 # them across hot-plug switches. Only the per-mode bits (scanout, cursor, DP
 # mode, follow_mouse, the bridge, and which monitor ws90 lives on) flip below.
@@ -145,14 +135,6 @@ bring_up_displays() {
 echo "[glasses] bringing up virtual screens..."
 ( flock 9; echo "$MY_SESS" > "$DISP_OWNER" ) 9>"$DISP_LOCK"   # claim the displays (supersede older instances)
 bring_up_displays
-
-# Now that VIRT1 exists, restart waybar so it attaches a bar there too. mirage
-# captures the whole VIRT1 output (waybar is a layer surface on it), so the bar
-# rides along onto the wall - that's how you get your status bar inside mirage.
-if [ "$WAYBAR_UP" = 1 ]; then
-    systemctl --user restart waybar.service 2>/dev/null || true
-    sleep 0.5
-fi
 
 echo "[glasses] sweeping your windows onto the virtual screens..."
 python3 "$HERE/scripts/sweep.py" sweep 2>&1 | sed 's/^/  [sweep] /' || true

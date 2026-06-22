@@ -128,7 +128,10 @@ timespec prev_ts;
 
 /* tunables - all in one place so it's easy to dial in by eye */
 const bool  PET_CHILL = true;       /* park him idle in one spot; disables the roam brain  */
-const float TARGET_H_FRAC = 3.0f;   /* model height vs screen distance (big chill raccoon) */
+const float TARGET_H_FRAC = 0.22f;  /* model height as a fraction of screen distance: 0.22*2m
+                                     * ~= 0.44m, a mascot perched on the screen's top edge.
+                                     * (FEET_LIFT / PERCH_OUT below scale with this, so size
+                                     * and offsets stay proportionate - bump for a bigger pet.) */
 const float AMBLE_SPD = 0.09f;      /* edge fraction/sec ambling (~11s across; calm)       */
 const float DASH_SPD  = 0.30f;      /* edge fraction/sec scurrying                         */
 const float FEET_LIFT = 0.5f;       /* model heights above the edge (0.5 = feet on edge)   */

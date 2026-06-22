@@ -332,7 +332,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
         }
         push_cursor(g);
         /* idle auto-collapse: a hover over the panel keeps it awake (and re-expands
-         * the collapsed FPS strip on the next frame). */
+         * the collapsed clock strip on the next frame). */
         { sens_panel hp;
           if (sens_panel_compute(g->m, &hp)) {
               float hx, hy; sens_cursor_local(g, &hp, &hx, &hy);
@@ -371,7 +371,7 @@ static void handle_event(grab_state *g, struct libinput_event *ev) {
             if (st && sens_panel_compute(g->m, &sp)) {
                 float lx, ly; sens_cursor_local(g, &sp, &lx, &ly);
                 /* idle auto-collapse: any touch on the panel wakes it. While collapsed
-                 * the strip shows only FPS, so swallow the press and skip the widgets. */
+                 * the strip shows only the clock, so swallow the press and skip the widgets. */
                 bool inpanel = (lx >= sp.panel_x0 - 0.05f && lx <= sp.panel_x1 + 0.05f &&
                                 ly >= sp.panel_y0 - 0.05f && ly <= sp.panel_y1 + 0.05f);
                 if (inpanel) g->m->hud_active_ms = now_ms();

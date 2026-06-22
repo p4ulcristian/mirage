@@ -74,9 +74,11 @@ void mirage_config_defaults(mirage_config *c) {
     c->neck_fwd_m        = 0.10f;  /* eye ~10cm ahead of the neck pivot: head turns translate the eye -> parallax */
     c->neck_up_m         = 0.10f;  /* eye ~10cm above the pivot */
     c->sharpen           = 0.35f;  /* contrast-adaptive sharpen: recover minified text */
+    c->screen_radius     = 0.025f; /* gently rounded display corners (fraction of screen height; 0 = square) */
     c->msaa_samples      = 4;      /* 4x MSAA on the screen-edge geometry (0 = off); cheap on the tiled GPU */
     c->mipmap            = true;   /* trilinear minification kills deep-minified sparkle the base level can't */
     c->geometry          = GEOM_CYLINDER;  /* curved wall: every point equidistant (radius = screen_distance_m) */
+    c->follow_screen     = -1;     /* no head-locked follow screen unless a layout flags one */
     c->hdri_on           = true;   /* starfield backdrop behind the wall */
     strcpy(c->hdri_path, "hdri/starmap_2020_8k.hdr");  /* NASA Deep Star Maps 2020, 8K */
     c->hdri_exposure     = 7.0f;   /* boost the stars hard so they pop after the black point */

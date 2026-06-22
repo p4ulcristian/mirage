@@ -110,9 +110,13 @@ typedef struct {
                                  * from rotation; the near windows shift against the far dome; 0 = off) */
     float neck_up_m;            /* parallax: eye height above the neck pivot */
     float sharpen;              /* contrast-adaptive sharpen strength (0 = off)    */
+    float screen_radius;        /* corner radius as a fraction of screen height (0 = square) */
     int   msaa_samples;         /* MSAA sample count for the window surface (0/1 = off); init-time only */
     bool  mipmap;               /* trilinear minification: mirror each screen into a mipmapped texture */
     int   geometry;             /* GEOM_CYLINDER / GEOM_FLAT                        */
+    int   follow_screen;        /* index of the head-locked "follow" screen (-1 = none):
+                                 * rendered at m->follow_yaw + its own lift, hovering
+                                 * above-front instead of pinned to the wall. */
 
     /* HDRI environment dome: an equirectangular image drawn as an infinite,
      * world-fixed backdrop you look around. On the additive optics it only adds
@@ -268,6 +272,12 @@ struct mirage {
                             * dollying the eye up/down feels right where swinging the wall did not.
                             * Added to eye_world.y in render; layout_pick offsets the cursor height
                             * by it so clicks stay aligned. */
+
+    /* head-locked "follow" screen (cfg.follow_screen): its yaw isn't on the fixed
+     * wall - it lazily eases toward where you're looking so it hovers above-front.
+     * render updates this each frame from the head yaw; layout_place reads it for
+     * that one screen (no world_yaw), so render + cursor picking stay in sync. */
+    float follow_yaw;
 
     /* named layouts (layouts.c): the registry plus a dirty flag the render loop
      * watches so a runtime layout switch rebuilds the screen meshes. */

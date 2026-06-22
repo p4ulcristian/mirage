@@ -163,6 +163,16 @@ static void layout_place_base(const struct mirage *m, int i, float *yaw_out,
  * rotate together; the cursor's own direction stays in fixed world space. */
 void layout_place(const struct mirage *m, int i, float *yaw_out, float *lift_out,
                   float *arc_out) {
+    /* the follow screen is head-locked: its yaw is m->follow_yaw (lazily eased toward
+     * the gaze in render), it carries its own lift, and it does NOT spin with the wall
+     * (no world_yaw). render, cursor picking and the #N label all route through here, so
+     * they track it together. */
+    if (i == m->cfg.follow_screen) {
+        *yaw_out  = m->follow_yaw;
+        *lift_out = isfinite(m->cfg.screen_lift_m[i]) ? m->cfg.screen_lift_m[i] : 0.8f;
+        *arc_out  = scr_arc(m, i);
+        return;
+    }
     layout_place_base(m, i, yaw_out, lift_out, arc_out);
     *yaw_out += m->world_yaw;
 }

@@ -55,8 +55,22 @@ static const char *FRAG_SRC =
     "uniform highp vec2 uTexel;\n"
     "uniform float uSharpen;\n"
     "uniform float uOpacity;\n"                  /* screen fade (1.0 = opaque) */
+    "uniform float uRadius;\n"                   /* corner radius in screen-height fractions; 0 = square */
+    "uniform float uAspect;\n"                   /* screen width/height, so the rounding stays circular */
     "void main() {\n"
-    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, uOpacity); return; }\n"
+    "  float a = uOpacity;\n"
+    /* Rounded corners: an SDF rounded-box in a centred space where height = 1 and
+     * width = aspect, so the radius is the same in metres on both axes. Fade (and
+     * discard) the bit outside the box so the dome shows through the cut corners. */
+    "  if (uRadius > 0.0) {\n"
+    "    vec2 p = (vUV - 0.5) * vec2(uAspect, 1.0);\n"
+    "    vec2 b = vec2(0.5 * uAspect, 0.5) - uRadius;\n"
+    "    vec2 q = abs(p) - b;\n"
+    "    float dist = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - uRadius;\n"
+    "    a *= smoothstep(0.004, -0.004, dist);\n"
+    "    if (a <= 0.0) discard;\n"
+    "  }\n"
+    "  if (uHasTex < 0.5) { gl_FragColor = vec4(uColor, a); return; }\n"
     "  vec3 e = texture2D(uTex, vUV).rgb;\n"
     "  if (uSharpen > 0.0) {\n"
     "    vec3 b = texture2D(uTex, vUV + vec2(0.0, -uTexel.y)).rgb;\n"
@@ -66,7 +80,7 @@ static const char *FRAG_SRC =
     "    vec3 s = e + (e - (b + d + f + h) * 0.25) * uSharpen;\n"
     "    e = clamp(s, min(min(b,d), min(f,h)), max(max(b,d), max(f,h)));\n"
     "  }\n"
-    "  gl_FragColor = vec4(e, uOpacity);\n"
+    "  gl_FragColor = vec4(e, a);\n"
     "}\n";
 
 /* HDRI environment dome: a sphere of world directions around the eye. The vertex
@@ -103,7 +117,7 @@ static const char *DOME_FRAG =
 static struct {
     own::GlProgram prog;
     GLint  aPos, aUV;
-    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen, uOpacity;
+    GLint  uMVP, uYFlip, uHasTex, uColor, uTex, uTexel, uSharpen, uOpacity, uRadius, uAspect;
     own::GlBuffer vbo;
 
     /* HDRI environment dome */
@@ -541,36 +555,51 @@ static void banner_draw(const ent::Banner &b, const mat4 &vp) {
  * amber clock. Constant text -> baked once; placement is set live each frame. */
 static ent::Banner make_screen_label(int i) {
     ent::Banner b;
-    b.arc = 6.0f;
+    b.arc = 2.6f;          /* on-wall width (deg) — small "#N" tag, not a banner */
     b.color[0] = 0.55f; b.color[1] = 0.78f; b.color[2] = 0.90f;
     std::string s = "#" + std::to_string(i + 1);
     b.text = [s] { return s; };
     return b;
 }
 
-static ent::Banner make_clock_banner(void) {
-    ent::Banner b;
-    b.yaw = 0.0f; b.lift = 2.8f; b.arc = 30.0f;
-    b.color[0] = 0.96f; b.color[1] = 0.87f; b.color[2] = 0.62f;
-    b.text = [] {
-        time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
-        char l1[16], l2[16];
-        strftime(l1, sizeof l1, "%H:%M:%S", &lt);
-        strftime(l2, sizeof l2, "%a %b %d", &lt);
-        for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
-        std::string a = l1, c = l2;
-        size_t w = a.size() > c.size() ? a.size() : c.size();
-        auto pad = [&](const std::string &s) {
-            size_t l = (w - s.size()) / 2;
-            return std::string(l, ' ') + s + std::string(w - s.size() - l, ' ');
-        };
-        return pad(a) + "\n" + pad(c);
+/* The clock: HH:MM:SS over an upper-cased date, centred, warm amber. It used to
+ * be a sky banner; now it's the HUD's top row (the glanceable default; click it to
+ * expand the controls). Text + per-second key shared by the bake below. */
+static const float CLOCK_COL[3] = { 0.96f, 0.87f, 0.62f };
+
+static std::string clock_text(void) {
+    time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
+    char l1[16], l2[16];
+    strftime(l1, sizeof l1, "%H:%M:%S", &lt);
+    strftime(l2, sizeof l2, "%a %b %d", &lt);
+    for (char *p = l2; *p; p++) *p = (char)toupper((unsigned char)*p);
+    std::string a = l1, c = l2;
+    size_t w = a.size() > c.size() ? a.size() : c.size();
+    auto pad = [&](const std::string &s) {
+        size_t l = (w - s.size()) / 2;
+        return std::string(l, ' ') + s + std::string(w - s.size() - l, ' ');
     };
-    b.key = [] {
-        time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
-        return ((lt.tm_yday*24 + lt.tm_hour)*60 + lt.tm_min)*60 + lt.tm_sec;
-    };
-    return b;
+    return pad(a) + "\n" + pad(c);
+}
+
+static int clock_key(void) {
+    time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
+    return ((lt.tm_yday*24 + lt.tm_hour)*60 + lt.tm_min)*60 + lt.tm_sec;
+}
+
+/* The clock plaque: re-baked in place once per second into a SINGLE texture (kept
+ * out of the unbounded plaque_for cache, so ticking seconds don't leak a texture
+ * per second). Returns the texture and its baked pixel size. */
+static GLuint clock_plaque(int *tw, int *th) {
+    static own::GlTexture tex;
+    static int last_key = -1, w = 0, h = 0;
+    int k = clock_key();
+    if (k != last_key || w == 0) {
+        last_key = k;
+        tex = bake_label(clock_text().c_str(), CLOCK_COL, &w, &h, 4.0f);
+    }
+    if (tw) *tw = w; if (th) *th = h;
+    return tex;
 }
 
 /* ---- HDRI environment dome ---------------------------------------------------
@@ -837,8 +866,11 @@ mirage_status render_init(struct mirage *m) {
     R.uTexel  = glGetUniformLocation(R.prog, "uTexel");
     R.uSharpen = glGetUniformLocation(R.prog, "uSharpen");
     R.uOpacity = glGetUniformLocation(R.prog, "uOpacity");
+    R.uRadius  = glGetUniformLocation(R.prog, "uRadius");
+    R.uAspect  = glGetUniformLocation(R.prog, "uAspect");
     glUseProgram(R.prog);
     glUniform1f(R.uOpacity, 1.0f);   /* default opaque; only the screen draw lowers it */
+    glUniform1f(R.uRadius, 0.0f);    /* default square; only the screen draw rounds corners */
 
     R.vbo.gen();
     glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
@@ -870,10 +902,9 @@ mirage_status render_init(struct mirage *m) {
     /* The control HUD's captions/plaques are baked on demand by the Clay path
      * (hud_render -> plaque_for cache), so there's nothing to pre-bake here. */
     /* banner entities: register them here; the frame loop (banner_refresh) bakes
-     * and builds each lazily and re-bakes when its key() changes. The clock is the
-     * first; push more ent::Banner for status lines etc. */
+     * and builds each lazily and re-bakes when its key() changes. The clock now
+     * lives in the HUD's top row (hud_build_tree); push ent::Banner for status lines. */
     g_banners.clear();
-    g_banners.push_back(make_clock_banner());
 
     hdri_init(m);   /* environment dome (no-op if cfg.hdri_on is false or load fails) */
     pet_init(m);    /* mischievous reactive pet (self-contained; pet.cpp) */
@@ -1089,13 +1120,24 @@ static void hud_build_tree(struct mirage *m, bool collapsed) {
     root.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
     HudEl _root(hud_eid("hud_root"), root);
 
-    /* FPS - always shown; the sole element of the collapsed strip */
+    /* Clock - the glanceable top row, always shown. Reserve a fixed box sized to the
+     * clock plaque's aspect; the dedicated texture is blitted in after layout (it
+     * re-bakes per second, so it can't go through Clay's per-string text path). */
+    {
+        int ctw, cth; clock_plaque(&ctw, &cth);
+        float ch = 120.0f;                                       /* two-line clock height (px == mm) */
+        float cw = (cth > 0) ? ch * (float)ctw / (float)cth : 260.0f;
+        Clay_ElementDeclaration d = hud_box(cw, ch);
+        HudEl e(hud_eid("clock_strip"), d);
+    }
+
+    if (collapsed) return;     /* idle: just the clock - click it to expand */
+
+    /* FPS - comes out under the clock when the panel is expanded */
     static char fps[24];
     int fv = (int)(m->fps + 0.5f); if (fv < 0) fv = 0; if (fv > 999) fv = 999;
     snprintf(fps, sizeof fps, "FPS %d", fv);
     hud_text(fps, cFps, 60);
-
-    if (collapsed) return;     /* idle: just the FPS readout - hover the strip to expand */
 
     /* shortcut cheat-sheet (one multi-line plaque) */
     hud_text("2X CMD: RECENTER\nCMD+SCROLL: ZOOM\nSUPER+SHIFT+Q: QUIT", cHelp, 26, CLAY_TEXT_WRAP_NONE);
@@ -1196,6 +1238,7 @@ static void hud_render(struct mirage *m, mat4 vp) {
     if (s_anchor < 0 || s_anchor >= n || key != s_key) {
         int ci0 = -1; float best_yaw = 1e30f, best_lift = 1e30f;
         for (int k = 0; k < n; k++) {
+            if (k == m->cfg.follow_screen) continue;           /* head-locked + high: never the HUD anchor */
             float yw, lf, ar; layout_place(m, k, &yw, &lf, &ar);
             float ay = fabsf(yw - m->world_yaw);               /* pan-invariant base yaw */
             if (ay < best_yaw - 1e-4f || (ay < best_yaw + 1e-4f && lf < best_lift)) {
@@ -1207,10 +1250,16 @@ static void hud_render(struct mirage *m, mat4 vp) {
     }
     int ci = s_anchor;
     float yaw_c, lift_c, arc_c;
-    layout_place(m, ci, &yaw_c, &lift_c, &arc_c);   /* full placement for cursor mapping */
+    layout_place(m, ci, &yaw_c, &lift_c, &arc_c);   /* anchor's lift drives the vertical placement */
     (void)arc_c;
 
-    /* idle auto-collapse: fold to the FPS strip after HUD_IDLE_MS untouched. */
+    /* Head-lock the clock/HUD yaw to the gaze-follow (m->follow_yaw, eased below) - the
+     * SAME behaviour as the top row's follow screen - so it hovers below-front wherever
+     * you look instead of spinning under the centre screen with the wall. We keep the
+     * anchor screen's lift, so it still sits just under the wall row. */
+    yaw_c = m->follow_yaw;
+
+    /* idle auto-collapse: fold to the clock strip after HUD_IDLE_MS untouched. */
     uint32_t nowms = hud_now_ms();
     if (m->hud_active_ms == 0) m->hud_active_ms = nowms;     /* first frame: start awake */
     bool collapsed = (nowms - m->hud_active_ms) > HUD_IDLE_MS;
@@ -1221,7 +1270,8 @@ static void hud_render(struct mirage *m, mat4 vp) {
     float aspect = (cs->width > 0 && cs->height > 0) ? (float)cs->height / (float)cs->width : 9.0f/16.0f;
     float hh     = d * tanf(ang_w * 0.5f) * aspect;     /* centre screen half-height */
 
-    g_hud_base = layout_model_matrix(m, ci);
+    g_hud_base = m4_mul(m4_translate(v3(0.0f, lift_c, 0.0f)),
+                        m4_from_quat(q_from_euler_ypr(yaw_c, 0.0f, 0.0f)));
     g_hud_vp   = vp;
     g_hud_d    = d;
     g_hud_yTop = -hh - 0.05f;                /* canvas top, just below the screen edge */
@@ -1270,6 +1320,14 @@ static void hud_render(struct mirage *m, mat4 vp) {
         }
     }
 
+    /* clock: the dedicated per-second texture, blitted into its reserved top-row box
+     * (present collapsed and expanded). Clay can't own it - it re-bakes every second. */
+    { float bx0, bx1, by0, by1;
+      if (hud_box_m(hud_eid("clock_strip"), &bx0, &bx1, &by0, &by1)) {
+          int ctw, cth; GLuint ct = clock_plaque(&ctw, &cth);
+          hud_plaque(ct, 0.5f*(bx0+bx1), 0.5f*(by0+by1), bx1-bx0, by1-by0);
+      } }
+
     /* ---- snapshot the boxes grab.cpp hit-tests ---- */
     sens_panel &o = g_hud;
     memset(&o, 0, sizeof o);
@@ -1282,7 +1340,7 @@ static void hud_render(struct mirage *m, mat4 vp) {
         o.panel_x0 = x0; o.panel_x1 = x1; o.panel_y0 = y0; o.panel_y1 = y1;
     }
 
-    if (!collapsed) {           /* collapsed = FPS only: no widgets to map or overlay */
+    if (!collapsed) {           /* collapsed = clock only: no widgets to map or overlay */
         o.gain = m->cfg.yaw_gain;
         if (o.gain < SENS_GAIN_MIN) o.gain = SENS_GAIN_MIN;
         if (o.gain > SENS_GAIN_MAX) o.gain = SENS_GAIN_MAX;
@@ -1443,6 +1501,61 @@ static bool draw_passthrough(struct mirage *m, quat head) {
     return true;
 }
 
+/* ---- Anchor-stability test (MIRAGE_ANCHOR_TEST=1) -------------------------
+ * A world-fixed boresight reticle drawn at dead-ahead so you can SEE how fixed
+ * "fixed in space" really is: align the cross to a real-world point, then move
+ * your head and watch it drift. We draw it TWICE from the same eye:
+ *   GREEN = the shipped view (forward-prediction + yaw/pitch gain + read
+ *           deadband baked in) - what your anchored screens actually do.
+ *   RED   = the RAW pose (pose_latest, no prediction/gain/deadband) - pure IMU.
+ * Both additive (dark optics stay clear; overlap reads YELLOW). So:
+ *   overlapped & still   -> anchor solid.
+ *   RED solid, GREEN swims/lags -> the comfort pipeline (gains/deadband/predict,
+ *                                  all cfg-tunable) is the culprit.
+ *   RED itself jitters/drifts    -> upstream AHRS/IMU fusion.
+ * Ticks sit at +-2/5/8 deg so a split is readable in degrees. */
+static void atest_quad(const mat4 &vp, float xc, float yc, float d, float w, float h) {
+    mat4 model = m4_mul(m4_translate(v3(xc, yc, -d)), m4_scale(v3(w, h, 1.0f)));
+    mat4 mvp   = m4_mul(vp, model);
+    glUniformMatrix4fv(R.uMVP, 1, GL_FALSE, mvp.m);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+static void draw_reticle(const mat4 &vp, float r, float g, float b, float d) {
+    glUseProgram(R.prog);
+    glUniform1f(R.uHasTex, 0.0f);
+    glUniform3f(R.uColor, r, g, b);
+    glUniform1f(R.uOpacity, 1.0f);
+    glUniform1f(R.uRadius, 0.0f);
+    glUniform1f(R.uYFlip, 0.0f);
+    glBindBuffer(GL_ARRAY_BUFFER, R.vbo);
+    glEnableVertexAttribArray(R.aPos);
+    glVertexAttribPointer(R.aPos, 3, GL_FLOAT, GL_FALSE, 5*sizeof(GLfloat), (void*)0);
+    glDisableVertexAttribArray(R.aUV);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);   /* additive, like the dome/cursor */
+
+    const float DEG = (float)M_PI/180.0f;
+    auto S = [&](float deg){ return d * tanf(deg * DEG); };   /* half-extent (m) for a half-angle */
+    float arm = S(8.0f), thick = S(0.12f), dot = S(0.35f);
+    atest_quad(vp, 0, 0, d, thick*2, arm*2);     /* vertical bar   */
+    atest_quad(vp, 0, 0, d, arm*2,   thick*2);   /* horizontal bar */
+    atest_quad(vp, 0, 0, d, dot*2,   dot*2);     /* centre dot     */
+    const float ticks[] = {2.0f, 5.0f, 8.0f};
+    for (float t : ticks) {
+        float p = S(t), th = S(0.9f);
+        atest_quad(vp,  p, 0, d, thick*2, th*2);   /* +yaw   */
+        atest_quad(vp, -p, 0, d, thick*2, th*2);   /* -yaw   */
+        atest_quad(vp, 0,  p, d, th*2, thick*2);   /* +pitch */
+        atest_quad(vp, 0, -p, d, th*2, thick*2);   /* -pitch */
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+}
+
 void render_frame(struct mirage *m, quat head) {
     eglMakeCurrent(m->edpy, m->esurf, m->esurf, m->ectx);
     struct timespec rt0; if (m->profile) clock_gettime(CLOCK_MONOTONIC, &rt0);
@@ -1543,6 +1656,27 @@ void render_frame(struct mirage *m, quat head) {
         m->gaze_have = true;
     }
 
+    /* Lazy yaw-follow: ease follow_yaw toward the gaze yaw with a time constant, so it
+     * trails a turn and glides back to dead-ahead when you settle - level, never tilting.
+     * Drives BOTH the head-locked follow screen (top row) and the clock/HUD (bottom row),
+     * so it runs unconditionally now (the HUD is always present). Wrapped across +/-pi. */
+    {
+        static struct timespec fy_prev; static bool fy_seed = false;
+        struct timespec ftn; clock_gettime(CLOCK_MONOTONIC, &ftn);
+        float fdt = fy_seed ? (float)((ftn.tv_sec - fy_prev.tv_sec)
+                                    + (ftn.tv_nsec - fy_prev.tv_nsec) * 1e-9) : 0.0f;
+        fy_prev = ftn; fy_seed = true;
+        if (fdt < 0.0f) fdt = 0.0f;
+        if (fdt > 0.1f) fdt = 0.1f;
+        const float FOLLOW_TAU = 0.25f;                  /* trail time constant (s) */
+        float dy = m->gaze_yaw - m->follow_yaw;
+        while (dy >  (float)M_PI) dy -= 2.0f*(float)M_PI;
+        while (dy < -(float)M_PI) dy += 2.0f*(float)M_PI;
+        m->follow_yaw += dy * (1.0f - expf(-fdt / FOLLOW_TAU));
+        while (m->follow_yaw >  (float)M_PI) m->follow_yaw -= 2.0f*(float)M_PI;
+        while (m->follow_yaw < -(float)M_PI) m->follow_yaw += 2.0f*(float)M_PI;
+    }
+
     /* Per-frame VIEW TRACE (set MIRAGE_VIEW_TRACE=1): logs what actually reaches the eye so
      * the fast-turn "jump" can be SEEN in the data. raw = pose before prediction/deadband;
      * final = the rendered view (prediction + deadband + gain baked in); off = parallax. If
@@ -1631,6 +1765,22 @@ void render_frame(struct mirage *m, quat head) {
         glEnable(GL_DEPTH_TEST);
     }
 
+    /* Anchor-stability test: draw the world-fixed reticle (shipped view in GREEN,
+     * raw IMU in RED, from the SAME eye) and skip the rest of the scene for a clean
+     * read. The dome above stays as a co-fixed star reference. See draw_reticle. */
+    static int atest = -1;
+    if (atest < 0) { const char *e = getenv("MIRAGE_ANCHOR_TEST"); atest = (e && *e && e[0] != '0') ? 1 : 0; }
+    if (atest) {
+        float d = m->cfg.screen_distance_m > 0.0f ? m->cfg.screen_distance_m : 2.0f;
+        mat4 view_raw = m4_mul(m4_from_quat(q_conj(pose_latest())),
+                               m4_translate(v3_scale(eye_world, -1.0f)));
+        mat4 vp_raw   = m4_mul(proj, view_raw);
+        draw_reticle(vp_raw, 1.0f, 0.0f, 0.0f, d);   /* RAW IMU (no predict/gain/deadband) */
+        draw_reticle(vp,     0.0f, 1.0f, 0.0f, d);   /* SHIPPED view (comfort baked in)    */
+    }
+
+    if (!atest) {
+
     int n = m->n_screen > 0 ? m->n_screen : m->cfg.screen_count;
     if (n > MIRAGE_MAX_SCREENS) n = MIRAGE_MAX_SCREENS;
 
@@ -1653,12 +1803,17 @@ void render_frame(struct mirage *m, quat head) {
     glUseProgram(R.prog);
     /* window/screen transparency: alpha-blend the screens over the background (env
      * dome / passthrough / black) at m->screen_opacity. At 1.0 this is a no-op (opaque). */
-    bool fade = m->screen_opacity < 0.999f;
+    bool fade  = m->screen_opacity < 0.999f;
+    bool round = m->cfg.screen_radius > 0.0f;   /* rounded corners need to composite over the dome */
     glUniform1f(R.uOpacity, m->screen_opacity);
-    if (fade) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    glUniform1f(R.uRadius, round ? m->cfg.screen_radius : 0.0f);
+    if (fade || round) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     for (int i = 0; i < n; i++) {
         screen_t *s = &m->screen[i];
         if (!s->mesh_vbo) continue;
+        if (round)
+            glUniform1f(R.uAspect, (s->width > 0 && s->height > 0)
+                                   ? (float)s->width / (float)s->height : 16.0f/9.0f);
 
         mat4 model = layout_model_matrix(m, i);
         mat4 mvp   = m4_mul(vp, model);
@@ -1689,8 +1844,9 @@ void render_frame(struct mirage *m, quat head) {
         }
         glDrawArrays(GL_TRIANGLE_STRIP, 0, s->mesh_verts);
     }
-    if (fade) glDisable(GL_BLEND);
+    if (fade || round) glDisable(GL_BLEND);
     glUniform1f(R.uOpacity, 1.0f);   /* restore: plaques/HUD/cursor stay opaque */
+    glUniform1f(R.uRadius, 0.0f);    /* restore: plaques/HUD/cursor stay square */
 
     /* The mischievous pet: a world-space critter drawn among the screens (depth-
      * tested, so it occludes / is occluded correctly). Fully self-contained in
@@ -1782,6 +1938,8 @@ void render_frame(struct mirage *m, quat head) {
 
     /* calibration overlay last of all, head-locked, on top of the scene. */
     calib_draw(m, proj);
+
+    }   /* end if (!atest): the anchor test draws only the reticle + dome */
 
     if (m->profile) {
         /* glFinish drains the GPU so rt0->tg is pure draw cost (texture sampling

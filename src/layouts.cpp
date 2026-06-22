@@ -70,6 +70,7 @@ static void apply_screen(mirage_config *cfg, const toml::table &sc, screen_cell 
     if (auto v = sc["arc"].value<double>())     cfg->screen_arc[idx]     = (float)*v;
     if (auto v = sc["yaw"].value<double>())     cfg->screen_yaw_deg[idx] = (float)*v;
     if (auto v = sc["lift"].value<double>())    cfg->screen_lift_m[idx]  = (float)*v;
+    if (auto b = sc["follow"].value<bool>(); b && *b) cfg->follow_screen = idx;  /* head-locked */
     auto w = sc["w"].value<double>(), h = sc["h"].value<double>();
     auto x = sc["x"].value<double>(), y = sc["y"].value<double>();
     if (w && h && x && y) cells[idx] = { *w, *h, *x, *y, true };
@@ -87,7 +88,7 @@ static void project_cells(mirage_config *cfg, const screen_cell *cells,
     if (wall_arc <= 0.0) return;
     double x0 = 1e30, y0 = 1e30, xr = -1e30; bool any = false;
     for (int i = 0; i < MIRAGE_MAX_SCREENS; i++) {
-        if (!cells[i].set) continue;
+        if (!cells[i].set || i == cfg->follow_screen) continue;   /* follow screen isn't on the wall */
         any = true;
         x0 = std::min(x0, cells[i].x);
         y0 = std::min(y0, cells[i].y);
@@ -98,7 +99,7 @@ static void project_cells(mirage_config *cfg, const screen_cell *cells,
     if (Wt <= 0.0) return;
     double k = wall_arc * (M_PI/180.0) * cfg->screen_distance_m / Wt;   /* metres per px */
     for (int i = 0; i < MIRAGE_MAX_SCREENS; i++) {
-        if (!cells[i].set || std::isfinite(cfg->screen_yaw_deg[i])) continue;
+        if (!cells[i].set || i == cfg->follow_screen || std::isfinite(cfg->screen_yaw_deg[i])) continue;
         double cx = (cells[i].x - x0) + cells[i].w * 0.5;
         cfg->screen_yaw_deg[i] = (float)(wall_arc * (Wt * 0.5 - cx) / Wt);   /* +yaw = left */
         cfg->screen_arc[i]     = (float)(wall_arc * cells[i].w / Wt * (1.0 - gap));
@@ -114,6 +115,7 @@ static void apply_globals(mirage_config *cfg, const toml::table &t) {
     if (auto v = t["arc"].value<double>())         cfg->screen_arc_deg    = (float)*v;
     if (auto v = t["fov"].value<double>())         cfg->fov_deg           = (float)*v;
     if (auto v = t["sharpen"].value<double>())     cfg->sharpen           = (float)*v;
+    if (auto v = t["radius"].value<double>())      cfg->screen_radius     = (float)*v;
     if (auto v = t["msaa"].value<int64_t>())       cfg->msaa_samples      = (int)*v;
     if (auto b = t["mipmap"].value<bool>())        cfg->mipmap            = *b;
     if (auto v = t["yaw_gain"].value<double>())    cfg->yaw_gain          = (float)*v;
