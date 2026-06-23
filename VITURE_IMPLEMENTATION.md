@@ -58,17 +58,29 @@ We'll adjust intrinsics or distortion coefficients.
 
 ### Option: Disable SIP Temporarily (if you want exact intrinsics)
 
-**Step 1: Boot to Recovery Mode**
-- Shut down Mac completely
-- **Apple Silicon (M1/M2):** Hold power button until "Loading startup options" appears → click Options → Continue
-- **Intel Mac:** Hold Cmd+R while booting
+**Step 1: Boot to Recovery Mode (M2 Mac)**
+1. Shut down completely (Apple menu → Shut Down, wait 10 sec)
+2. Press and HOLD power button until you see "Loading startup options"
+3. Click **Options** → Click **Continue**
+4. If asked, select your user and enter password
+5. You're now in Recovery Mode
 
 **Step 2: Disable SIP**
+1. From menu bar: **Utilities → Terminal**
+2. Type exactly:
 ```bash
-# In Recovery Mode, open Terminal from Utilities menu
 csrutil disable
-# Reboot
+```
+3. Press Enter. It should say "Successfully disabled System Integrity Protection"
+4. Type:
+```bash
 reboot
+```
+
+**Step 3: Verify after reboot**
+```bash
+csrutil status
+# Should say: "System Integrity Protection status: disabled"
 ```
 
 **Step 3: Capture the config**
