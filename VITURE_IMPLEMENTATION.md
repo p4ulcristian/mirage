@@ -6,6 +6,76 @@ This documents how to implement Viture XR glasses (One, Pro, N6, N6P, P6, R6) su
 
 ---
 
+## Beast XR (R6) Critical Findings (2025-06-12)
+
+After extensive reverse-engineering with SIP disabled, we discovered:
+
+### 1. 6DOF VIO Runs ON THE GLASSES, Not Host
+
+**The Beast XR glasses have an on-device VIO processor (A1088 chip).** The camera frames are NOT exposed to the host via USB. The VIO/SLAM computation happens inside the glasses.
+
+Evidence:
+- No UVC camera device exposed (checked `system_profiler SPCameraDataType`)
+- USB interfaces are HID-only (no video bulk endpoints)
+- libcarina_vio.dylib functions like `_carina_a1088_viture_init` exist but are NOT called in 3DOF mode
+- The `get_cam_param` functions exist to retrieve intrinsics from device, but never called in 3DOF
+
+### 2. 3DOF Mode = IMU Only
+
+When you enable "3DOF" in SpaceWalker:
+- `dofMode: dof3` is set via HID command
+- **No VIO library functions are called**
+- Host just receives pre-fused euler angles (roll/pitch/yaw) via HID
+- The glasses do the IMU fusion internally
+
+### 3. What This Means for Linux
+
+**Good news:** 3DOF tracking is simple - just read IMU euler angles from HID.
+
+**Challenge:** For 6DOF (positional) tracking, you'd need:
+- Either: A way to request 6DOF pose data from the glasses (if supported)
+- Or: External cameras/SLAM system on the host
+
+### 4. USB Device Details
+
+```
+VITURE Beast XR Glasses
+  VID: 0x35CA (13770)
+  PID: 0x1201 (4609)
+  USB Speed: 480 Mbps (High Speed)
+  Device Class: 0xEF (Miscellaneous) with IAD
+  Serial: R6PMCC61301YG
+  Firmware: 20.0.01.025_20260608
+```
+
+### 5. SpaceWalker Display Modes
+
+From HID messages:
+- `mode2D60In120OutR6` - 2D mode, 60Hz in, 120Hz out
+- `ultrawide_60Hz` - Wide strip layout
+- `dofMode: dof0` = No tracking
+- `dofMode: dof3` = 3DOF (rotation only)
+
+### 6. Native Mode Fix (2025-06-12)
+
+**BUG FOUND:** The `--native` mode in `viture_bridge.c` was only logging pose data, not sending it to mirage!
+
+**FIX:** Updated `on_pose()` callback to actually forward the firmware-fused quaternion via UDP when `--native` is used.
+
+**To test on Linux with factory-calibrated tracking:**
+```bash
+# This uses the Beast's on-device fusion - same quality as SpaceWalker
+sudo -E VITURE_SDK=viture-sdk ./viture-bridge --native -v
+```
+
+**Why native mode is better:**
+- Firmware has factory-calibrated IMU parameters
+- No drift from imperfect host-side fusion
+- Same tracking quality as SpaceWalker on macOS
+- Skips all Madgwick/VQF processing
+
+---
+
 ## TEST THIS ON LINUX (VIO Anchor Fix)
 
 The VIO was crashing because it used `pinhole` camera model, but the Beast has a **fisheye** camera.
