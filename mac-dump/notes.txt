@@ -1,0 +1,103 @@
+# SpaceWalker Mac Dump - Summary
+# Date: 2026-06-11
+# Device: VITURE Beast XR Glasses (R6PMCC61301YG)
+
+## CRITICAL FIX FOR VIO
+
+The VIO config in `viture_vio.cpp` has the WRONG camera model:
+- Current: `camera_model: pinhole` ❌
+- Correct: `camera_model: equidistant` ✓ (fisheye camera)
+
+The Beast uses a fisheye world-facing camera. The Carina VIO engine
+has these camera models (from strings in libcarina_vio.dylib):
+- `pinhole` - standard rectilinear projection
+- `equidistant` - Kannala-Brandt fisheye (r = f*theta)
+
+SpaceWalker's strings confirm fisheye usage:
+- `fisheye_cam0`, `cam_use_fisheye`, `init_equidistant_with_fisheye_stereo_rectify`
+
+## Estimated Beast Camera Parameters (NEEDS CALIBRATION)
+
+Based on typical AR glasses fisheye cameras:
+```yaml
+cam0:
+  camera_model: equidistant
+  distortion_model: equidistant
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]  # Start with zero, calibrate later
+  intrinsics: [280.0, 280.0, 320.0, 240.0]  # [fx, fy, cx, cy] for 640x480
+  resolution: [640, 480]
+  T_imu_cam: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]  # Identity, adjust for mounting
+```
+
+To find exact values:
+1. Print a checkerboard (9x6), measure square size
+2. Run OpenCV camera calibration with fisheye model
+3. Or: trial-and-error with VIO - wrong intrinsics = bad tracking
+
+## Files Copied
+- custom_config.yaml - basic settings (mapping_mode, pose_callback_frequency)
+- slam_config_N6_N6P.yaml - IMU/orientation tracker params (240Hz, Kalman filter)
+- slam_config_P6.yaml - P6 variant
+- viture_override_config_N6.yaml - display lens distortion (VAO), T_left/right_imu
+- viture_override_config_N6P.yaml - N6P variant
+- database.bin - 44MB ORB vocabulary/SLAM database
+
+## Key Findings
+
+### 1. VIO Config Schema (from libcarina_vio.dylib strings)
+The engine expects this YAML format:
+```yaml
+cam0:
+  camera_model: <pinhole|fisheye>
+  distortion_model: <radtan|equidistant>
+  intrinsics: [fx, fy, cx, cy]
+  distortion_coeffs: [k1, k2, k3, k4]
+  resolution: [width, height]
+  T_cam_imu: [4x4 matrix]
+  timeshift_cam_imu: <float>
+```
+
+### 2. Camera Model Types Found
+- pinhole
+- fisheye (with equidistant distortion)
+- "fisheye" flag: cam_use_fisheye
+
+### 3. What's MISSING (not in resource files)
+- Beast/R6 specific camera intrinsics (not in any yaml)
+- T_cam_imu extrinsics for Beast camera
+- Camera resolution for VIO (separate from display)
+
+### 4. Where Camera Calibration Likely Lives
+Options:
+a) Hardcoded per-model in libcarina_vio.dylib
+b) Pulled from device firmware at runtime via HID
+c) Embedded in the SDK for each device generation
+
+### 5. ORB Database Path
+In custom_config.yaml:
+  orb_database_path: ./database.bin
+
+Database is 44MB - this is the loop-closure vocabulary that prevents long-term drift.
+
+## Config Values for Linux VIO
+
+From slam_config_N6_N6P.yaml:
+- imu_rate: 240
+- gravity_norm: 9.80665
+- position_pivot_head: [0.0, 0.13, 0.09]
+- atw_correction: 7.2 to 27.2 ms
+
+From custom_config.yaml:
+- pose_callback_frequency: 1000 (Hz)
+
+## Next Steps to Get Camera Calibration
+
+1. Check if Beast returns calibration via HID/USB protocol
+2. Run SpaceWalker with DYLD_PRINT_BINDINGS=1 to see what it loads
+3. Intercept libcarina_vio init to see what config string it receives
+4. Check if viture-sdk/libglasses.so has Beast-specific calibration built-in
+
+## SpaceWalker Version
+- Version: 1.8.4
+- Bundle: e1e3ffb
+- SLAM version in config: 0.14

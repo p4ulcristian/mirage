@@ -6,6 +6,91 @@ This documents how to implement Viture XR glasses (One, Pro, N6, N6P, P6, R6) su
 
 ---
 
+## TEST THIS ON LINUX (VIO Anchor Fix)
+
+The VIO was crashing because it used `pinhole` camera model, but the Beast has a **fisheye** camera.
+Fixed in commit `36eb644` - now uses `equidistant` (Kannala-Brandt fisheye).
+
+### Step 1: Pull and check camera resolution
+
+```bash
+git pull
+v4l2-ctl --list-formats-ext -d /dev/video1
+```
+
+### Step 2: If resolution differs from 640x480
+
+Edit `src/viture_vio.cpp` around line 168:
+```yaml
+intrinsics: [285.0, 285.0, WIDTH/2, HEIGHT/2]
+resolution: [WIDTH, HEIGHT]
+```
+
+Example for 1280x720:
+```yaml
+intrinsics: [350.0, 350.0, 640.0, 360.0]
+resolution: [1280, 720]
+```
+
+### Step 3: Build and run
+
+```bash
+make viture-vio
+sudo -E LD_LIBRARY_PATH=viture-sdk ./viture-vio --run -v
+```
+
+### Step 4: If it still fails
+
+Tell me:
+1. The exact error message
+2. Output of `v4l2-ctl --list-formats-ext -d /dev/video1`
+
+We'll adjust intrinsics or distortion coefficients.
+
+---
+
+## Why We Couldn't Extract Exact Intrinsics from Mac
+
+**macOS SIP (System Integrity Protection)** blocks:
+- Attaching lldb to signed apps (SpaceWalker)
+- DYLD_INSERT_LIBRARIES injection
+- dtrace on protected processes
+
+### Option: Disable SIP Temporarily (if you want exact intrinsics)
+
+**Step 1: Boot to Recovery Mode**
+- Shut down Mac completely
+- **Apple Silicon (M1/M2):** Hold power button until "Loading startup options" appears → click Options → Continue
+- **Intel Mac:** Hold Cmd+R while booting
+
+**Step 2: Disable SIP**
+```bash
+# In Recovery Mode, open Terminal from Utilities menu
+csrutil disable
+# Reboot
+reboot
+```
+
+**Step 3: Capture the config**
+```bash
+cd /Users/paul/mirage/tools
+bash capture_carina_config.sh
+# Config saved to /tmp/carina_config_captured.yaml
+```
+
+**Step 4: Re-enable SIP (important!)**
+```bash
+# Boot to Recovery Mode again
+csrutil enable
+reboot
+```
+
+**Is it worth it?** Probably not for now - try the estimated fisheye intrinsics first. If tracking is wobbly/drifty, then either:
+1. Disable SIP and capture exact config, OR
+2. Calibrate with a checkerboard (more accurate anyway)
+
+---
+
 ## Quick Summary
 
 **The easy path**: Use the existing reverse-engineered code from `viture_virtual_display`:

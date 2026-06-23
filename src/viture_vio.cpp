@@ -161,11 +161,19 @@ static const char *CONFIG_YAML =
     /* T_imu_cam must be a FLAT 16-element sequence (VISLAM::getSequence<double> reads it
      * flat then reshapes 4x4; nested rows make it try list->double -> throw). Identity. */
     "  T_imu_cam: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
-    "  camera_model: pinhole\n"
+    /* Beast uses a FISHEYE world camera - must use equidistant model, not pinhole!
+     * Pinhole fell through CameraUndistort's model switch to its default branch, which
+     * prints an error + calls exit() (traced in libcarina_vio: the accepted cases are
+     * init_equidistant_with_fisheye_stereo_rectify and init_fov). Confirmed by the Mac
+     * dump (mac-dump/notes.txt): the Beast world cam is Kannala-Brandt fisheye.
+     * Intrinsics are ESTIMATED; calibrate with the checkerboard (viture-camcal) for real. */
+    "  camera_model: equidistant\n"
     "  distortion_model: equidistant\n"
     "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n"
-    "  intrinsics: [760.0, 760.0, 640.0, 360.0]\n"
-    "  resolution: [1280, 720]\n"
+    /* Fisheye intrinsics: lower focal length than pinhole due to wide FOV.
+     * [fx, fy, cx, cy] - resolution MUST match the gray frames fed in --run (see --res). */
+    "  intrinsics: [285.0, 285.0, 320.0, 240.0]\n"
+    "  resolution: [640, 480]\n"
     "  cam_overlaps: []\n";
 
 static std::string slurp(const char *path){

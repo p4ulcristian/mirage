@@ -1,0 +1,83 @@
+%YAML:1.0
+system:
+  slam_version: "0.14"
+  save_trajectory: false
+  log_directory: "./"
+device:
+  imu_rate: 480
+  gravity_norm: 9.80665
+  position_pivot_head: [0.0, 0.015, -0.088]
+orientation_tracker:
+  complementary_filter_options:
+    online_calibrate_gyr_bias: true
+    apply_still_gyr_correction: true
+    angular_velocity_propagation_variance: 0.0
+    angular_acceleration_propagation_variance: 2.0
+    angular_jerk_propagation_variance: 0.0
+    angular_velocity_measurement_variance: 0.0007211832
+    push_forward_time: 12.0
+    atw_correction: 7.2
+  kalman_filter_options:
+    online_calibrate_gyr_bias: true
+    apply_still_gyr_correction: false
+    apply_still_orientation_correction: false
+    apply_still_yaw_correction: true
+    apply_mag_correction: false
+    estimate_gyr_bias: true
+    estimate_acc_bias: false
+    estimate_gravity: false
+    estimate_mag_bias: true
+    estimate_mag_scale: true
+    estimate_mag_misalignment: false
+    stable_beta_noise_threshold: 1.321109e-2
+    initial_q_variance_duration:    30.0
+    initial_bg_x_variance_duration: 30.0
+    initial_bg_y_variance_duration: 30.0
+    initial_bg_z_variance_duration: 30.0
+    initial_ba_variance_duration:   30.0
+    initial_g_noise: 1.000000e-1
+    initial_beta_variance_duration: 30.0
+    initial_hw_variance_duration:   30.0
+    initial_hi_variance_duration:   30.0
+    initial_d_noise: 5.000000e+1
+    initial_l_noise: 1.000000e+0
+    q_propagation_noise_density:    4.886921e-5
+    bg_x_random_walk_noise_density: 1.197046e-5
+    bg_y_random_walk_noise_density: 4.636141e-5
+    bg_z_random_walk_noise_density: 1.197046e-5
+    ba_random_walk_noise_density:   1.954769e-4
+    stable_beta_random_walk_noise_density:   7.627428e-3
+    unstable_beta_random_walk_noise_density: 5.393406e-2
+    stable_hw_random_walk_noise_density:     1.000000e-2
+    unstable_hw_random_walk_noise_density:   7.071068e-2
+    stable_hi_random_walk_noise_density:     3.162278e-3
+    unstable_hi_random_walk_noise_density:   2.236068e-2
+    still_acc_measurement_noise:         4.472136e-3
+    still_gyr_measurement_noise:         1.000000e-0
+    still_orientation_measurement_noise: 1.414214e-6
+    still_yaw_measurement_noise:         6.677011e-6
+    mag_measurement_noise:               1.290994e-2
+    yaw_variance_limit_duration:  30.0
+    q_variance_limit_duration:    30.0
+    bg_x_variance_limit_duration: 30.0
+    bg_y_variance_limit_duration: 30.0
+    bg_z_variance_limit_duration: 30.0
+    ba_variance_limit_duration  : 30.0
+    push_forward_time: 0.0
+    atw_correction: 16.2
+    pose_filter_options:
+      filter_time: 0.0
+      orientation_propagation_noise_density:          0.000000e+0
+      angular_velocity_propagation_noise_density:     0.000000e+0
+      angular_acceleration_propagation_noise_density: 1.414214e+4
+      orientation_measurement_noise:                  1.000000e-2
+      angular_velocity_measurement_noise:             1.000000e-2
+    predicted_pose_filter_options:
+      orientation_propagation_noise_density:          0.000000e+0
+      angular_velocity_propagation_noise_density:     3.162278e-1
+      angular_acceleration_propagation_noise_density: 0.000000e+0
+      orientation_measurement_noise:                  3.162278e-4
+      angular_velocity_measurement_noise:             1.000000e-2
+  smooth_kalman_filter_options:
+    online_calibrate_gyr_bias: true
+    atw_correction: 7.2

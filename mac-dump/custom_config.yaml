@@ -1,0 +1,11 @@
+mapping_mode: false
+cloud_mapping: false
+server.address: 192.168.0.172:50072
+histogram_method: none
+save_data: false
+data_saved_path: /Users/viture/Downloads/dataset/data
+orb_database_path: ./database.bin
+pose_callback_frequency: 1000
+auto_exposure: false
+exposure_time: 5
+exposure_gain: 1
