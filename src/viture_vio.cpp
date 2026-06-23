@@ -158,9 +158,14 @@ static const char *CONFIG_YAML =
     "  gyroscope_random_walk: 0.00002\n"
     "  update_rate: 200.0\n"
     "cam0:\n"
-    /* T_imu_cam must be a FLAT 16-element sequence (VISLAM::getSequence<double> reads it
-     * flat then reshapes 4x4; nested rows make it try list->double -> throw). Identity. */
-    "  T_imu_cam: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
+    /* Cam<->IMU extrinsics. The KEY MUST BE `T_cam_imu` - NOT `T_imu_cam`. The binary
+     * prints "parameter T_cam_imu not found, trying T_imu_cam instead" but that fallback
+     * path leads to "Yaml cam0 T_cam_imu not ok" -> "Load Tbc fail!!" -> exit() (traced
+     * to CameraUndistort.cc:393). Using `T_cam_imu` directly is accepted and the engine
+     * reaches stage 1. FLAT 16-element sequence (getSequence<double> reads flat then
+     * reshapes 4x4; nested rows make it try list->double -> throw). Identity placeholder -
+     * replace with the real Beast cam->IMU mounting transform once calibrated. */
+    "  T_cam_imu: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
     /* Beast uses a FISHEYE world camera - must use equidistant model, not pinhole!
      * Pinhole fell through CameraUndistort's model switch to its default branch, which
      * prints an error + calls exit() (traced in libcarina_vio: the accepted cases are
