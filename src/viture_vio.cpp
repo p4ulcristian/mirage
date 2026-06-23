@@ -233,6 +233,18 @@ int main(int argc, char **argv){
     if(const char *cf=getenv("VIO_CONFIG_FILE")){ std::string s=slurp(cf);
         if(s.empty()){ fprintf(stderr,"viture-vio: VIO_CONFIG_FILE empty/missing\n"); return 1; }
         config=s; }
+    /* Loop-closure ORB database (the thing that kills LONG-TERM drift - pure VIO still
+     * walks slowly; the DBoW vocabulary in mac-dump/database.bin lets the engine recognise
+     * a previously-seen place and snap the pose back). Off by default (orb_database_path:
+     * "" = pure VIO). Set $VIO_ORB_DB=/path/to/database.bin to enable; we splice it into
+     * the config's empty orb_database_path. Verified: loads (44MB) and still reaches stage 1. */
+    if(const char *orb=getenv("VIO_ORB_DB")){
+        std::string from="orb_database_path: \"\"", to=std::string("orb_database_path: \"")+orb+"\"";
+        size_t pos=config.find(from);
+        if(pos!=std::string::npos){ config.replace(pos,from.size(),to);
+            fprintf(stderr,"viture-vio: loop-closure ON -> %s\n",orb); }
+        else fprintf(stderr,"viture-vio: VIO_ORB_DB set but no empty orb_database_path to splice\n");
+    }
     std::string fusion=""; if(const char *fe=getenv("VIO_FUSION")) fusion=fe;
     { FILE*f=fopen("/tmp/viture-vio-config.yaml","wb"); if(f){ fwrite(config.data(),1,config.size(),f); fclose(f);} }
 
