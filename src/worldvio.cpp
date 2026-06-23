@@ -70,6 +70,16 @@ struct State {
     float        oe_beta = 14.0f;   /* speed coupling: higher = snappier on a real sway */
     float        oe_dcut = 1.0f;    /* derivative low-pass cutoff (Hz) */
 
+    /* visual-inertial yaw/pitch DRIFT correction (VIO step 1). The rotation residual
+     * (observed flow minus IMU-predicted flow) is integrated SLOWLY into a world-frame
+     * yaw/pitch correction: transient lean/parallax is zero-mean and averages out; gyro
+     * drift is a DC residual that accumulates. Gated by MIRAGE_VISYAW. */
+    int    oc_on = 0;
+    float  oc_gain = 0.015f;     /* residual-rotation (rad) -> correction integrated per frame */
+    float  oc_clamp = 0.002f;    /* max correction step per frame (rad) - rejects transients */
+    float  oc_max = 0.6f;        /* total correction cap (rad, ~34deg) - sanity bound */
+    vec3   oricorr{0,0,0};       /* accumulated correction: x = pitch, y = yaw (rad) */
+
     /* proj backend (render thread) */
     bool   have_prev = false;
     float  col_prev[DSW], row_prev[DSH];
@@ -125,6 +135,11 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
     float dy_rot =  pitch_d * f;
     float rx = dx_obs - dx_rot, ry = dy_obs - dy_rot;
 
+    /* rotation residual (PRE-deadband) as a per-frame angle, for the visual yaw/pitch
+     * drift correction integrated below. f is focal in processing px, so residual/f = rad. */
+    float oc_dyaw   = -rx / f;   /* + = IMU under-reported yaw this frame */
+    float oc_dpitch =  ry / f;
+
     /* deadband: ignore sub-pixel residual (sensor/flow noise) so a still head doesn't
      * shimmer. Scales with the processing resolution. */
     float dead = W.deadband * (scale_w / (float)DSW);
@@ -171,6 +186,20 @@ static void integrate(float dx_obs, float dy_obs, quat head, double dt, float sc
         W.fpos.x += W.corr_gain * (W.pos_smooth.x - W.fpos.x);
         W.fpos.y += W.corr_gain * (W.pos_smooth.y - W.fpos.y);
         W.fpos.z = 0.0f;
+
+        /* VIO step 1: integrate the rotation residual SLOWLY into a world-frame yaw/pitch
+         * correction. Slow gain + per-frame clamp means zero-mean lean/parallax averages
+         * out while the gyro's DC drift accumulates and gets cancelled; scaled by camera
+         * confidence so a starved scene stops correcting (and the leak can't run away). */
+        if (W.oc_on){
+            float kc = W.oc_gain * conf;
+            float sy = kc * oc_dyaw, sp = kc * oc_dpitch;
+            if (sy >  W.oc_clamp) sy =  W.oc_clamp; else if (sy < -W.oc_clamp) sy = -W.oc_clamp;
+            if (sp >  W.oc_clamp) sp =  W.oc_clamp; else if (sp < -W.oc_clamp) sp = -W.oc_clamp;
+            W.oricorr.y += sy; W.oricorr.x += sp;
+            if (W.oricorr.y >  W.oc_max) W.oricorr.y =  W.oc_max; else if (W.oricorr.y < -W.oc_max) W.oricorr.y = -W.oc_max;
+            if (W.oricorr.x >  W.oc_max) W.oricorr.x =  W.oc_max; else if (W.oricorr.x < -W.oc_max) W.oricorr.x = -W.oc_max;
+        }
     }
     if (W.trace && mono() - W.trace_t > 0.2){ W.trace_t = mono();
         fprintf(stderr,"[worldvio/%s] obs(% 6.2f % 6.2f) rot(% 6.2f % 6.2f) res(% 6.2f % 6.2f)%s pos(% .3f % .3f) n%ld\n",
@@ -350,12 +379,16 @@ void worldvio_start(const worldvio_cfg *cfg){
     if (const char *e = getenv("MIRAGE_WORLDVIO_METHOD")) W.method = strcmp(e,"median")==0 ? 1 : 0;
     if (const char *e = getenv("MIRAGE_WORLDVIO_IMU"))   W.imu_on = atoi(e) != 0;       /* 0 = camera-only */
     if (const char *e = getenv("MIRAGE_WORLDVIO_IMUW"))  W.imu_weight = atof(e);        /* accel scale */
+    if (const char *e = getenv("MIRAGE_VISYAW"))         W.oc_on   = atoi(e) != 0;      /* visual yaw/pitch drift correction */
+    if (const char *e = getenv("MIRAGE_VISYAW_GAIN"))    W.oc_gain = atof(e);           /* correction integration rate */
+    if (const char *e = getenv("MIRAGE_VISYAW_CLAMP"))   W.oc_clamp= atof(e);           /* per-frame correction clamp (rad) */
     const char *bk = getenv("MIRAGE_WORLDVIO");
     W.backend = (bk && (!strcmp(bk,"cv")||!strcmp(bk,"opencv"))) ? BK_CV : BK_PROJ;
     W.trace = []{ const char *e = getenv("MIRAGE_WORLDVIO_TRACE"); return (e&&*e)?1:0; }();
     W.have_prev = false; W.n = 0; W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0};
     W.pos_prev = vec3{0,0,0}; W.oe_dx = W.oe_dy = 0.0f;
     W.fpos = vec3{0,0,0}; W.fvel = vec3{0,0,0}; W.last_accel_t = 0;
+    W.oricorr = vec3{0,0,0};
     W.head_prev = quat{1,0,0,0};
     W.on = true;
     if (W.backend == BK_CV){ W.worker_run = true; W.worker = std::thread(cv_worker); }
@@ -404,6 +437,12 @@ vec3 worldvio_eye_offset(void){
     if (W.imu_on && (mono() - W.last_accel_t) < 0.1) return W.fpos;
     return W.pos_smooth;
 }
+quat worldvio_ori_correction(void){
+    std::lock_guard<std::mutex> lk(W.pos_mtx);
+    if (!W.on || !W.oc_on) return quat{1,0,0,0};
+    /* world-frame yaw/pitch correction; roll left untouched (gravity handles it) */
+    return q_from_euler_ypr(W.oricorr.y, W.oricorr.x, 0.0f);
+}
 bool worldvio_active(void){ return W.on && W.n > 4; }
 float worldvio_confidence(void){ return W.on ? W.conf : 0.0f; }
 void worldvio_reset(void){
@@ -411,4 +450,5 @@ void worldvio_reset(void){
     W.have_prev = false; W.n = 0; W.want_reset = true;
     std::lock_guard<std::mutex> lk2(W.pos_mtx);
     W.pos = vec3{0,0,0}; W.pos_smooth = vec3{0,0,0}; W.fpos = vec3{0,0,0}; W.fvel = vec3{0,0,0};
+    W.oricorr = vec3{0,0,0};
 }

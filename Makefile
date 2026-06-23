@@ -68,13 +68,21 @@ OPENCV_CFLAGS := $(shell $(PKGCONF) --cflags opencv4)
 CXXFLAGS    += $(OPENCV_CFLAGS)
 MIRAGE_LIBS += -lopencv_core -lopencv_imgproc -lopencv_video -lopencv_calib3d
 
-.PHONY: all posedump protocols bridge viture viture-vio clean
+.PHONY: all posedump protocols bridge viture viture-vio camcal clean
 all: mirage mirage-posedump
 posedump: mirage-posedump
 bridge: rayneo-bridge
 viture: viture-bridge
 viture-vio: viture-vio-bin
+camcal: viture-camcal
 protocols: $(PROTO_HDR) $(PROTO_SRC)
+
+# Self-calibration of the world camera's intrinsics (the Beast won't share its factory
+# calibration). Reuses camera.cpp; needs OpenCV calib3d + turbojpeg. Headless.
+viture-camcal: src/tool_camcal.cpp src/camera.cpp src/camera.h
+	$(CXX) -O2 -g -std=gnu++23 -Wall -Wextra -Isrc $(OPENCV_CFLAGS) -o $@ \
+	    src/tool_camcal.cpp src/camera.cpp \
+	    -lturbojpeg -lopencv_core -lopencv_imgproc -lopencv_calib3d -pthread
 
 # VITURE Carina VIO (OpenVINS) bring-up harness. Links libcarina_vio.so directly
 # (the carina_vio_* exports are C-linkage but take libstdc++ types by ref, matching

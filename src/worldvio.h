@@ -51,6 +51,15 @@ void worldvio_feed_accel(vec3 a_world, double dt);
  * -z toward the scene. Transient lean/sway parallax (leaked, so it decays to rest). */
 vec3 worldvio_eye_offset(void);
 
+/* Visual yaw/pitch DRIFT correction (visual-inertial orientation fusion, VIO step 1):
+ * the camera sees the static world, so the optical flow NOT explained by the IMU's own
+ * rotation is, integrated over time, the IMU's accumulated heading error - a real lean
+ * averages to zero, but gyro drift is a consistent DC residual. We integrate that slowly
+ * into a small WORLD-frame yaw/pitch correction render pre-multiplies onto the head
+ * orientation: vision levels yaw exactly as the accelerometer levels pitch/roll, so the
+ * anchor stops walking. Identity until active / when disabled (MIRAGE_VISYAW=1). */
+quat worldvio_ori_correction(void);
+
 /* True once it has processed enough frames to give a usable estimate. */
 bool worldvio_active(void);
 

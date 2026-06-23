@@ -1645,6 +1645,12 @@ void render_frame(struct mirage *m, quat head) {
         head = presented;
     }
 
+    /* VIO step 1: apply the camera's visual yaw/pitch DRIFT correction (world-frame
+     * pre-multiply). worldvio measured it against the RAW pose fed in draw_passthrough
+     * (open loop), so this cancels the gyro's accumulated heading walk and the anchor
+     * holds against the real world. Identity unless MIRAGE_VISYAW is on. */
+    head = q_mul(worldvio_ori_correction(), head);
+
     /* Publish the look direction for shake-to-gaze: this is the exact camera
      * orientation we render through (comfort gains + deadband baked
      * in), so grab.c can map "where the eye points" back to a screen + pixel.

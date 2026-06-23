@@ -535,7 +535,12 @@ int main(int argc,char**argv){
              *  (1) the Beast's NATIVE on-glasses 3DOF pose (on by default) - disable it
              *      via set_dof(...,OFF), exactly like the normal bridge does; and
              *  (2) raw IMU, via close_imu. Then drain the pipe before reading. */
-            { int dm0=0x36,nd0=0; if(xr_get_dof) xr_get_dof(p,&dm0,&nd0); if(dm0<0) dm0=0x36;
+            { int dm0=0x36,nd0=0; if(xr_get_dof) xr_get_dof(p,&dm0,&nd0);
+              /* set_dof only accepts display modes {0x32,0x36,0x51}; the live mode is often
+               * 0x31 (invalid) -> set_dof returns -4 -> native 3DOF stream stays ON -> it
+               * interleaves into the calibration long-packet and the read fails (-3). Force a
+               * VALID mode so the disable actually lands and the pipe goes quiet. */
+              if(dm0!=0x32 && dm0!=0x36 && dm0!=0x51) dm0=0x36;
               int sr=xr_set_dof(p,dm0,NATIVE_DOF_OFF);
               fprintf(stderr,"viture-bridge: set_dof(0x%x,OFF) -> %d (disabling native 3DOF stream)\n",dm0,sr); }
             if(close_imu_fn){ int cr=close_imu_fn(p);
