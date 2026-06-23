@@ -76,6 +76,7 @@ static double now_sec(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t
 static int g_verbose = 0;
 static long g_imu_n = 0, g_img_n = 0;
 static double g_first_imu = 0;
+static volatile double g_last_imu_t = 0;   /* most recent IMU sample time (image clock anchor) */
 
 /* IMU callback (libglasses thread): convert the Beast raw sample to Carina's expected
  * [ax,ay,az,gx,gy,gz] (accel m/s^2, gyro rad/s) and feed it. Beast raw layout: gyro xyz
@@ -89,6 +90,7 @@ static void on_raw(float *d, uint64_t ts, uint64_t vsync){
     double t = now_sec();
     if (!g_first_imu) g_first_imu = t;
     carina_vio_feed_imu(imu, t);
+    g_last_imu_t = t;          /* images are timestamped against THIS so they never run ahead of the IMU buffer */
     g_imu_n++;
 }
 
@@ -303,7 +305,14 @@ int main(int argc, char **argv){
             /* RGB888 -> GRAY8 (luma); 77+150+29=256 */
             for(int i=0;i<n;i++){ const uint8_t*px=rgb+3*i;
                 gray[i]=(uint8_t)((px[0]*77+px[1]*150+px[2]*29)>>8); }
-            carina_vio_feed_images2((const char*)gray.data(), nullptr, now_sec());
+            /* Timestamp the frame against the latest IMU sample, NOT a fresh now_sec(): a
+             * fresh now() runs a few ms ahead of the most recent IMU, so the engine's
+             * getPoseByTimestamp_3dof(image_t) falls off the end of the IMU buffer every
+             * frame ("failed due to index") and VIO never initialises. Anchoring to the
+             * last IMU time guarantees image_t <= newest IMU time. (Doesn't model true
+             * camera exposure latency yet - a fixed offset can refine tracking later.) */
+            double img_t = g_last_imu_t > 0 ? g_last_imu_t : now_sec();
+            carina_vio_feed_images2((const char*)gray.data(), nullptr, img_t);
             g_img_n++;
         }
         int stage=carina_vio_get_system_stage();
